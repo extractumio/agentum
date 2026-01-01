@@ -16,7 +16,6 @@ Usage:
     tracer.on_error(error_message)
     tracer.on_agent_complete(result_message)
 """
-import asyncio
 import sys
 import threading
 import time
@@ -24,7 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 
 class Color(StrEnum):
@@ -253,6 +252,27 @@ class TracerBase(ABC):
         pass
 
     @abstractmethod
+    def on_output_display(
+        self,
+        output: Optional[str] = None,
+        error: Optional[str] = None,
+        comments: Optional[str] = None,
+        result_files: Optional[list[str]] = None,
+        status: Optional[str] = None
+    ) -> None:
+        """
+        Called after output.yaml is parsed to display the structured result.
+        
+        Args:
+            output: The output text from output.yaml.
+            error: Error message if any.
+            comments: Additional comments.
+            result_files: List of result file paths.
+            status: The status from output.yaml.
+        """
+        pass
+
+    @abstractmethod
     def on_profile_switch(
         self,
         profile_type: str,
@@ -273,6 +293,65 @@ class TracerBase(ABC):
             deny_rules_count: Number of deny rules in the profile.
             profile_path: Path to the loaded profile file.
         """
+        pass
+
+    # ═══════════════════════════════════════════════════════════════
+    # Hooks-aware tracing methods (new for ConversationSession)
+    # ═══════════════════════════════════════════════════════════════
+
+    @abstractmethod
+    def on_hook_triggered(
+        self,
+        hook_event: str,
+        tool_name: Optional[str] = None,
+        decision: Optional[str] = None,
+        message: Optional[str] = None
+    ) -> None:
+        """
+        Called when a hook is triggered.
+        
+        Args:
+            hook_event: Hook event name (PreToolUse, PostToolUse, etc.).
+            tool_name: The tool involved, if any.
+            decision: Hook decision (allow, deny, block, etc.).
+            message: Optional message from the hook.
+        """
+        pass
+
+    @abstractmethod
+    def on_conversation_turn(
+        self,
+        turn_number: int,
+        prompt_preview: str,
+        response_preview: str,
+        duration_ms: int,
+        tools_used: list[str]
+    ) -> None:
+        """
+        Called when a conversation turn completes (multi-turn sessions).
+        
+        Args:
+            turn_number: The turn number in the conversation.
+            prompt_preview: Preview of the user prompt.
+            response_preview: Preview of the assistant response.
+            duration_ms: Duration of the turn in milliseconds.
+            tools_used: List of tools used in this turn.
+        """
+        pass
+
+    @abstractmethod
+    def on_session_connect(self, session_id: Optional[str] = None) -> None:
+        """Called when a conversation session connects."""
+        pass
+
+    @abstractmethod
+    def on_session_disconnect(
+        self,
+        session_id: Optional[str] = None,
+        total_turns: int = 0,
+        total_duration_ms: int = 0
+    ) -> None:
+        """Called when a conversation session disconnects."""
         pass
 
 
@@ -437,7 +516,7 @@ class ExecutionTracer(TracerBase):
             (0x231A, 0x231B),    # Watch, Hourglass
             (0x23E9, 0x23F3),    # Various symbols
             (0x23F8, 0x23FA),    # Various symbols
-            (0x25AA, 0x25AB),    # Squares
+            # Note: 0x25AA-0x25AB (▪▫) are single-width geometric shapes
             (0x25B6, 0x25B6),    # Play button
             (0x25C0, 0x25C0),    # Reverse button
             (0x25FB, 0x25FE),    # Squares
@@ -1309,11 +1388,9 @@ class ExecutionTracer(TracerBase):
         if is_error:
             status_icon = self._symbol(Symbol.CROSS, "X")
             status_text = "FAILED"
-            status_color = Color.BRIGHT_RED
         else:
             status_icon = self._symbol(Symbol.CHECK, "V")
             status_text = "OK"
-            status_color = Color.BRIGHT_GREEN
         
         self._stop_spinner(
             f"{tool_name} {status_icon} {status_text} "
@@ -1435,7 +1512,6 @@ class ExecutionTracer(TracerBase):
             header_text = "FAILED"
         
         width = self._console_width - 2  # Use full console width with small margin
-        inner_width = width - 2
         
         # Build content lines
         content_lines: list[str] = []
@@ -1506,79 +1582,6 @@ class ExecutionTracer(TracerBase):
         if session_id:
             content_lines.append(f" Session: {session_id}")
         
-        # Parse and display result output
-        if result:
-            # Try to parse as YAML first, then JSON
-            parsed = None
-            try:
-                import yaml
-                parsed = yaml.safe_load(result)
-            except Exception:
-                try:
-                    import json
-                    parsed = json.loads(result)
-                except Exception:
-                    pass
-            
-            if isinstance(parsed, dict):
-                content_lines.append("")  # Empty line separator
-                
-                # Show error if present
-                if parsed.get("error"):
-                    error_text = str(parsed.get("error"))
-                    content_lines.append(f" Error: {error_text[:inner_width - 10]}")
-                
-                # Show comments if present
-                if parsed.get("comments"):
-                    comments_text = str(parsed.get("comments"))
-                    content_lines.append(f" Comments: {comments_text[:inner_width - 13]}")
-                
-                # Show output text
-                output_text = parsed.get("output") or parsed.get("result")
-                if output_text:
-                    raw_lines = str(output_text).strip().split("\n")
-                    output_lines: list[str] = []
-                    for raw_line in raw_lines:
-                        raw_line = raw_line.strip()
-                        if not raw_line:
-                            output_lines.append("")
-                        elif len(raw_line) <= inner_width - 3:
-                            output_lines.append(raw_line)
-                        else:
-                            output_lines.extend(
-                                self._wrap_text(raw_line, inner_width - 3)
-                            )
-                    
-                    max_lines = 8
-                    for i, line in enumerate(output_lines[:max_lines]):
-                        prefix = " > " if i == 0 else "   "
-                        content_lines.append(prefix + line)
-                    
-                    if len(output_lines) > max_lines:
-                        content_lines.append(
-                            f"   ... +{len(output_lines) - max_lines} more lines"
-                        )
-                
-                # Show result_files if present
-                result_files = parsed.get("result_files", [])
-                if result_files and isinstance(result_files, list):
-                    content_lines.append("")
-                    content_lines.append(" Files:")
-                    max_files = 5
-                    for i, filepath in enumerate(result_files[:max_files]):
-                        content_lines.append(f"   - {filepath}")
-                    if len(result_files) > max_files:
-                        content_lines.append(
-                            f"   ... +{len(result_files) - max_files} more files"
-                        )
-            elif result:
-                # Fallback: display raw result
-                content_lines.append("")
-                output_lines = str(result).strip().split("\n")[:5]
-                for i, line in enumerate(output_lines):
-                    prefix = " > " if i == 0 else "   "
-                    content_lines.append(prefix + line[:inner_width - 3])
-        
         # Use _print_box for the completion summary - entire box in status color
         title = f"{status_icon} {header_text}"
         self._print_box(
@@ -1591,6 +1594,107 @@ class ExecutionTracer(TracerBase):
             center_title=True
         )
         self._write("")
+    
+    def on_output_display(
+        self,
+        output: Optional[str] = None,
+        error: Optional[str] = None,
+        comments: Optional[str] = None,
+        result_files: Optional[list[str]] = None,
+        status: Optional[str] = None
+    ) -> None:
+        """Display the parsed output.yaml content in a styled box."""
+        width = self._console_width - 2
+        inner_width = width - 4  # Account for box borders and padding
+        
+        content_lines: list[str] = []
+        
+        # Show error if present
+        if error and error.strip():
+            error_text = str(error).strip()
+            content_lines.append(
+                f" {self._symbol(Symbol.CROSS, 'X')} Error: {error_text[:inner_width - 10]}"
+            )
+        
+        # Show comments if present
+        if comments and comments.strip():
+            comments_text = str(comments).strip()
+            content_lines.append(f" Comments: {comments_text[:inner_width - 12]}")
+        
+        # Show output text (up to 10 lines)
+        if output and output.strip():
+            if content_lines:
+                content_lines.append("")  # Empty line separator
+            
+            raw_lines = str(output).strip().split("\n")
+            output_lines: list[str] = []
+            
+            for raw_line in raw_lines:
+                raw_line = raw_line.rstrip()
+                if not raw_line:
+                    output_lines.append("")
+                elif len(raw_line) <= inner_width - 3:
+                    output_lines.append(raw_line)
+                else:
+                    # Truncate long lines
+                    output_lines.append(raw_line[:inner_width - 6] + "...")
+            
+            max_lines = 10
+            for i, line in enumerate(output_lines[:max_lines]):
+                prefix = " > " if i == 0 else "   "
+                content_lines.append(prefix + line)
+            
+            if len(output_lines) > max_lines:
+                content_lines.append(
+                    f"   ... +{len(output_lines) - max_lines} more lines"
+                )
+        
+        # Show result_files if present
+        if result_files and isinstance(result_files, list) and len(result_files) > 0:
+            if content_lines:
+                content_lines.append("")  # Empty line separator
+            content_lines.append(
+                f" {self._symbol(Symbol.FOLDER, '📁')} Result Files:"
+            )
+            max_files = 8
+            for filepath in result_files[:max_files]:
+                # Truncate long paths
+                display_path = str(filepath)
+                if len(display_path) > inner_width - 6:
+                    display_path = "..." + display_path[-(inner_width - 9):]
+                content_lines.append(f"   - {display_path}")
+            if len(result_files) > max_files:
+                content_lines.append(
+                    f"   ... +{len(result_files) - max_files} more files"
+                )
+        
+        # Only display if we have content
+        if content_lines:
+            # Determine box color based on status
+            if status:
+                status_upper = status.upper()
+                if status_upper in ("COMPLETE", "OK", "COMPLETED", "SUCCESS"):
+                    border_color = Color.BRIGHT_GREEN
+                    title = f"{self._symbol(Symbol.FILE, '📄')} Output"
+                elif status_upper == "PARTIAL":
+                    border_color = Color.BRIGHT_YELLOW
+                    title = f"{self._symbol(Symbol.WARN, '!')} Partial Output"
+                else:
+                    border_color = Color.BRIGHT_RED
+                    title = f"{self._symbol(Symbol.CROSS, 'X')} Output"
+            else:
+                border_color = Color.CYAN
+                title = f"{self._symbol(Symbol.FILE, '📄')} Output"
+            
+            self._print_box(
+                lines=content_lines,
+                title=title,
+                color=Color.WHITE,
+                title_color=border_color,
+                border_color=border_color,
+                width=width,
+                center_title=False
+            )
     
     # ═══════════════════════════════════════════════════════════════
     # Additional Utility Methods
@@ -1782,6 +1886,128 @@ class ExecutionTracer(TracerBase):
             f"{self._color(message, color)}"
         )
 
+    # ═══════════════════════════════════════════════════════════════
+    # Hooks-aware tracing implementations
+    # ═══════════════════════════════════════════════════════════════
+
+    def on_hook_triggered(
+        self,
+        hook_event: str,
+        tool_name: Optional[str] = None,
+        decision: Optional[str] = None,
+        message: Optional[str] = None
+    ) -> None:
+        """Display hook trigger notification."""
+        if not self.verbose:
+            return
+        
+        bar = self._symbol(Symbol.BOX_V, "|")
+        
+        # Color based on decision
+        if decision == "allow":
+            color = Color.GREEN
+            icon = self._symbol(Symbol.CHECK, "v")
+        elif decision == "deny" or decision == "block":
+            color = Color.RED
+            icon = self._symbol(Symbol.CROSS, "x")
+        else:
+            color = Color.CYAN
+            icon = self._symbol(Symbol.GEAR, "*")
+        
+        parts = [hook_event]
+        if tool_name:
+            parts.append(f"[{tool_name}]")
+        if decision:
+            parts.append(f"-> {decision}")
+        
+        hook_text = " ".join(parts)
+        
+        self._write(
+            f"    {self._color(bar, Color.DIM)} "
+            f"{self._color(icon, color)} "
+            f"{self._color('Hook:', Color.DIM)} "
+            f"{self._color(hook_text, color)}"
+        )
+        
+        if message:
+            self._write(
+                f"    {self._color(bar, Color.DIM)}   "
+                f"{self._color(message[:60], Color.DIM)}"
+            )
+
+    def on_conversation_turn(
+        self,
+        turn_number: int,
+        prompt_preview: str,
+        response_preview: str,
+        duration_ms: int,
+        tools_used: list[str]
+    ) -> None:
+        """Display conversation turn summary."""
+        bar = self._symbol(Symbol.BOX_V, "|")
+        arrow = self._symbol(Symbol.ARROW_RIGHT, "->")
+        
+        duration_str = self._format_duration(duration_ms)
+        tools_str = f" [{', '.join(tools_used)}]" if tools_used else ""
+        
+        self._write("")
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(f'Turn {turn_number}', Color.BRIGHT_CYAN, Color.BOLD)} "
+            f"{self._color(f'({duration_str})', Color.DIM)}"
+            f"{self._color(tools_str, Color.DIM)}"
+        )
+        
+        # Prompt preview
+        prompt_truncated = self._truncate(prompt_preview, 50)
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color('You:', Color.WHITE)} "
+            f"{self._color(prompt_truncated, Color.DIM)}"
+        )
+        
+        # Response preview
+        response_truncated = self._truncate(response_preview, 50)
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(f'{arrow}', Color.GREEN)} "
+            f"{self._color(response_truncated, Color.WHITE)}"
+        )
+
+    def on_session_connect(self, session_id: Optional[str] = None) -> None:
+        """Display session connect notification."""
+        bar = self._symbol(Symbol.BOX_V, "|")
+        icon = self._symbol(Symbol.LIGHTNING, "*")
+        
+        session_str = session_id or "connecting..."
+        
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(icon, Color.BRIGHT_GREEN)} "
+            f"{self._color('Session connected:', Color.DIM)} "
+            f"{self._color(session_str, Color.BRIGHT_GREEN)}"
+        )
+
+    def on_session_disconnect(
+        self,
+        session_id: Optional[str] = None,
+        total_turns: int = 0,
+        total_duration_ms: int = 0
+    ) -> None:
+        """Display session disconnect summary."""
+        bar = self._symbol(Symbol.BOX_V, "|")
+        icon = self._symbol(Symbol.CHECK, "v")
+        
+        duration_str = self._format_duration(total_duration_ms)
+        
+        self._write("")
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(icon, Color.BRIGHT_CYAN)} "
+            f"{self._color('Session ended:', Color.DIM)} "
+            f"{self._color(f'{total_turns} turns, {duration_str}', Color.WHITE)}"
+        )
+
 
 class QuietTracer(TracerBase):
     """
@@ -1868,6 +2094,23 @@ class QuietTracer(TracerBase):
             cumul_tokens = f", {cumulative_tokens:,} tokens" if cumulative_tokens else ""
             print(f"[SESSION TOTAL] {cumulative_turns} turns{cumul_cost}{cumul_tokens}")
 
+    def on_output_display(
+        self,
+        output: Optional[str] = None,
+        error: Optional[str] = None,
+        comments: Optional[str] = None,
+        result_files: Optional[list[str]] = None,
+        status: Optional[str] = None
+    ) -> None:
+        """Display output summary in quiet mode."""
+        if error and error.strip():
+            print(f"[ERROR] {error.strip()[:100]}")
+        if output and output.strip():
+            first_line = output.strip().split("\n")[0][:80]
+            print(f"[OUTPUT] {first_line}")
+        if result_files:
+            print(f"[FILES] {len(result_files)} file(s): {', '.join(result_files[:3])}")
+
     def on_profile_switch(
         self,
         profile_type: str,
@@ -1880,6 +2123,46 @@ class QuietTracer(TracerBase):
         """Report profile switch."""
         path_str = f" from {profile_path}" if profile_path else ""
         print(f"[PROFILE] {profile_type.upper()}: {profile_name} ({len(tools)} tools){path_str}")
+
+    def on_hook_triggered(
+        self,
+        hook_event: str,
+        tool_name: Optional[str] = None,
+        decision: Optional[str] = None,
+        message: Optional[str] = None
+    ) -> None:
+        """Report hook trigger."""
+        if decision in ("deny", "block"):
+            parts = [f"[HOOK] {hook_event}"]
+            if tool_name:
+                parts.append(tool_name)
+            if decision:
+                parts.append(f"-> {decision}")
+            print(" ".join(parts))
+
+    def on_conversation_turn(
+        self,
+        turn_number: int,
+        prompt_preview: str,
+        response_preview: str,
+        duration_ms: int,
+        tools_used: list[str]
+    ) -> None:
+        """Report turn summary."""
+        pass  # Quiet mode doesn't show turn details
+
+    def on_session_connect(self, session_id: Optional[str] = None) -> None:
+        """Report session connect."""
+        pass
+
+    def on_session_disconnect(
+        self,
+        session_id: Optional[str] = None,
+        total_turns: int = 0,
+        total_duration_ms: int = 0
+    ) -> None:
+        """Report session disconnect."""
+        print(f"[SESSION] Ended: {total_turns} turns, {total_duration_ms}ms")
 
 
 class NullTracer(TracerBase):
@@ -1943,6 +2226,16 @@ class NullTracer(TracerBase):
     ) -> None:
         pass
 
+    def on_output_display(
+        self,
+        output: Optional[str] = None,
+        error: Optional[str] = None,
+        comments: Optional[str] = None,
+        result_files: Optional[list[str]] = None,
+        status: Optional[str] = None
+    ) -> None:
+        pass
+
     def on_profile_switch(
         self,
         profile_type: str,
@@ -1951,5 +2244,35 @@ class NullTracer(TracerBase):
         allow_rules_count: int = 0,
         deny_rules_count: int = 0,
         profile_path: Optional[str] = None
+    ) -> None:
+        pass
+
+    def on_hook_triggered(
+        self,
+        hook_event: str,
+        tool_name: Optional[str] = None,
+        decision: Optional[str] = None,
+        message: Optional[str] = None
+    ) -> None:
+        pass
+
+    def on_conversation_turn(
+        self,
+        turn_number: int,
+        prompt_preview: str,
+        response_preview: str,
+        duration_ms: int,
+        tools_used: list[str]
+    ) -> None:
+        pass
+
+    def on_session_connect(self, session_id: Optional[str] = None) -> None:
+        pass
+
+    def on_session_disconnect(
+        self,
+        session_id: Optional[str] = None,
+        total_turns: int = 0,
+        total_duration_ms: int = 0
     ) -> None:
         pass

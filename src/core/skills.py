@@ -27,7 +27,7 @@ from typing import Optional
 import yaml
 
 # Import paths from central config
-from config import AGENT_DIR, SKILLS_DIR
+from config import SKILLS_DIR
 from exceptions import SkillError
 
 logger = logging.getLogger(__name__)
@@ -358,9 +358,9 @@ class SkillManager:
                 f"**Script**: `{skill.script_file}`",
                 "",
                 "To execute this skill's script, run:",
-                f"```bash",
+                "```bash",
                 f"python {skill.script_file}",
-                f"```",
+                "```",
             ])
         
         return "\n".join(sections)
@@ -510,6 +510,137 @@ class SkillManager:
         return f"./skills/{skill_name}/{skill.script_file.name}"
 
 
+class SkillType:
+    """Enumeration of skill types for hybrid integration."""
+    INSTRUCTION_ONLY = "instruction_only"  # Markdown instructions, no script
+    SCRIPT_BASED = "script_based"  # Has associated script for MCP tool
+
+
+class SkillIntegration:
+    """
+    Represents how a skill should be integrated with the agent.
+    
+    Provides type detection and appropriate integration path:
+    - INSTRUCTION_ONLY: Inject into system prompt
+    - SCRIPT_BASED: Create MCP tool via @tool decorator
+    """
+    
+    def __init__(self, skill: Skill):
+        """
+        Initialize skill integration.
+        
+        Args:
+            skill: The skill to analyze.
+        """
+        self.skill = skill
+        self.skill_type = self._detect_type()
+    
+    def _detect_type(self) -> str:
+        """
+        Detect the skill type based on its contents.
+        
+        Returns:
+            SkillType constant indicating how to integrate.
+        """
+        if self.skill.script_file and self.skill.script_file.exists():
+            return SkillType.SCRIPT_BASED
+        return SkillType.INSTRUCTION_ONLY
+    
+    @property
+    def is_script_based(self) -> bool:
+        """Check if skill has an associated script."""
+        return self.skill_type == SkillType.SCRIPT_BASED
+    
+    @property
+    def is_instruction_only(self) -> bool:
+        """Check if skill is instruction-only (no script)."""
+        return self.skill_type == SkillType.INSTRUCTION_ONLY
+    
+    def get_prompt_content(self) -> str:
+        """
+        Get content for prompt injection (instruction-only skills).
+        
+        Returns:
+            Skill body content for system prompt.
+        """
+        return self.skill.body
+    
+    def get_mcp_tool_name(self) -> str:
+        """
+        Get the MCP tool name for this skill (script-based skills).
+        
+        Returns:
+            MCP tool name in format "skill_<name>".
+        """
+        safe_name = self.skill.name.replace("-", "_").replace(".", "_").lower()
+        return f"skill_{safe_name}"
+
+
+def categorize_skills(
+    skills_dir: Optional[Path] = None
+) -> tuple[list[Skill], list[Skill]]:
+    """
+    Categorize skills by type for hybrid integration.
+    
+    Args:
+        skills_dir: Directory containing skills.
+    
+    Returns:
+        Tuple of (instruction_only_skills, script_based_skills).
+    """
+    manager = SkillManager(skills_dir)
+    all_skills = manager.load_all_skills()
+    
+    instruction_only: list[Skill] = []
+    script_based: list[Skill] = []
+    
+    for skill in all_skills.values():
+        integration = SkillIntegration(skill)
+        if integration.is_script_based:
+            script_based.append(skill)
+        else:
+            instruction_only.append(skill)
+    
+    return instruction_only, script_based
+
+
+def get_instruction_skills_prompt(skills_dir: Optional[Path] = None) -> str:
+    """
+    Get prompt content for instruction-only skills.
+    
+    These skills are injected into the system prompt as they
+    don't have scripts that can be exposed as MCP tools.
+    
+    Args:
+        skills_dir: Directory containing skills.
+    
+    Returns:
+        Formatted prompt content for instruction-only skills.
+    """
+    instruction_skills, _ = categorize_skills(skills_dir)
+    
+    if not instruction_skills:
+        return ""
+    
+    sections = [
+        "# Instruction Skills",
+        "",
+        "The following skills provide instructions for specific tasks:",
+        "",
+    ]
+    
+    for skill in sorted(instruction_skills, key=lambda s: s.name):
+        integration = SkillIntegration(skill)
+        sections.append(f"## {skill.name}")
+        if skill.description:
+            sections.append(f"*{skill.description}*")
+        sections.append("")
+        sections.append(integration.get_prompt_content())
+        sections.append("")
+    
+    return "\n".join(sections)
+
+
 def load_skill(skill_name: str, skills_dir: Optional[Path] = None) -> Skill:
     """
     Convenience function to load a skill.
@@ -545,4 +676,3 @@ def run_skill(
     """
     manager = SkillManager(skills_dir)
     return manager.run_skill_script(skill_name, args, cwd)
-

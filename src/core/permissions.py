@@ -106,9 +106,10 @@ class PermissionDenialTracker:
         for d in self.denials:
             details.append(f"- {d.tool_name}: {d.tool_call}")
 
+        details_str = "\n".join(details)
         output = (
             f"Agent execution was interrupted due to permission denial. "
-            f"Denied operations:\n" + "\n".join(details)
+            f"Denied operations:\n{details_str}"
         )
 
         return {
@@ -356,13 +357,16 @@ def create_permission_callback(
     permission_manager: Any,
     on_permission_check: Optional[Any] = None,
     denial_tracker: Optional[PermissionDenialTracker] = None,
-    trace_processor: Optional[Any] = None
+    trace_processor: Optional[Any] = None,
+    max_denials_before_interrupt: int = 3
 ):
     """
     Create a permission callback that enforces permission rules.
 
-    This is a CORE security feature that stops the agent immediately
-    when a tool is denied, preventing token waste on repeated failures.
+    This is a CORE security feature that:
+    1. Provides actionable guidance on denial (what IS allowed)
+    2. Uses smart interrupt logic: stops only after repeated failures
+    3. Immediately interrupts on security violations
 
     Args:
         permission_manager: Permission manager instance (PermissionManager or
@@ -370,20 +374,21 @@ def create_permission_callback(
         on_permission_check: Optional callback for tracing permission decisions.
                             Called with (tool_name: str, decision: str).
         denial_tracker: Optional tracker to record denials for output generation.
-                       If provided, denials are recorded so output.yaml can be
-                       written with proper error details when agent is interrupted.
         trace_processor: Optional trace processor to mark as permission denied.
-                        This ensures the final status shows FAILED, not COMPLETE.
+        max_denials_before_interrupt: Number of denials before interrupting.
+                                      Default is 3 to allow Claude to learn.
 
     Returns:
         Async permission callback for ClaudeAgentOptions.can_use_tool.
     """
-    # Import SDK types inside function to avoid circular imports
     from claude_agent_sdk import (
         PermissionResultAllow,
         PermissionResultDeny,
         ToolPermissionContext,
     )
+
+    # Track denial counts per tool to enable smart interrupt
+    denial_counts: dict[str, int] = {}
 
     def build_tool_call_string(tool_name: str, tool_input: dict[str, Any]) -> str:
         """
@@ -394,7 +399,6 @@ def create_permission_callback(
             Write(./output.yaml)
             Bash(ls -la)
         """
-        # Extract the relevant path or command for the tool
         if tool_name == "Read":
             path = tool_input.get("file_path", tool_input.get("path", ""))
             return f"Read({path})"
@@ -426,20 +430,54 @@ def create_permission_callback(
             path = tool_input.get("path", tool_input.get("dir", ""))
             return f"LS({path})"
         else:
-            # For other tools, just use the tool name
             return tool_name
 
-    def build_denial_message(tool_name: str) -> str:
+    def build_actionable_denial_message(
+        tool_name: str,
+        attempted_input: dict[str, Any],
+        is_final_denial: bool
+    ) -> str:
         """
-        Build a denial message for any tool type.
+        Build an actionable denial message that tells Claude what IS allowed.
 
-        SECURITY: Does not disclose allowed patterns or internal configuration.
-        Just reports that the operation is not permitted.
+        Instead of just saying "denied", provides concrete guidance on
+        what patterns the agent CAN use for this tool.
+
+        Args:
+            tool_name: The tool that was denied.
+            attempted_input: The input that was attempted.
+            is_final_denial: If True, this is the last chance before interrupt.
+
+        Returns:
+            Actionable message with allowed patterns.
         """
-        return (
-            f"{tool_name} operation not permitted. "
-            f"Agent run cancelled due to security restrictions."
-        )
+        # Get allowed patterns for this tool from the permission manager
+        allowed_patterns: list[str] = []
+        if hasattr(permission_manager, 'get_allowed_patterns_for_tool'):
+            allowed_patterns = permission_manager.get_allowed_patterns_for_tool(tool_name)
+
+        # Build the base denial message
+        if tool_name == "Bash":
+            command = attempted_input.get("command", "")
+            base_msg = f"Bash command '{command[:50]}...' is not permitted."
+        else:
+            path = attempted_input.get("file_path", attempted_input.get("path", ""))
+            base_msg = f"{tool_name} for '{path[:50]}' is not permitted."
+
+        # Add guidance about what IS allowed
+        if allowed_patterns:
+            patterns_str = ", ".join(f"'{p}'" for p in allowed_patterns[:5])
+            guidance = f" Allowed patterns for {tool_name}: {patterns_str}."
+        else:
+            guidance = f" No {tool_name} operations are allowed in this security context."
+
+        # Add interrupt warning if this is final denial
+        if is_final_denial:
+            warning = " FINAL WARNING: Agent will be stopped if this tool is denied again."
+        else:
+            warning = ""
+
+        return base_msg + guidance + warning
 
     async def can_use_tool(
         tool_name: str,
@@ -447,23 +485,23 @@ def create_permission_callback(
         context: ToolPermissionContext
     ) -> PermissionResultAllow | PermissionResultDeny:
         """
-        Permission callback with rule enforcement.
+        Permission callback with rule enforcement and actionable guidance.
 
-        CRITICAL: Returns interrupt=True on denial to stop the agent
-        immediately and prevent token waste on repeated failures.
+        Uses smart interrupt logic:
+        - Security violations: immediate interrupt
+        - Regular denials: allow learning, interrupt after max_denials_before_interrupt
         """
         logger.info(f"PERMISSION CHECK: {tool_name} with input: {tool_input}")
 
-        # SECURITY: Always deny attempts to bypass sandbox
+        # SECURITY: Always deny attempts to bypass sandbox - immediate interrupt
         if tool_input.get("dangerouslyDisableSandbox"):
-            security_msg = "Security violation. Agent run cancelled."
+            security_msg = "Security violation: sandbox bypass attempted. Agent stopped."
             logger.warning(
                 f"SECURITY: Model attempted to use dangerouslyDisableSandbox! "
                 f"Tool: {tool_name}, Input: {tool_input}"
             )
             if on_permission_check:
                 on_permission_check(tool_name, "deny")
-            # Record denial for output generation
             if denial_tracker:
                 denial_tracker.record_denial(
                     tool_name=tool_name,
@@ -471,7 +509,6 @@ def create_permission_callback(
                     message=security_msg,
                     is_security_violation=True,
                 )
-            # Mark trace processor as permission denied for correct status display
             if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
                 trace_processor.set_permission_denied(True)
             return PermissionResultDeny(
@@ -492,27 +529,94 @@ def create_permission_callback(
 
         if allowed:
             return PermissionResultAllow(behavior="allow")
-        else:
-            denial_msg = build_denial_message(tool_name)
-            # Record denial for output generation
-            if denial_tracker:
-                denial_tracker.record_denial(
-                    tool_name=tool_name,
-                    tool_call=tool_call,
-                    message=denial_msg,
-                    is_security_violation=False,
-                )
-            # Mark trace processor as permission denied for correct status display
-            if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
-                trace_processor.set_permission_denied(True)
-            # interrupt=True stops the agent loop immediately
-            return PermissionResultDeny(
-                behavior="deny",
+
+        # Denied - track denial count for smart interrupt
+        denial_counts[tool_name] = denial_counts.get(tool_name, 0) + 1
+        current_count = denial_counts[tool_name]
+        total_denials = sum(denial_counts.values())
+
+        # Determine if we should interrupt
+        should_interrupt = (
+            current_count >= max_denials_before_interrupt or
+            total_denials >= max_denials_before_interrupt * 2
+        )
+        is_penultimate = current_count == max_denials_before_interrupt - 1
+
+        # Build actionable denial message
+        denial_msg = build_actionable_denial_message(
+            tool_name=tool_name,
+            attempted_input=tool_input,
+            is_final_denial=is_penultimate
+        )
+
+        logger.info(
+            f"PERMISSION DENIAL: {tool_name} denied "
+            f"(count={current_count}/{max_denials_before_interrupt}, "
+            f"interrupt={should_interrupt})"
+        )
+
+        # Record denial for output generation
+        if denial_tracker:
+            denial_tracker.record_denial(
+                tool_name=tool_name,
+                tool_call=tool_call,
                 message=denial_msg,
-                interrupt=True
+                is_security_violation=False,
             )
 
+        # Mark trace processor if we're interrupting
+        if should_interrupt:
+            if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
+                trace_processor.set_permission_denied(True)
+
+        return PermissionResultDeny(
+            behavior="deny",
+            message=denial_msg,
+            interrupt=should_interrupt
+        )
+
     return can_use_tool
+
+
+def create_permission_hooks(
+    permission_manager: Any,
+    on_permission_check: Optional[Any] = None,
+    denial_tracker: Optional[PermissionDenialTracker] = None,
+    trace_processor: Optional[Any] = None
+) -> dict:
+    """
+    Create SDK hooks configuration for permission management.
+    
+    This is the preferred way to integrate permissions with the new hooks system.
+    Returns a hooks config dict that can be passed to ClaudeAgentOptions.
+    
+    Args:
+        permission_manager: Permission manager instance with is_allowed() method.
+        on_permission_check: Optional callback for tracing permission decisions.
+        denial_tracker: Optional tracker to record denials.
+        trace_processor: Optional trace processor for status updates.
+    
+    Returns:
+        Dictionary for ClaudeAgentOptions.hooks parameter.
+    """
+    from hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
+    
+    manager = HooksManager()
+    
+    # Add permission checking hook
+    permission_hook = create_permission_hook(
+        permission_manager=permission_manager,
+        on_permission_check=on_permission_check,
+        denial_tracker=denial_tracker,
+        trace_processor=trace_processor,
+    )
+    manager.add_pre_tool_hook(permission_hook)
+    
+    # Add dangerous command blocking hook for Bash
+    dangerous_hook = create_dangerous_command_hook()
+    manager.add_pre_tool_hook(dangerous_hook, matcher="Bash")
+    
+    return manager.build_hooks_config()
 
 
 # Re-export for convenience
@@ -535,4 +639,5 @@ __all__ = [
     "get_safe_tools",
     "get_dangerous_tools",
     "create_permission_callback",
+    "create_permission_hooks",
 ]

@@ -362,6 +362,11 @@ class SessionInfo(BaseModel):
         default=None,
         description="The model used in this session"
     )
+    # Fork tracking
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description="Parent session ID if this session was forked"
+    )
 
 
 class AgentResult(BaseModel):

@@ -686,6 +686,60 @@ class ProfiledPermissionManager:
             return list(profile.permissions.allowed_dirs)
         return []
 
+    def get_allowed_patterns_for_tool(self, tool_name: str) -> list[str]:
+        """
+        Get allowed patterns for a specific tool from the active profile.
+
+        Useful for providing actionable guidance when a command is denied.
+
+        Args:
+            tool_name: Name of the tool (e.g., "Bash", "Read", "Write").
+
+        Returns:
+            List of allowed patterns for the tool.
+        """
+        profile = self.active_profile
+        if profile.permissions is None:
+            return []
+
+        patterns = []
+        prefix = f"{tool_name}("
+
+        for pattern in profile.permissions.allow:
+            if pattern.startswith(prefix):
+                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
+                patterns.append(inner)
+            elif pattern == tool_name:
+                patterns.append("*")
+
+        return patterns
+
+    def get_denied_patterns_for_tool(self, tool_name: str) -> list[str]:
+        """
+        Get denied patterns for a specific tool from the active profile.
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            List of denied patterns for the tool.
+        """
+        profile = self.active_profile
+        if profile.permissions is None:
+            return []
+
+        patterns = []
+        prefix = f"{tool_name}("
+
+        for pattern in profile.permissions.deny:
+            if pattern.startswith(prefix):
+                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
+                patterns.append(inner)
+            elif pattern == tool_name:
+                patterns.append("*")
+
+        return patterns
+
     def save_profile(
         self,
         profile: PermissionProfile,

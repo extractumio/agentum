@@ -45,8 +45,11 @@ from sessions import SessionManager
 from skills import SkillManager
 from tracer import ExecutionTracer, TracerBase, NullTracer
 from trace_processor import TraceProcessor
-from permissions import create_permission_callback, PermissionDenialTracker
-from permission_profiles import ProfiledPermissionManager, ProfileType
+from permissions import (
+    create_permission_callback,
+    PermissionDenialTracker,
+)
+from permission_profiles import ProfiledPermissionManager
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +266,9 @@ class ClaudeAgent:
         self,
         session_info: SessionInfo,
         system_prompt: str,
-        trace_processor: Optional[Any] = None
+        trace_processor: Optional[Any] = None,
+        resume_id: Optional[str] = None,
+        fork_session: bool = False
     ) -> ClaudeAgentOptions:
         """
         Build ClaudeAgentOptions for the SDK.
@@ -272,6 +277,8 @@ class ClaudeAgent:
             session_info: Session information.
             system_prompt: System prompt (required, must not be empty).
             trace_processor: Optional trace processor for permission denial tracking.
+            resume_id: Claude's session ID for resuming conversations (optional).
+            fork_session: If True, fork to new session when resuming (optional).
         
         Returns:
             ClaudeAgentOptions configured for execution.
@@ -361,22 +368,23 @@ class ClaudeAgent:
                 add_dirs.append(str(working_dir / dir_path))
         logger.info(f"SANDBOX: Profile allowed_dirs={add_dirs}")
         
-        session_dir = self._session_manager.get_session_dir(
-            session_info.session_id
-        )
-        
         # Use workspace subdirectory as cwd to prevent reading session logs
         # The workspace only contains files the agent should access (output.yaml)
         workspace_dir = self._session_manager.get_workspace_dir(
             session_info.session_id
         )
         
+        # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
+        session_dir = self._session_manager.get_session_dir(session_info.session_id)
+        
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
             f"tools={all_tools}, allowed_tools={allowed_tools}, "
             f"disallowed_tools={disallowed_tools}, "
             f"can_use_tool={'SET' if can_use_tool else 'NONE'}, "
-            f"cwd={workspace_dir}"
+            f"cwd={workspace_dir}, "
+            f"CLAUDE_CONFIG_DIR={session_dir}, "
+            f"resume={resume_id}, fork_session={fork_session}"
         )
         
         return ClaudeAgentOptions(
@@ -390,6 +398,9 @@ class ClaudeAgent:
             add_dirs=add_dirs,
             setting_sources=["project"] if self._config.enable_skills else [],
             can_use_tool=can_use_tool,
+            env={"CLAUDE_CONFIG_DIR": str(session_dir)},  # Per-session storage
+            resume=resume_id,  # Claude's session ID for resumption
+            fork_session=fork_session,  # Fork instead of continue when resuming
         )
     
     def _build_user_prompt(
@@ -473,7 +484,8 @@ class ClaudeAgent:
         task: str,
         system_prompt: Optional[str] = None,
         parameters: Optional[dict] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        fork_session: bool = False
     ) -> AgentResult:
         """
         Execute the agent with a task.
@@ -483,6 +495,7 @@ class ClaudeAgent:
             system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional).
+            fork_session: If True, fork to new session when resuming (optional).
         
         Returns:
             AgentResult with execution outcome.
@@ -491,12 +504,18 @@ class ClaudeAgent:
             AgentError: If prompts cannot be loaded or are invalid.
         """
         # Create or resume session first (needed for session-specific permissions)
+        # Also extract Claude's session ID (resume_id) for SDK resumption
+        resume_id: Optional[str] = None
         if resume_session_id:
             try:
                 session_info = self._session_manager.load_session(
                     resume_session_id
                 )
-                logger.info(f"Resuming session: {resume_session_id}")
+                resume_id = session_info.resume_id  # Claude's session ID
+                logger.info(
+                    f"Resuming session: {resume_session_id} "
+                    f"(Claude session: {resume_id or 'none'})"
+                )
             except Exception as e:
                 logger.warning(f"Could not resume session: {e}. Creating new.")
                 session_info = self._session_manager.create_session(
@@ -598,7 +617,11 @@ class ClaudeAgent:
                 tokens=session_info.cumulative_usage.total_tokens,
             )
         
-        options = self._build_options(session_info, system_prompt, trace_processor)
+        options = self._build_options(
+            session_info, system_prompt, trace_processor,
+            resume_id=resume_id,
+            fork_session=fork_session
+        )
         user_prompt = self._build_user_prompt(task, session_info, parameters)
         
         log_file = self._session_manager.get_log_file(session_info.session_id)
@@ -646,6 +669,14 @@ class ClaudeAgent:
                     )
                 
                 output = self._denial_tracker.get_error_output()
+                
+                # Display the error output
+                self._tracer.on_output_display(
+                    output=output.get("output"),
+                    error=output.get("error"),
+                    status="FAILED"
+                )
+                
                 return AgentResult(
                     status=TaskStatus.FAILED,
                     output=output.get("output"),
@@ -687,6 +718,15 @@ class ClaudeAgent:
             raw_status = output.get("status", "COMPLETE").upper()
             if raw_status == "SUCCESS" or raw_status == "DONE":
                 raw_status = "COMPLETE"
+            
+            # Display the parsed output.yaml content in the tracer
+            self._tracer.on_output_display(
+                output=output.get("output"),
+                error=output.get("error"),
+                comments=output.get("comments"),
+                result_files=output.get("result_files", []),
+                status=raw_status
+            )
             
             return AgentResult(
                 status=TaskStatus(raw_status),
@@ -740,7 +780,8 @@ class ClaudeAgent:
         task: str,
         system_prompt: Optional[str] = None,
         parameters: Optional[dict] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        fork_session: bool = False
     ) -> AgentResult:
         """
         Execute agent with timeout.
@@ -750,12 +791,13 @@ class ClaudeAgent:
             system_prompt: Custom system prompt (optional).
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional).
+            fork_session: If True, fork to new session when resuming (optional).
         
         Returns:
             AgentResult with execution outcome.
         """
         return await asyncio.wait_for(
-            self.run(task, system_prompt, parameters, resume_session_id),
+            self.run(task, system_prompt, parameters, resume_session_id, fork_session),
             timeout=self._config.timeout_seconds,
         )
 
@@ -772,6 +814,7 @@ async def run_agent(
     system_prompt: Optional[str] = None,
     parameters: Optional[dict] = None,
     resume_session_id: Optional[str] = None,
+    fork_session: bool = False,
     tracer: Optional[Union[TracerBase, bool]] = True
 ) -> AgentResult:
     """
@@ -789,6 +832,7 @@ async def run_agent(
         system_prompt: Custom system prompt.
         parameters: Additional template parameters.
         resume_session_id: Session ID to resume.
+        fork_session: If True, fork to new session when resuming.
         tracer: Execution tracer for console output.
             - True (default): Use ExecutionTracer with default settings.
             - False/None: Disable tracing (NullTracer).
@@ -818,6 +862,5 @@ async def run_agent(
         profiled_permission_manager=profiled_permission_manager
     )
     return await agent.run_with_timeout(
-        task, system_prompt, parameters, resume_session_id
+        task, system_prompt, parameters, resume_session_id, fork_session
     )
-

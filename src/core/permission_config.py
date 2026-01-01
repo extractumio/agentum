@@ -1017,6 +1017,57 @@ class PermissionConfigManager:
         """Get information about a specific tool."""
         return AVAILABLE_TOOLS.get(tool_name)
 
+    def get_allowed_patterns_for_tool(self, tool_name: str) -> list[str]:
+        """
+        Get all allowed patterns for a specific tool.
+
+        Returns patterns from the allow list that match the given tool name.
+        Useful for providing actionable guidance when a command is denied.
+
+        Args:
+            tool_name: Name of the tool (e.g., "Bash", "Read", "Write").
+
+        Returns:
+            List of allowed patterns for the tool (e.g., ["python ./skills/**/*.py"]).
+        """
+        config = self.load()
+        patterns = []
+        prefix = f"{tool_name}("
+
+        for pattern in config.permissions.allow:
+            if pattern.startswith(prefix):
+                # Extract the pattern inside parentheses
+                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
+                patterns.append(inner)
+            elif pattern == tool_name:
+                # Tool name without parentheses means all uses are allowed
+                patterns.append("*")
+
+        return patterns
+
+    def get_denied_patterns_for_tool(self, tool_name: str) -> list[str]:
+        """
+        Get all denied patterns for a specific tool.
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            List of denied patterns for the tool.
+        """
+        config = self.load()
+        patterns = []
+        prefix = f"{tool_name}("
+
+        for pattern in config.permissions.deny:
+            if pattern.startswith(prefix):
+                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
+                patterns.append(inner)
+            elif pattern == tool_name:
+                patterns.append("*")
+
+        return patterns
+
 
 def create_default_permissions_file(
     target_dir: Optional[Path] = None

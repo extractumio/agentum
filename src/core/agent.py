@@ -229,6 +229,11 @@ Examples:
         help="Resume a previous session by ID"
     )
     parser.add_argument(
+        "--fork-session",
+        action="store_true",
+        help="Fork to new session when resuming instead of continuing original"
+    )
+    parser.add_argument(
         "--list-sessions", "-l",
         action="store_true",
         help="List all sessions and exit"
@@ -571,9 +576,11 @@ async def execute_task(args: argparse.Namespace) -> int:
     )
 
     try:
+        # Execute task and exit
         result = await agent.run_with_timeout(
             task=task,
             resume_session_id=args.resume,
+            fork_session=args.fork_session,
         )
 
         # Output results

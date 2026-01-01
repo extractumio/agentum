@@ -1,0 +1,70 @@
+# User profile for task execution.
+# Session-specific permissions are generated dynamically.
+# Agent is sandboxed to its workspace with limited bash access.
+
+name: user
+description: User profile for task execution. Session-specific permissions are generated dynamically.
+defaultMode: default
+
+tools:
+  enabled:
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Bash
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+  disabled:
+    - Glob
+    - Grep
+    - LS
+    - WebFetch
+    - WebSearch
+    - NotebookEdit
+  permission_checked:
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Bash
+
+session_workspace:
+  description: Patterns for session-specific workspace permissions.
+  allow:
+    - Read(./**)
+    - Read(**)
+    - Write(./**)
+    - Write(**)
+    - Edit(./**)
+    - Edit(**)
+    - MultiEdit(./**)
+    - MultiEdit(**)
+    # Only allow running pre-approved skill scripts
+    - Bash(python ./skills/**/*.py)
+    - Bash(python3 ./skills/**/*.py)
+    - Bash(python skills/**/*.py)
+    - Bash(python3 skills/**/*.py)
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+  deny:
+    # Skills directory is READ-ONLY (prevent code injection)
+    - Write(./skills/**)
+    - Edit(./skills/**)
+    - MultiEdit(./skills/**)
+    # Block all other bash commands
+    - Bash(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+  allowed_dirs:
+    - ./skills
+    - "{workspace}"
+
+
+
+

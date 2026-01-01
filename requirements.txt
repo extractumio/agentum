@@ -1,0 +1,18 @@
+# Claude Code Agent Dependencies
+# Install with: pip install -r requirements.txt
+
+# Claude Agent SDK
+claude-agent-sdk>=0.1.18
+
+# Template rendering
+jinja2>=3.1.0
+
+# Data validation
+pydantic>=2.0.0
+
+# YAML parsing for skill frontmatter
+pyyaml>=6.0.0
+
+# Environment variables
+python-dotenv>=1.0.0
+

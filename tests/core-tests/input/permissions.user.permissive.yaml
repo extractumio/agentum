@@ -1,0 +1,53 @@
+# Fully permissive user profile for development/testing.
+# USE WITH CAUTION - allows all operations without restrictions.
+
+name: user-permissive
+description: Fully permissive user profile for development/testing. USE WITH CAUTION.
+defaultMode: default
+
+tools:
+  enabled:
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Bash
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - Glob
+    - Grep
+    - LS
+    - WebFetch
+    - WebSearch
+  disabled:
+    - NotebookEdit
+  permission_checked: []
+
+session_workspace:
+  description: Fully permissive - all operations allowed.
+  allow:
+    - Read(**)
+    - Write(**)
+    - Edit(**)
+    - MultiEdit(**)
+    - Bash(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - WebFetch(*)
+    - WebSearch(*)
+  deny: []
+  allowed_dirs:
+    - ./skills
+    - "{workspace}"
+
+
+
+
+

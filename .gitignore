@@ -2,8 +2,9 @@
 logs/
 sessions/
 
-# Environment
+# Environment and Secrets
 .env
+config/secrets.yaml
 .venv/
 venv/
 

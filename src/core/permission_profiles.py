@@ -1,44 +1,33 @@
 """
-Permission Profiles for Agentum.
+Permission Profile Manager for Agentum.
 
-Implements a two-profile permission system:
-- System Profile: Used for agent initialization/finalization operations
-  (loading sessions, reading prompts, saving logs, etc.)
-- User Profile: Used during user task execution (restricted access)
-
-This allows the agent to have full access for system operations while
-being sandboxed during user task execution.
+Implements a single permission profile loaded once at startup and used
+throughout the agent execution. No profile switching between system and user.
 
 Usage:
-    from permission_profiles import ProfiledPermissionManager
+    from permission_profiles import PermissionManager
 
-    # Load profiles from default locations
-    manager = ProfiledPermissionManager()
+    # Load profile from default location
+    manager = PermissionManager()
 
-    # Start with system profile (for initialization)
-    manager.activate_system_profile()
+    # Set session context for workspace sandboxing
+    manager.set_session_context(session_id, workspace_path)
 
-    # Switch to user profile (for task execution)
-    manager.activate_user_profile()
-
-    # Check permissions against current profile
+    # Check permissions
     if manager.is_allowed("Read(/path/to/file)"):
         ...
-
-    # Switch back to system profile (for cleanup)
-    manager.activate_system_profile()
 """
 import json
 import logging
-from enum import StrEnum
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from config import CONFIG_DIR
-from permission_config import (
+from ..config import CONFIG_DIR
+from .permission_config import (
     PermissionConfig,
     PermissionConfigManager,
     PermissionMode,
@@ -46,20 +35,11 @@ from permission_config import (
     ToolsConfig,
 )
 
-# Import TracerBase for type hints (avoid circular import)
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from tracer import TracerBase
+    from .tracer import TracerBase
 
 logger = logging.getLogger(__name__)
-
-
-class ProfileType(StrEnum):
-    """
-    Types of permission profiles.
-    """
-    SYSTEM = "system"
-    USER = "user"
 
 
 class ExtendedToolsConfig(BaseModel):
@@ -81,11 +61,18 @@ Tools that require permission callback checks.
 These tools are available but each use is validated against permission rules."""
     )
 
+    @field_validator("enabled", "disabled", "permission_checked", mode="before")
+    @classmethod
+    def convert_none_to_list(cls, v: Any) -> list[str]:
+        """Convert None (from empty YAML values) to empty list."""
+        if v is None:
+            return []
+        return v
+
 
 class ExtendedPermissionRules(BaseModel):
     """
     Extended permission rules including allowed directories.
-    Used for system profile.
     """
     allow: list[str] = Field(
         default_factory=list,
@@ -104,11 +91,19 @@ class ExtendedPermissionRules(BaseModel):
         description="Directories accessible in this profile"
     )
 
+    @field_validator("allow", "deny", "ask", "allowed_dirs", mode="before")
+    @classmethod
+    def convert_none_to_list(cls, v: Any) -> list[str]:
+        """Convert None (from empty YAML values) to empty list."""
+        if v is None:
+            return []
+        return v
+
 
 class SessionWorkspaceConfig(BaseModel):
     """
     Session-specific workspace permissions.
-    
+
     Defines patterns for dynamically generating session-specific
     permission rules. Use {workspace} placeholder for the workspace path.
     """
@@ -129,17 +124,44 @@ class SessionWorkspaceConfig(BaseModel):
         description="Allowed directories. Supports {workspace} placeholder."
     )
 
+    @field_validator("allow", "deny", "allowed_dirs", mode="before")
+    @classmethod
+    def convert_none_to_list(cls, v: Any) -> list[str]:
+        """Convert None (from empty YAML values) to empty list."""
+        if v is None:
+            return []
+        return v
+
+
+class CheckpointingConfig(BaseModel):
+    """
+    File checkpointing configuration.
+
+    Defines which tools trigger automatic checkpoint creation
+    for file change tracking and rewind functionality.
+    """
+    auto_checkpoint_tools: list[str] = Field(
+        default_factory=lambda: ["Write", "Edit"],
+        description="Tools that trigger automatic checkpoint creation after execution"
+    )
+
+    @field_validator("auto_checkpoint_tools", mode="before")
+    @classmethod
+    def convert_none_to_list(cls, v: Any) -> list[str]:
+        """Convert None (from empty YAML values) to empty list."""
+        if v is None:
+            return ["Write", "Edit"]
+        return v
+
 
 class PermissionProfile(BaseModel):
     """
     A complete permission profile with all settings.
-    
-    Simplified structure:
-    - System profile uses 'permissions' for static rules
-    - User profile uses 'session_workspace' for dynamic session-specific rules
+
+    Uses 'session_workspace' for dynamic session-specific rules.
     """
     name: str = Field(
-        description="Profile name (e.g., 'system', 'user')"
+        description="Profile name (e.g., 'user')"
     )
     description: str = Field(
         default="",
@@ -155,11 +177,15 @@ class PermissionProfile(BaseModel):
     )
     permissions: Optional[ExtendedPermissionRules] = Field(
         default=None,
-        description="Static permission rules (used by system profile)"
+        description="Static permission rules"
     )
     session_workspace: Optional[SessionWorkspaceConfig] = Field(
         default=None,
-        description="Dynamic session permissions (used by user profile)"
+        description="Dynamic session permissions"
+    )
+    checkpointing: Optional[CheckpointingConfig] = Field(
+        default=None,
+        description="File checkpointing configuration"
     )
 
 
@@ -168,63 +194,46 @@ class ProfileNotFoundError(Exception):
     pass
 
 
-class ProfiledPermissionManager:
+class PermissionManager:
     """
-    Manages permission profiles for system and user operations.
+    Manages permission profile for agent operations.
 
-    Supports switching between profiles during agent lifecycle:
-    1. System profile for initialization (loading sessions, prompts)
-    2. User profile for task execution (sandboxed)
-    3. System profile for finalization (saving sessions, logs)
+    A single profile is loaded once at startup and remains active
+    throughout the execution.
 
     Usage:
-        manager = ProfiledPermissionManager()
+        manager = PermissionManager()
 
-        # Initialize with system permissions
-        manager.activate_system_profile()
-        session = load_session(...)
+        # Set session context for sandboxing
+        manager.set_session_context(session_id, workspace_path)
 
-        # Execute task with user permissions
-        manager.activate_user_profile()
-        result = agent.run(task)
-
-        # Save results with system permissions
-        manager.activate_system_profile()
-        save_session(...)
+        # Check permissions
+        if manager.is_allowed("Read(/path/to/file)"):
+            ...
     """
 
-    # Default filenames (YAML preferred, JSON for backwards compatibility)
-    SYSTEM_PROFILE_BASE = "permissions.system"
-    USER_PROFILE_BASE = "permissions.user"
+    # Default filename (YAML preferred)
+    PROFILE_BASE = "permissions"
     SUPPORTED_EXTENSIONS = [".yaml", ".yml", ".json"]
 
     def __init__(
         self,
-        system_profile_path: Optional[Path] = None,
-        user_profile_path: Optional[Path] = None
+        profile_path: Optional[Path] = None
     ) -> None:
         """
-        Initialize the profiled permission manager.
+        Initialize the permission manager.
 
         Args:
-            system_profile_path: Path to system profile file.
-                               Defaults to AGENT/config/permissions.system.yaml
-                               (falls back to .json if .yaml not found).
-            user_profile_path: Path to user profile file.
-                              Defaults to AGENT/config/permissions.user.yaml
-                              (falls back to .json if .yaml not found).
+            profile_path: Path to permission profile file.
+                         Defaults to AGENT/config/permissions.yaml
+                         (falls back to .json if .yaml not found).
         """
-        self._system_profile_path = (
-            system_profile_path or self._find_profile_file(self.SYSTEM_PROFILE_BASE)
-        )
-        self._user_profile_path = (
-            user_profile_path or self._find_profile_file(self.USER_PROFILE_BASE)
+        self._profile_path = (
+            profile_path or self._find_profile_file(self.PROFILE_BASE)
         )
 
-        self._system_profile: Optional[PermissionProfile] = None
-        self._user_profile: Optional[PermissionProfile] = None
-        self._user_profile_base: Optional[PermissionProfile] = None  # Template
-        self._active_profile_type: ProfileType = ProfileType.SYSTEM
+        self._profile: Optional[PermissionProfile] = None
+        self._profile_base: Optional[PermissionProfile] = None  # Template
         self._active_profile: Optional[PermissionProfile] = None
 
         # Session context for dynamic permission generation
@@ -235,15 +244,15 @@ class ProfiledPermissionManager:
         # Internal config manager for permission checking
         self._config_manager = PermissionConfigManager()
 
-        # Optional tracer for profile switch notifications
+        # Optional tracer for notifications
         self._tracer: Optional["TracerBase"] = None
 
     def set_tracer(self, tracer: "TracerBase") -> None:
         """
-        Set the tracer for profile switch notifications.
+        Set the tracer for notifications.
 
         Args:
-            tracer: TracerBase instance to notify on profile switches.
+            tracer: TracerBase instance to notify.
         """
         self._tracer = tracer
 
@@ -251,10 +260,10 @@ class ProfiledPermissionManager:
         """
         Find a profile file by base name, trying extensions in order.
 
-        Tries .yaml first, then .yml, then .json for backwards compatibility.
+        Tries .yaml first, then .yml, then .json.
 
         Args:
-            base_name: Base filename without extension (e.g., "permissions.user").
+            base_name: Base filename without extension (e.g., "permissions").
 
         Returns:
             Path to the first existing file, or path with .yaml extension
@@ -267,8 +276,8 @@ class ProfiledPermissionManager:
         # Return default .yaml path if nothing exists
         return CONFIG_DIR / f"{base_name}.yaml"
 
-    def _notify_profile_switch(self) -> None:
-        """Notify tracer about profile switch if tracer is set."""
+    def _notify_profile_loaded(self) -> None:
+        """Notify tracer about profile load if tracer is set."""
         if self._tracer is None or self._active_profile is None:
             return
 
@@ -279,14 +288,11 @@ class ProfiledPermissionManager:
             allow_count = len(self._active_profile.permissions.allow)
             deny_count = len(self._active_profile.permissions.deny)
 
-        # Get the path of the loaded profile
-        if self._active_profile_type == ProfileType.SYSTEM:
-            profile_path = str(self._system_profile_path)
-        else:
-            profile_path = str(self._user_profile_path)
+        profile_path = str(self._profile_path)
 
+        # Call on_profile_switch with 'user' type for compatibility
         self._tracer.on_profile_switch(
-            profile_type=self._active_profile_type.value,
+            profile_type="user",
             profile_name=self._active_profile.name,
             tools=tools,
             allow_rules_count=allow_count,
@@ -340,30 +346,24 @@ class ProfiledPermissionManager:
         except Exception as e:
             raise ValueError(f"Failed to load profile {path}: {e}")
 
-    def _ensure_profiles_loaded(self) -> None:
-        """Ensure both profiles are loaded from config files."""
-        if self._system_profile is None:
-            self._system_profile = self._load_profile(self._system_profile_path)
-        if self._user_profile_base is None:
-            self._user_profile_base = self._load_profile(self._user_profile_path)
-        if self._user_profile is None:
+    def _ensure_profile_loaded(self) -> None:
+        """Ensure profile is loaded from config file."""
+        if self._profile_base is None:
+            self._profile_base = self._load_profile(self._profile_path)
+        if self._profile is None:
             # Use base profile if no session context is set
-            self._user_profile = self._user_profile_base
+            self._profile = self._profile_base
+            self._active_profile = self._profile
+            self._update_config_manager()
 
-    def reload_profiles(self) -> None:
-        """Force reload both profiles from files."""
-        self._system_profile = None
-        self._user_profile = None
-        self._user_profile_base = None
-        self._ensure_profiles_loaded()
+    def reload_profile(self) -> None:
+        """Force reload profile from file."""
+        self._profile = None
+        self._profile_base = None
+        self._ensure_profile_loaded()
         # Re-apply session context if set
         if self._session_id and self._workspace_path:
-            self._build_session_user_profile()
-        # Re-activate current profile to update config manager
-        if self._active_profile_type == ProfileType.SYSTEM:
-            self.activate_system_profile()
-        else:
-            self.activate_user_profile()
+            self._build_session_profile()
 
     def set_session_context(
         self,
@@ -374,7 +374,7 @@ class ProfiledPermissionManager:
         """
         Set the session context for dynamic permission generation.
 
-        This creates a session-specific user profile that restricts
+        This creates a session-specific profile that restricts
         the agent to only its own workspace folder.
 
         Args:
@@ -395,40 +395,42 @@ class ProfiledPermissionManager:
         self._session_id = session_id
         self._workspace_path = workspace_path
         self._workspace_absolute_path = workspace_absolute_path
-        self._ensure_profiles_loaded()
-        self._build_session_user_profile()
-        
+        self._ensure_profile_loaded()
+        self._build_session_profile()
+
         # Update config manager with workspace context for path resolution
         if workspace_absolute_path is not None:
             self._config_manager.set_working_directory(workspace_absolute_path)
-        
+
         logger.info(
             f"Session context set: session_id={session_id}, "
             f"workspace={workspace_path}"
         )
 
-    def _build_session_user_profile(self) -> None:
+    def _build_session_profile(self) -> None:
         """
-        Build a session-specific user profile.
+        Build a session-specific profile.
 
-        Creates a modified copy of the base user profile with
+        Creates a modified copy of the base profile with
         session-specific permission rules from the session_workspace config.
-        Uses patterns defined in permissions.user.yaml, replacing {workspace}
+        Uses patterns defined in permissions.yaml, replacing {workspace}
         placeholder with the actual workspace path.
         """
-        if self._user_profile_base is None or self._workspace_path is None:
+        if self._profile_base is None or self._workspace_path is None:
             return
 
-        base = self._user_profile_base
+        base = self._profile_base
         workspace = self._workspace_path
 
         # Check if session_workspace config exists
         if base.session_workspace is None:
             logger.warning(
-                "No session_workspace config in user profile, "
+                "No session_workspace config in profile, "
                 "using base profile without session-specific rules"
             )
-            self._user_profile = base
+            self._profile = base
+            self._active_profile = self._profile
+            self._update_config_manager()
             return
 
         ws_config = base.session_workspace
@@ -450,10 +452,10 @@ class ProfiledPermissionManager:
             session_allowed_dirs.append(pattern.replace("{workspace}", workspace))
 
         # Create session-specific profile with permissions for the config manager
-        self._user_profile = PermissionProfile(
+        self._profile = PermissionProfile(
             name=f"user:{self._session_id}",
             description=(
-                f"Session-specific user profile. "
+                f"Session-specific profile. "
                 f"Sandboxed to workspace: {workspace}"
             ),
             defaultMode=base.defaultMode,
@@ -465,95 +467,53 @@ class ProfiledPermissionManager:
                 allowed_dirs=session_allowed_dirs,
             ),
         )
+        self._active_profile = self._profile
+        self._update_config_manager()
 
         logger.info(
-            f"Built session-specific user profile: {self._user_profile.name}"
+            f"Built session-specific profile: {self._profile.name}"
         )
+        # Notify tracer about profile update
+        self._notify_profile_loaded()
 
     def clear_session_context(self) -> None:
         """
-        Clear the session context and revert to base user profile.
+        Clear the session context and revert to base profile.
 
         Call this when the session is complete to reset permissions.
         """
         self._session_id = None
         self._workspace_path = None
         self._workspace_absolute_path = None
-        if self._user_profile_base is not None:
-            self._user_profile = self._user_profile_base
+        if self._profile_base is not None:
+            self._profile = self._profile_base
+            self._active_profile = self._profile
+            self._update_config_manager()
         # Clear working directory from config manager
         self._config_manager.clear_working_directory()
-        logger.info("Session context cleared, reverted to base user profile")
+        logger.info("Session context cleared, reverted to base profile")
 
     @property
-    def system_profile(self) -> PermissionProfile:
-        """Get the system profile."""
-        self._ensure_profiles_loaded()
-        return self._system_profile  # type: ignore
-
-    @property
-    def user_profile(self) -> PermissionProfile:
-        """Get the user profile."""
-        self._ensure_profiles_loaded()
-        return self._user_profile  # type: ignore
+    def profile(self) -> PermissionProfile:
+        """Get the current profile."""
+        self._ensure_profile_loaded()
+        return self._profile  # type: ignore
 
     @property
     def active_profile(self) -> PermissionProfile:
         """Get the currently active profile."""
         if self._active_profile is None:
-            self.activate_system_profile()
+            self._ensure_profile_loaded()
         return self._active_profile  # type: ignore
 
-    @property
-    def active_profile_type(self) -> ProfileType:
-        """Get the type of the currently active profile."""
-        return self._active_profile_type
-
-    def activate_system_profile(self) -> PermissionProfile:
+    def activate(self) -> PermissionProfile:
         """
-        Activate the system profile.
-
-        Used for agent initialization and finalization operations
-        that require broader file access.
+        Activate the profile (ensure it's loaded and ready).
 
         Returns:
-            The activated system profile.
+            The activated profile.
         """
-        self._ensure_profiles_loaded()
-        self._active_profile_type = ProfileType.SYSTEM
-        self._active_profile = self._system_profile
-        self._update_config_manager()
-
-        # Log profile activation with details
-        profile_name = self._active_profile.name if self._active_profile else "system"
-        allow_count = 0
-        deny_count = 0
-        if self._active_profile and self._active_profile.permissions:
-            allow_count = len(self._active_profile.permissions.allow)
-            deny_count = len(self._active_profile.permissions.deny)
-        logger.info(
-            f"PROFILE SWITCH: Activated SYSTEM profile '{profile_name}' "
-            f"(allow={allow_count}, deny={deny_count})"
-        )
-
-        # Notify tracer about profile switch
-        self._notify_profile_switch()
-
-        return self._active_profile  # type: ignore
-
-    def activate_user_profile(self) -> PermissionProfile:
-        """
-        Activate the user profile.
-
-        Used for task execution with restricted permissions.
-
-        Returns:
-            The activated user profile.
-        """
-        self._ensure_profiles_loaded()
-        self._active_profile_type = ProfileType.USER
-        self._active_profile = self._user_profile
-        self._update_config_manager()
+        self._ensure_profile_loaded()
 
         # Log profile activation with details
         profile_name = self._active_profile.name if self._active_profile else "user"
@@ -563,19 +523,17 @@ class ProfiledPermissionManager:
             allow_count = len(self._active_profile.permissions.allow)
             deny_count = len(self._active_profile.permissions.deny)
         logger.info(
-            f"PROFILE SWITCH: Activated USER profile '{profile_name}' "
+            f"PROFILE: Activated '{profile_name}' "
             f"(allow={allow_count}, deny={deny_count})"
         )
 
-        # Notify tracer about profile switch
-        self._notify_profile_switch()
+        # Notify tracer about profile load
+        self._notify_profile_loaded()
 
         return self._active_profile  # type: ignore
 
     def _update_config_manager(self) -> None:
         """Update the internal config manager with active profile settings."""
-        import time
-
         if self._active_profile is None:
             return
 
@@ -588,13 +546,13 @@ class ProfiledPermissionManager:
                 deny=self._active_profile.permissions.deny,
                 ask=self._active_profile.permissions.ask,
             )
-        
+
         # Map ExtendedToolsConfig to ToolsConfig
         tools_config = ToolsConfig(
             enabled=self._active_profile.tools.enabled,
             disabled=self._active_profile.tools.disabled,
         )
-        
+
         config = PermissionConfig(
             defaultMode=self._active_profile.defaultMode,
             permissions=perm_rules,
@@ -602,7 +560,6 @@ class ProfiledPermissionManager:
         )
         self._config_manager._config = config
         # Set _last_modified to prevent reload from file
-        # This ensures our manually set config is used
         self._config_manager._last_modified = time.time()
         # Also clear _config_path to prevent file-based reload
         self._config_manager._config_path = None
@@ -618,7 +575,7 @@ class ProfiledPermissionManager:
             True if allowed, False if denied.
         """
         if self._active_profile is None:
-            self.activate_system_profile()
+            self._ensure_profile_loaded()
         return self._config_manager.is_tool_allowed(tool_call)
 
     def needs_confirmation(self, tool_call: str) -> bool:
@@ -752,17 +709,13 @@ class ProfiledPermissionManager:
 
         Args:
             profile: Profile to save.
-            target_path: Path to save to. If None, uses default path
-                        based on profile name.
+            target_path: Path to save to. If None, uses default path.
 
         Returns:
             Path where profile was saved.
         """
         if target_path is None:
-            if profile.name == "system":
-                target_path = self._system_profile_path
-            else:
-                target_path = self._user_profile_path
+            target_path = self._profile_path
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -778,52 +731,42 @@ class ProfiledPermissionManager:
         logger.info(f"Saved profile '{profile.name}' to {target_path}")
         return target_path
 
-    def validate_profiles_exist(self) -> tuple[Path, Path]:
+    def validate_profile_exists(self) -> Path:
         """
-        Validate that both profile files exist.
+        Validate that profile file exists.
 
         Returns:
-            Tuple of (system_profile_path, user_profile_path).
+            Path to profile file.
 
         Raises:
-            ProfileNotFoundError: If either profile file is missing.
+            ProfileNotFoundError: If profile file is missing.
         """
-        missing = []
-        if not self._system_profile_path.exists():
-            missing.append(f"System profile: {self._system_profile_path}")
-        if not self._user_profile_path.exists():
-            missing.append(f"User profile: {self._user_profile_path}")
-
-        if missing:
+        if not self._profile_path.exists():
             raise ProfileNotFoundError(
-                "Missing permission profile files:\n  " +
-                "\n  ".join(missing) +
-                "\n\nCreate these files manually or copy from templates."
+                f"Permission profile not found: {self._profile_path}\n"
+                "Create the file manually or copy from templates."
             )
+        return self._profile_path
 
-        return self._system_profile_path, self._user_profile_path
 
-
-def validate_profile_files(config_dir: Optional[Path] = None) -> tuple[Path, Path]:
+def validate_profile_file(config_dir: Optional[Path] = None) -> Path:
     """
-    Validate that permission profile files exist.
+    Validate that permission profile file exists.
 
     Args:
-        config_dir: Directory containing profiles.
+        config_dir: Directory containing profile.
                    Defaults to AGENT/config/.
 
     Returns:
-        Tuple of (system_profile_path, user_profile_path).
+        Path to profile file.
 
     Raises:
-        ProfileNotFoundError: If profile files are missing.
+        ProfileNotFoundError: If profile file is missing.
     """
     if config_dir is None:
         config_dir = CONFIG_DIR
 
-    manager = ProfiledPermissionManager(
-        system_profile_path=config_dir / ProfiledPermissionManager.SYSTEM_PROFILE_FILENAME,
-        user_profile_path=config_dir / ProfiledPermissionManager.USER_PROFILE_FILENAME
+    manager = PermissionManager(
+        profile_path=config_dir / f"{PermissionManager.PROFILE_BASE}.yaml"
     )
-    return manager.validate_profiles_exist()
-
+    return manager.validate_profile_exists()

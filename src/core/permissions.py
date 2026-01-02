@@ -12,7 +12,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from permission_config import (
+from claude_agent_sdk import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
+
+from .hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
+from .permission_config import (
     AVAILABLE_TOOLS,
     DEFAULT_PERMISSION_CONFIG,
     DANGEROUS_TOOLS,
@@ -27,6 +34,14 @@ from permission_config import (
     get_dangerous_tools,
     get_safe_tools,
 )
+
+# Import system tools check function (path configured in entry point agent.py)
+try:
+    from agentum.system_write_output import is_system_tool
+except ImportError:
+    # Fallback if tools not installed - no system tools available
+    def is_system_tool(tool_name: str) -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +73,29 @@ class PermissionDenialTracker:
         tool_name: str,
         tool_call: str,
         message: str,
-        is_security_violation: bool = False
+        is_security_violation: bool = False,
+        interrupt: bool = False
     ) -> None:
-        """Record a permission denial."""
+        """
+        Record a permission denial.
+        
+        Args:
+            tool_name: Name of the denied tool.
+            tool_call: Full tool call string.
+            message: Denial message.
+            is_security_violation: Whether this is a security violation.
+            interrupt: Whether this denial interrupts agent execution.
+                      Only interrupting denials should override agent output.
+        """
         self.denials.append(PermissionDenial(
             tool_name=tool_name,
             tool_call=tool_call,
             message=message,
             is_security_violation=is_security_violation,
         ))
-        self._interrupted = True
+        # Only mark as interrupted if this denial actually stops the agent
+        if interrupt:
+            self._interrupted = True
 
     @property
     def was_interrupted(self) -> bool:
@@ -370,7 +398,7 @@ def create_permission_callback(
 
     Args:
         permission_manager: Permission manager instance (PermissionManager or
-                           ProfiledPermissionManager) with is_allowed() method.
+                           PermissionManager) with is_allowed() method.
         on_permission_check: Optional callback for tracing permission decisions.
                             Called with (tool_name: str, decision: str).
         denial_tracker: Optional tracker to record denials for output generation.
@@ -381,12 +409,6 @@ def create_permission_callback(
     Returns:
         Async permission callback for ClaudeAgentOptions.can_use_tool.
     """
-    from claude_agent_sdk import (
-        PermissionResultAllow,
-        PermissionResultDeny,
-        ToolPermissionContext,
-    )
-
     # Track denial counts per tool to enable smart interrupt
     denial_counts: dict[str, int] = {}
 
@@ -488,10 +510,19 @@ def create_permission_callback(
         Permission callback with rule enforcement and actionable guidance.
 
         Uses smart interrupt logic:
+        - System tools: always allowed (cannot be disabled)
         - Security violations: immediate interrupt
         - Regular denials: allow learning, interrupt after max_denials_before_interrupt
         """
         logger.info(f"PERMISSION CHECK: {tool_name} with input: {tool_input}")
+
+        # SYSTEM TOOLS: Always allow - these cannot be disabled via permissions
+        # This ensures the agent can always write output.yaml for reporting
+        if is_system_tool(tool_name):
+            logger.info(f"PERMISSION ALLOW: {tool_name} is a system tool (always allowed)")
+            if on_permission_check:
+                on_permission_check(tool_name, "allow")
+            return PermissionResultAllow(behavior="allow")
 
         # SECURITY: Always deny attempts to bypass sandbox - immediate interrupt
         if tool_input.get("dangerouslyDisableSandbox"):
@@ -508,6 +539,7 @@ def create_permission_callback(
                     tool_call=f"{tool_name}(dangerouslyDisableSandbox=True)",
                     message=security_msg,
                     is_security_violation=True,
+                    interrupt=True,  # Security violations always interrupt
                 )
             if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
                 trace_processor.set_permission_denied(True)
@@ -562,6 +594,7 @@ def create_permission_callback(
                 tool_call=tool_call,
                 message=denial_msg,
                 is_security_violation=False,
+                interrupt=should_interrupt,  # Only mark interrupted if actually stopping
             )
 
         # Mark trace processor if we're interrupting
@@ -599,8 +632,6 @@ def create_permission_hooks(
     Returns:
         Dictionary for ClaudeAgentOptions.hooks parameter.
     """
-    from hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
-    
     manager = HooksManager()
     
     # Add permission checking hook

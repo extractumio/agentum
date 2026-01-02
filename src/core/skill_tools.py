@@ -24,13 +24,14 @@ import asyncio
 import logging
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from skills import Skill, SkillManager
+from .skills import Skill, SkillManager
 
 logger = logging.getLogger(__name__)
 
@@ -363,7 +364,6 @@ def execute_skill_sync(
     if args:
         cmd.extend(args)
     
-    import time
     start = time.time()
     
     try:

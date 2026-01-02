@@ -1,5 +1,6 @@
-# User profile for task execution.
-# Session-specific permissions are generated dynamically.
+# Permission profile for Agentum agent.
+# Loaded once at startup and used throughout execution.
+# Session-specific permissions are generated dynamically using {workspace} placeholder.
 # Agent is sandboxed to its workspace with limited bash access.
 
 name: user
@@ -9,21 +10,21 @@ defaultMode: default
 tools:
   enabled:
     - Read
-    - Write
     - Edit
     - MultiEdit
-    - Bash
     - Task
     - Skill
     - TodoRead
     - TodoWrite
-  disabled:
     - Glob
     - Grep
     - LS
     - WebFetch
     - WebSearch
     - NotebookEdit
+  disabled:
+    - Write
+    - Bash
   permission_checked:
     - Read
     - Write
@@ -34,25 +35,33 @@ tools:
 session_workspace:
   description: Patterns for session-specific workspace permissions.
   allow:
+    # Session workspace access (output.yaml, results, etc.)
+    - Read({workspace}/**)
+    - Write({workspace}/**)
+    - Edit({workspace}/**)
+    - MultiEdit({workspace}/**)
+    # Relative paths from cwd (which is set to workspace)
     - Read(./**)
-    - Read(**)
     - Write(./**)
-    - Write(**)
     - Edit(./**)
-    - Edit(**)
     - MultiEdit(./**)
-    - MultiEdit(**)
+    # Skills directory read access
+    - Read({workspace}/skills/**)
+    - Read(./skills/**)
     # Only allow running pre-approved skill scripts
+    - Bash(python {workspace}/skills/**/*.py)
+    - Bash(python3 {workspace}/skills/**/*.py)
     - Bash(python ./skills/**/*.py)
     - Bash(python3 ./skills/**/*.py)
-    - Bash(python skills/**/*.py)
-    - Bash(python3 skills/**/*.py)
     - Task
     - Skill
     - TodoRead
     - TodoWrite
   deny:
     # Skills directory is READ-ONLY (prevent code injection)
+    - Write({workspace}/skills/**)
+    - Edit({workspace}/skills/**)
+    - MultiEdit({workspace}/skills/**)
     - Write(./skills/**)
     - Edit(./skills/**)
     - MultiEdit(./skills/**)
@@ -62,9 +71,13 @@ session_workspace:
     - Grep(*)
     - LS(*)
   allowed_dirs:
-    - ./skills
     - "{workspace}"
+    - "{workspace}/skills"
 
-
-
-
+# File checkpointing configuration
+checkpointing:
+  # Tools that trigger automatic checkpoint creation after execution
+  auto_checkpoint_tools:
+    - Write
+    - Edit
+    - MultiEdit

@@ -1,6 +1,7 @@
 ---
 name: meow
 description: Fetches random cat facts from the MeowFacts API.
+allowed-tools: Read, WebFetch
 ---
 
 # Meow Facts Skill

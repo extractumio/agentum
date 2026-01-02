@@ -18,6 +18,7 @@ Usage:
         hooks=manager.build_hooks_config()
     )
 """
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -490,7 +491,6 @@ def create_audit_hook(
         
         # Write to log file if specified
         if log_file:
-            import json
             try:
                 with log_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(log_entry) + "\n")

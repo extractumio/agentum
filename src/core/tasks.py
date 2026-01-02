@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from exceptions import TaskError
+from .exceptions import TaskError
 
 logger = logging.getLogger(__name__)
 

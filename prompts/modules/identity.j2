@@ -1,0 +1,10 @@
+{# Module: Identity - Role and environment context #}
+**Identity**
+{{ role_content }}
+
+**Environment**
+- Date: {{ current_date }}
+- Model: {{ model }}
+- Workspace: `{{ workspace_path }}`
+{% if session_id %}- Session: {{ session_id }}{% endif %}
+

@@ -17,123 +17,104 @@ Usage:
     # List sessions
     python agent.py --list-sessions
 
-    # Use custom permissions config
-    python agent.py --task "Task" --permissions-config ./my-permissions.json
+    # Use custom config file
+    python agent.py --config ./custom-agent.yaml --task "Task"
+
+    # Override config values via CLI
+    python agent.py --model claude-sonnet-4-5-20250929 --max-turns 50 --task "Task"
 
     # Show available tools and permissions
     python agent.py --show-tools
 """
 import argparse
 import asyncio
-import json
 import logging
-import os
-import re
+import shutil
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
-
-# Add parent directory to path for imports when running directly
-if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).parent))
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Import paths from central config
-from config import (
-    AGENT_DIR,
+from ..config import (
     LOGS_DIR,
     SESSIONS_DIR,
-    CONFIG_DIR,
-    ENV_FILE,
+    AgentConfigLoader,
+    ConfigNotFoundError,
+    ConfigValidationError,
+    get_config_loader,
 )
-
-# Load environment variables from .env file (if not already loaded by wrapper)
-if ENV_FILE.exists() and not os.environ.get("ANTHROPIC_API_KEY"):
-    load_dotenv(ENV_FILE)
-
-# These imports don't depend on external SDKs
-from permissions import (
+from .agent_core import ClaudeAgent
+from .exceptions import AgentError, TaskError
+from .permission_config import (
+    AVAILABLE_TOOLS,
+    create_default_permissions_file,
+)
+from .permission_profiles import (
+    PermissionManager,
+    ProfileNotFoundError,
+    validate_profile_file,
+)
+from .permissions import (
     create_default_settings,
     load_permissions_from_config,
 )
-from permission_config import (
-    AVAILABLE_TOOLS,
-    PermissionMode,
-    create_default_permissions_file,
-)
-from permission_profiles import (
-    ProfiledPermissionManager,
-    ProfileType,
-    ProfileNotFoundError,
-    validate_profile_files,
-)
-from schemas import AgentConfig, TaskStatus
-from sessions import SessionManager
+from .schemas import AgentConfig, TaskStatus
+from .sessions import SessionManager
+from .tasks import load_task
 
 # Configure basic logging (will be reconfigured by setup_logging)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
 
 
-class APIKeyError(Exception):
-    """Raised when the API key is missing or invalid."""
-    pass
-
-
-def validate_api_key() -> str:
+def parse_set_overrides(set_args: list[str]) -> dict[str, any]:
     """
-    Validate that ANTHROPIC_API_KEY is set and appears valid.
+    Parse --set KEY=VALUE arguments into a dictionary of overrides.
     
-    Returns:
-        The validated API key.
-    
-    Raises:
-        APIKeyError: If the key is missing or invalid.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    
-    if not api_key:
-        # Check if .env file exists
-        env_exists = ENV_FILE.exists()
-        env_hint = (
-            f"\n   Your .env file exists at: {ENV_FILE}"
-            if env_exists else
-            f"\n   Create a .env file at: {ENV_FILE}"
-        )
+    Args:
+        set_args: List of "key=value" strings from --set arguments.
         
-        raise APIKeyError(
-            f"ANTHROPIC_API_KEY environment variable is not set.\n"
-            f"\n"
-            f"   To fix this, either:\n"
-            f"   1. Add ANTHROPIC_API_KEY=sk-ant-... to your .env file{env_hint}\n"
-            f"   2. Export it in your shell: export ANTHROPIC_API_KEY=sk-ant-...\n"
-            f"   3. Pass it when running: ANTHROPIC_API_KEY=sk-ant-... python agent.py ..."
-        )
+    Returns:
+        Dictionary mapping keys to values. Nested keys use dot notation
+        (e.g., "agent.model" becomes {"model": value}).
+        
+    Raises:
+        ValueError: If a --set argument is malformed.
+    """
+    overrides = {}
     
-    # Validate key format (Anthropic keys start with sk-ant-)
-    if not api_key.startswith("sk-ant-"):
-        raise APIKeyError(
-            f"ANTHROPIC_API_KEY appears invalid.\n"
-            f"\n"
-            f"   Expected format: sk-ant-api03-...\n"
-            f"   Got: {api_key[:15]}...\n"
-            f"\n"
-            f"   Please check your API key at: https://console.anthropic.com/settings/keys"
-        )
+    for arg in set_args:
+        if "=" not in arg:
+            raise ValueError(
+                f"Invalid --set argument: '{arg}'\n"
+                f"Expected format: KEY=VALUE (e.g., agent.model=claude-sonnet-4-5)"
+            )
+        
+        key, value = arg.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        
+        # Remove "agent." prefix if present (for consistency)
+        if key.startswith("agent."):
+            key = key[6:]
+        
+        # Type conversion for known fields
+        if key in ("max_turns", "timeout_seconds", "max_buffer_size"):
+            try:
+                value = int(value)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid value for {key}: '{value}' (expected integer)"
+                )
+        elif key in ("enable_skills", "enable_file_checkpointing", "include_partial_messages"):
+            value = value.lower() in ("true", "1", "yes", "on")
+        elif value.lower() == "null" or value.lower() == "none":
+            value = None
+        
+        overrides[key] = value
+        logger.debug(f"--set override: {key}={value}")
     
-    # Check minimum length (Anthropic keys are typically 100+ chars)
-    if len(api_key) < 50:
-        raise APIKeyError(
-            f"ANTHROPIC_API_KEY appears truncated (only {len(api_key)} characters).\n"
-            f"\n"
-            f"   Anthropic API keys are typically 100+ characters.\n"
-            f"   Please check that you copied the full key."
-        )
-    
-    return api_key
+    return overrides
 
 
 def setup_logging(
@@ -239,29 +220,57 @@ Examples:
         help="List all sessions and exit"
     )
 
-    # Agent configuration
+    # Agent configuration file
+    parser.add_argument(
+        "--config", "-c",
+        type=str,
+        metavar="PATH",
+        help="Path to agent.yaml configuration file (default: config/agent.yaml)"
+    )
+    parser.add_argument(
+        "--secrets",
+        type=str,
+        metavar="PATH",
+        help="Path to secrets.yaml file (default: config/secrets.yaml)"
+    )
+    
+    # Agent configuration overrides (override values from agent.yaml)
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
-        help="Claude model to use (default: claude-sonnet-4-5-20250929)"
+        default=None,
+        help="Claude model to use (overrides agent.yaml)"
     )
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=100,
-        help="Maximum number of turns (default: 100)"
+        default=None,
+        help="Maximum number of turns (overrides agent.yaml)"
     )
     parser.add_argument(
         "--timeout",
         type=int,
-        default=1800,
-        help="Timeout in seconds (default: 1800 = 30 minutes)"
+        default=None,
+        help="Timeout in seconds (overrides agent.yaml)"
     )
     parser.add_argument(
         "--no-skills",
         action="store_true",
-        help="Disable custom skills (enabled by default)"
+        help="Disable custom skills (overrides agent.yaml)"
+    )
+    
+    # Universal configuration overrides using dot notation
+    parser.add_argument(
+        "--set",
+        action="append",
+        metavar="KEY=VALUE",
+        default=[],
+        help="""
+Override any agent.yaml value using dot notation.
+Can be repeated. Examples:
+  --set agent.model=claude-sonnet-4-5-20250929
+  --set agent.max_turns=50
+  --set agent.permission_mode=acceptEdits"""
     )
 
     # Permission configuration
@@ -272,22 +281,12 @@ Examples:
         help="Path to legacy permissions.json configuration file"
     )
     parser.add_argument(
-        "--user-profile",
+        "--profile",
         type=str,
         metavar="PATH",
         help="""
-Path to user permission profile file (YAML or JSON).
-Overrides default AGENT/config/permissions.user.yaml.
-Use this to customize restrictions during task execution."""
-    )
-    parser.add_argument(
-        "--system-profile",
-        type=str,
-        metavar="PATH",
-        help="""
-Path to system permission profile file (YAML or JSON).
-Overrides default AGENT/config/permissions.system.yaml.
-Used for agent initialization/finalization operations."""
+Path to permission profile file (YAML or JSON).
+Overrides default AGENT/config/permissions.yaml."""
     )
     parser.add_argument(
         "--permission-mode",
@@ -312,12 +311,11 @@ Used for agent initialization/finalization operations."""
         help="Create default permissions.json in AGENT/config/"
     )
     parser.add_argument(
-        "--check-profiles",
+        "--check-profile",
         action="store_true",
         help="""
-Validate that permission profile files exist in AGENT/config/:
-  - permissions.system.yaml (system operations)
-  - permissions.user.yaml (task execution)
+Validate that permission profile file exists in AGENT/config/:
+  - permissions.yaml
 Supports .yaml, .yml, and .json formats."""
     )
 
@@ -388,22 +386,17 @@ def init_permissions() -> None:
     print("  - Allowed/denied tool patterns")
 
 
-def check_profiles() -> None:
-    """Validate that permission profile files exist in AGENT/config/."""
+def check_profile() -> None:
+    """Validate that permission profile file exists in AGENT/config/."""
     try:
-        system_path, user_path = validate_profile_files()
-        print("Permission profiles found:")
-        print(f"  ✓ System profile: {system_path}")
-        print(f"  ✓ User profile:   {user_path}")
-        print("\nProfile usage:")
-        print("  - System profile: Used for agent initialization/finalization")
-        print("  - User profile: Used during task execution (sandboxed)")
+        profile_path = validate_profile_file()
+        print("Permission profile found:")
+        print(f"  ✓ Profile: {profile_path}")
         print("\nCustomize with CLI options:")
-        print("  --user-profile ./custom-user-profile.json")
-        print("  --system-profile ./custom-system-profile.json")
+        print("  --profile ./custom-permissions.yaml")
     except ProfileNotFoundError as e:
         print(f"✗ {e}")
-        print("\nTo create profiles, copy templates from the repository or create manually.")
+        print("\nTo create a profile, copy templates from the repository or create manually.")
         raise SystemExit(1)
     print("  - Enabled/disabled tools")
     print("  - Permission mode")
@@ -495,21 +488,17 @@ def show_permissions(permissions_config: Optional[str] = None) -> None:
     print("\n" + "=" * 70 + "\n")
 
 
-async def execute_task(args: argparse.Namespace) -> int:
+async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoader) -> int:
     """
     Execute the agent task.
 
     Args:
         args: Parsed command-line arguments.
+        config_loader: Loaded configuration from agent.yaml.
 
     Returns:
         Exit code (0 for success, 1 for failure).
     """
-    # Import here to avoid loading SDK for info commands
-    from agent_core import ClaudeAgent
-    from exceptions import AgentError, TaskError
-    from tasks import load_task
-
     # Determine working directory
     working_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
 
@@ -527,44 +516,55 @@ async def execute_task(args: argparse.Namespace) -> int:
     logger.info(f"Task: {task[:100]}{'...' if len(task) > 100 else ''}")
     logger.info(f"Working directory: {working_dir}")
 
-    # Load permission profiles (required)
-    system_profile_path = (
-        Path(args.system_profile) if args.system_profile else None
-    )
-    user_profile_path = (
-        Path(args.user_profile) if args.user_profile else None
+    # Load permission profile (required)
+    profile_path = (
+        Path(args.profile) if args.profile else None
     )
 
-    profiled_permission_manager = ProfiledPermissionManager(
-        system_profile_path=system_profile_path,
-        user_profile_path=user_profile_path
-    )
+    permission_manager = PermissionManager(profile_path=profile_path)
 
-    if args.system_profile:
-        logger.info(f"Using system profile: {args.system_profile}")
-    if args.user_profile:
-        logger.info(f"Using user profile: {args.user_profile}")
+    if args.profile:
+        logger.info(f"Using profile: {args.profile}")
 
-    # Start with system profile for initialization phase
-    profiled_permission_manager.activate_system_profile()
+    # Get allowed tools from profile
+    profile = permission_manager.profile
+    profile_tools = profile.tools
+    allowed_tools = list(set(profile_tools.enabled) - set(profile_tools.disabled))
 
-    # Get allowed tools from user profile (will be used during task execution)
-    # Access user_profile directly without activating it
-    user_tools = profiled_permission_manager.user_profile.tools
-    allowed_tools = list(set(user_tools.enabled) - set(user_tools.disabled))
+    # Get auto_checkpoint_tools from profile (with fallback)
+    if profile.checkpointing:
+        auto_checkpoint_tools = profile.checkpointing.auto_checkpoint_tools
+    else:
+        auto_checkpoint_tools = ["Write", "Edit"]  # Reasonable default
 
     logger.info(f"Allowed tools: {', '.join(allowed_tools)}")
+    logger.info(f"Auto checkpoint tools: {', '.join(auto_checkpoint_tools)}")
 
-    # Build configuration
+    # Get configuration from loader (already has CLI overrides applied)
+    yaml_config = config_loader.get_config()
+    
+    # Determine enable_skills: CLI --no-skills takes precedence
+    enable_skills = yaml_config["enable_skills"]
+    if args.no_skills:
+        enable_skills = False
+
+    # Build configuration from loaded YAML + permission profiles
     config = AgentConfig(
-        model=args.model,
-        max_turns=args.max_turns,
-        timeout_seconds=args.timeout,
-        enable_skills=not args.no_skills,
+        model=yaml_config["model"],
+        max_turns=yaml_config["max_turns"],
+        timeout_seconds=yaml_config["timeout_seconds"],
+        enable_skills=enable_skills,
+        enable_file_checkpointing=yaml_config["enable_file_checkpointing"],
+        permission_mode=yaml_config["permission_mode"],
+        role=yaml_config["role"],
+        auto_checkpoint_tools=auto_checkpoint_tools,
         working_dir=str(working_dir),
         additional_dirs=args.add_dir,
         allowed_tools=allowed_tools,
         permissions_config=args.permissions_config,
+        max_buffer_size=yaml_config.get("max_buffer_size"),
+        output_format=yaml_config.get("output_format"),
+        include_partial_messages=yaml_config.get("include_partial_messages", False),
     )
 
     # Create and run agent with permission enforcement
@@ -572,7 +572,7 @@ async def execute_task(args: argparse.Namespace) -> int:
         config=config,
         sessions_dir=SESSIONS_DIR,
         logs_dir=LOGS_DIR,
-        profiled_permission_manager=profiled_permission_manager,
+        permission_manager=permission_manager,
     )
 
     try:
@@ -676,7 +676,6 @@ def wrap_text(text: str, width: int = 70) -> list[str]:
 def get_terminal_width() -> int:
     """Get terminal width with sensible default."""
     try:
-        import shutil
         width = shutil.get_terminal_size().columns
         return max(50, min(width, 120))
     except Exception:
@@ -871,28 +870,14 @@ def main() -> int:
         init_permissions()
         return 0
 
-    if args.check_profiles:
-        check_profiles()
+    if args.check_profile:
+        check_profile()
         return 0
 
     if args.init:
         working_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
         init_settings(working_dir)
         return 0
-
-    # Import TaskError for validation
-    from exceptions import TaskError
-
-    # Validate API key before doing anything else
-    try:
-        api_key = validate_api_key()
-        # Print first 20 chars of key for monitoring
-        key_preview = api_key[:20] + "..." if len(api_key) > 20 else api_key
-        print(f"\033[92m✓\033[0m API Key loaded: \033[90m{key_preview}\033[0m")
-    except APIKeyError as e:
-        print(f"\n\033[91m✗ API Key Error\033[0m\n", file=sys.stderr)
-        print(f"{e}\n", file=sys.stderr)
-        return 1
 
     # Validate required arguments
     if not args.task and not args.task_file:
@@ -901,9 +886,51 @@ def main() -> int:
         )
         return 1
 
+    # Load configuration from agent.yaml and secrets.yaml
+    try:
+        config_path = Path(args.config) if args.config else None
+        secrets_path = Path(args.secrets) if args.secrets else None
+        
+        config_loader = get_config_loader(
+            config_path=config_path,
+            secrets_path=secrets_path,
+            force_new=True
+        )
+        
+        # Parse and apply --set overrides first
+        if args.set:
+            set_overrides = parse_set_overrides(args.set)
+            config_loader.apply_cli_overrides(**set_overrides)
+        
+        # Apply direct CLI overrides (take precedence over --set)
+        config_loader.apply_cli_overrides(
+            model=args.model,
+            max_turns=args.max_turns,
+            timeout_seconds=args.timeout,
+        )
+        
+        # Load and validate configuration (sets ANTHROPIC_API_KEY env var)
+        config_loader.load()
+        
+        # Show API key confirmation
+        api_key = config_loader.get_api_key()
+        key_preview = api_key[:20] + "..." if len(api_key) > 20 else api_key
+        print(f"\033[92m✓\033[0m API Key loaded: \033[90m{key_preview}\033[0m")
+        print(f"\033[92m✓\033[0m Config loaded: \033[90m{config_loader.config_path}\033[0m")
+        
+    except (ConfigNotFoundError, ConfigValidationError) as e:
+        print("\n\033[91m✗ Configuration Error\033[0m\n", file=sys.stderr)
+        print(f"{e}\n", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        # Handle --set parsing errors
+        print("\n\033[91m✗ CLI Argument Error\033[0m\n", file=sys.stderr)
+        print(f"{e}\n", file=sys.stderr)
+        return 1
+
     # Run the task
     try:
-        return asyncio.run(execute_task(args))
+        return asyncio.run(execute_task(args, config_loader))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         return 130

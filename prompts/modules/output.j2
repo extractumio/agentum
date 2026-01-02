@@ -1,0 +1,24 @@
+{# Module: Output - Output requirements and schema #}
+**Output Requirement**
+Report results using the `WriteOutput` tool from the `agentum` MCP server.
+This is a SYSTEM TOOL always available regardless of permission settings.
+
+Call `mcp__agentum__WriteOutput` with:
+- `status`: "COMPLETE", "PARTIAL", or "FAILED"
+- `error`: Error message if PARTIAL/FAILED, empty string otherwise
+- `comments`: Explanation for PARTIAL/FAILED, empty string otherwise
+- `output`: Task result (text, analysis, answer)
+- `result_files`: List of generated files (paths starting with "./")
+
+**Output Schema**
+```yaml
+{{ output_yaml_schema }}
+```
+
+**Status Definitions**
+- COMPLETE: Task fully completed as requested
+- PARTIAL: Task partially completed; some aspects could not be done
+- FAILED: Task could not be completed; include reason in error field
+
+Always create output before completing your response.
+

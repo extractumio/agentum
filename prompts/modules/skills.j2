@@ -1,0 +1,11 @@
+{# Module: Skills - Available skills (conditional) #}
+{% if enable_skills and skills_content %}
+**Skills**
+Skills are pre-defined capabilities in `./skills/`. To use a skill:
+1. Read full instructions from `./skills/<skill_name>/<name>.md`
+2. Follow the instructions
+3. Execute script if available: `python ./skills/<skill_name>/scripts/<script>.py`
+
+{{ skills_content }}
+{% endif %}
+

@@ -27,8 +27,8 @@ from typing import Optional
 import yaml
 
 # Import paths from central config
-from config import SKILLS_DIR
-from exceptions import SkillError
+from ..config import SKILLS_DIR
+from .exceptions import SkillError
 
 logger = logging.getLogger(__name__)
 

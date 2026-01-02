@@ -6,52 +6,185 @@ This module contains the main agent execution logic using the Claude Agent SDK.
 import asyncio
 import json
 import logging
-import os
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
+import yaml
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
 )
 from jinja2 import Environment, FileSystemLoader
 
 # Import paths from central config
-from config import (
+from ..config import (
     AGENT_DIR,
     PROMPTS_DIR,
     LOGS_DIR,
     SESSIONS_DIR,
     SKILLS_DIR,
 )
-from exceptions import (
+from .exceptions import (
     AgentError,
     MaxTurnsExceededError,
     ServerError,
     SessionIncompleteError,
 )
-from schemas import (
+from .schemas import (
     AgentConfig,
     AgentResult,
+    Checkpoint,
+    CheckpointType,
     LLMMetrics,
     OutputSchema,
     SessionInfo,
     TaskStatus,
     TokenUsage,
 )
-from sessions import SessionManager
-from skills import SkillManager
-from tracer import ExecutionTracer, TracerBase, NullTracer
-from trace_processor import TraceProcessor
-from permissions import (
+from .sessions import SessionManager
+from .skills import SkillManager
+from .tracer import ExecutionTracer, TracerBase, NullTracer
+from .trace_processor import TraceProcessor
+from .permissions import (
     create_permission_callback,
     PermissionDenialTracker,
 )
-from permission_profiles import ProfiledPermissionManager
+from .permission_profiles import PermissionManager
+
+# Import system tools (path configured in entry point agent.py)
+try:
+    from agentum.system_write_output import (
+        SYSTEM_TOOLS,
+        create_agentum_mcp_server,
+    )
+    SYSTEM_TOOLS_AVAILABLE = True
+except ImportError:
+    SYSTEM_TOOLS_AVAILABLE = False
+    SYSTEM_TOOLS: list[str] = []
+    create_agentum_mcp_server = None
 
 logger = logging.getLogger(__name__)
+
+
+class CheckpointTracker:
+    """
+    Tracks checkpoints during agent execution.
+    
+    Captures UUIDs from tool result messages and creates checkpoints
+    for file-modifying tools (Write, Edit).
+    """
+    
+    def __init__(
+        self,
+        session_manager: "SessionManager",
+        session_info: SessionInfo,
+        auto_checkpoint_tools: list[str],
+        enabled: bool = True
+    ) -> None:
+        """
+        Initialize the checkpoint tracker.
+        
+        Args:
+            session_manager: SessionManager for storing checkpoints.
+            session_info: Current session information.
+            auto_checkpoint_tools: Tools that trigger auto-checkpoints.
+            enabled: Whether checkpoint tracking is enabled.
+        """
+        self._session_manager = session_manager
+        self._session_info = session_info
+        self._auto_checkpoint_tools = auto_checkpoint_tools
+        self._enabled = enabled
+        self._pending_tool_calls: dict[str, dict[str, Any]] = {}
+        self._turn_counter = 0
+    
+    def track_tool_use(self, tool_use_id: str, tool_name: str, tool_input: dict) -> None:
+        """
+        Track a tool use request for later checkpoint creation.
+        
+        Args:
+            tool_use_id: The tool use ID from the SDK.
+            tool_name: Name of the tool being used.
+            tool_input: The tool input parameters.
+        """
+        if not self._enabled:
+            return
+        
+        self._pending_tool_calls[tool_use_id] = {
+            "tool_name": tool_name,
+            "file_path": tool_input.get("file_path"),
+        }
+    
+    def process_tool_result(self, tool_use_id: str, uuid: Optional[str]) -> Optional[Checkpoint]:
+        """
+        Process a tool result and create a checkpoint if applicable.
+        
+        Args:
+            tool_use_id: The tool use ID from the original request.
+            uuid: The UUID from the tool result message.
+        
+        Returns:
+            Created Checkpoint if one was created, None otherwise.
+        """
+        if not self._enabled or not uuid:
+            return None
+        
+        tool_info = self._pending_tool_calls.pop(tool_use_id, None)
+        if not tool_info:
+            return None
+        
+        tool_name = tool_info.get("tool_name")
+        if tool_name not in self._auto_checkpoint_tools:
+            return None
+        
+        # Create checkpoint for file-modifying tool
+        self._turn_counter += 1
+        checkpoint = self._session_manager.add_checkpoint(
+            self._session_info,
+            uuid=uuid,
+            checkpoint_type=CheckpointType.AUTO,
+            turn_number=self._session_info.cumulative_turns + self._turn_counter,
+            tool_name=tool_name,
+            file_path=tool_info.get("file_path"),
+        )
+        logger.debug(f"Created auto checkpoint: {checkpoint.to_summary()}")
+        return checkpoint
+    
+    def process_message(self, message: Any) -> Optional[Checkpoint]:
+        """
+        Process a message and create checkpoints as needed.
+        
+        This method extracts tool use and tool result information from
+        SDK messages and creates checkpoints for file-modifying tools.
+        
+        Args:
+            message: SDK message to process.
+        
+        Returns:
+            Created Checkpoint if one was created, None otherwise.
+        """
+        if not self._enabled:
+            return None
+        
+        # Check for AssistantMessage with tool use blocks
+        if hasattr(message, 'content') and isinstance(message.content, list):
+            for block in message.content:
+                # Tool use block - track for later
+                if hasattr(block, 'name') and hasattr(block, 'id'):
+                    tool_input = getattr(block, 'input', {}) or {}
+                    self.track_tool_use(block.id, block.name, tool_input)
+                
+                # Tool result block - create checkpoint
+                if hasattr(block, 'tool_use_id') and hasattr(message, 'uuid'):
+                    uuid = getattr(message, 'uuid', None)
+                    if uuid:
+                        return self.process_tool_result(block.tool_use_id, uuid)
+        
+        return None
+
 
 # Jinja environment for templates
 _jinja_env = Environment(
@@ -91,7 +224,7 @@ class ClaudeAgent:
         logs_dir: Optional[Path] = None,
         skills_dir: Optional[Path] = None,
         tracer: Optional[Union[TracerBase, bool]] = True,
-        profiled_permission_manager: Optional[ProfiledPermissionManager] = None
+        permission_manager: Optional[PermissionManager] = None
     ) -> None:
         """
         Initialize the Claude Agent.
@@ -105,14 +238,13 @@ class ClaudeAgent:
                 - True (default): Use ExecutionTracer with default settings.
                 - False/None: Disable tracing (NullTracer).
                 - TracerBase instance: Use custom tracer.
-            profiled_permission_manager: ProfiledPermissionManager for
-                system/user profile-based permission checking.
-                Required - agent will fail without permission profiles.
+            permission_manager: PermissionManager for permission checking.
+                Required - agent will fail without permission profile.
         """
         self._config = config or AgentConfig()
         self._sessions_dir = sessions_dir or SESSIONS_DIR
         self._logs_dir = logs_dir or LOGS_DIR
-        self._profiled_permission_manager = profiled_permission_manager
+        self._permission_manager = permission_manager
         
         # Determine skills directory from parameter, config, or default
         if skills_dir:
@@ -137,11 +269,9 @@ class ClaudeAgent:
         # Track permission denials for proper output generation on interruption
         self._denial_tracker = PermissionDenialTracker()
 
-        # Wire tracer to profiled permission manager for profile switch notifications
-        if self._profiled_permission_manager is not None:
-            self._profiled_permission_manager.set_tracer(self._tracer)
-            # Notify tracer about the current active profile (SYSTEM at init time)
-            self._profiled_permission_manager._notify_profile_switch()
+        # Wire tracer to permission manager for profile notifications
+        if self._permission_manager is not None:
+            self._permission_manager.set_tracer(self._tracer)
     
     @property
     def config(self) -> AgentConfig:
@@ -199,9 +329,8 @@ class ClaudeAgent:
         self._session_manager.cleanup_workspace_skills(session_id)
         
         # Clear session context from permission manager
-        if self._profiled_permission_manager is not None:
-            self._profiled_permission_manager.clear_session_context()
-            self._profiled_permission_manager.activate_system_profile()
+        if self._permission_manager is not None:
+            self._permission_manager.clear_session_context()
 
     def _write_error_output(
         self,
@@ -218,19 +347,18 @@ class ClaudeAgent:
             session_id: The session ID.
             error_msg: The error message to include.
         """
-        import yaml as yaml_lib
         output_file = self._session_manager.get_output_file(session_id)
 
         # Check if output.yaml already exists (agent may have written it)
         if output_file.exists():
             try:
-                existing = yaml_lib.safe_load(output_file.read_text())
+                existing = yaml.safe_load(output_file.read_text())
                 if existing is None:
                     existing = {}
                 # If agent already wrote a valid output, don't overwrite
                 if existing.get("status") in ("COMPLETE", "SUCCESS", "PARTIAL"):
                     return
-            except (yaml_lib.YAMLError, IOError):
+            except (yaml.YAMLError, IOError):
                 pass  # File is invalid/unreadable, we'll overwrite it
 
         # Generate output from denial tracker if available
@@ -296,19 +424,19 @@ class ClaudeAgent:
         if self._config.enable_skills and "Skill" not in all_tools:
             all_tools.append("Skill")
         
-        # Permission management: profiled permission manager is required
-        if self._profiled_permission_manager is None:
+        # Permission management: permission manager is required
+        if self._permission_manager is None:
             raise AgentError(
-                "ProfiledPermissionManager is required. "
-                "Agent cannot run without permission profiles."
+                "PermissionManager is required. "
+                "Agent cannot run without permission profile."
             )
         
-        # Activate user profile for task execution
-        self._profiled_permission_manager.activate_user_profile()
+        # Activate permission profile
+        self._permission_manager.activate()
         
         # Get tool configuration from active profile
-        permission_checked_tools = self._profiled_permission_manager.get_permission_checked_tools()
-        sandbox_disabled_tools = self._profiled_permission_manager.get_disabled_tools()
+        permission_checked_tools = self._permission_manager.get_permission_checked_tools()
+        sandbox_disabled_tools = self._permission_manager.get_disabled_tools()
         
         # Pre-approved tools (no permission check needed)
         allowed_tools = [
@@ -325,7 +453,7 @@ class ClaudeAgent:
         # Disabled tools list for SDK
         disallowed_tools = list(sandbox_disabled_tools)
         
-        active_profile = self._profiled_permission_manager.active_profile
+        active_profile = self._permission_manager.active_profile
         logger.info(
             f"SANDBOX: Using profile '{active_profile.name}' for task execution"
         )
@@ -334,7 +462,7 @@ class ClaudeAgent:
         logger.info(f"SANDBOX: allowed_tools (pre-approved)={allowed_tools}")
         logger.info(f"SANDBOX: disallowed_tools (blocked)={disallowed_tools}")
         
-        # Create permission callback using the profiled manager
+        # Create permission callback using the permission manager
         # Pass tracer's on_permission_check for tracing (if available)
         # Pass denial tracker to record denials for output generation
         # Pass trace_processor so permission denial shows FAILED status
@@ -346,7 +474,7 @@ class ClaudeAgent:
         # Clear any previous denials before starting new run
         self._denial_tracker.clear()
         can_use_tool = create_permission_callback(
-            permission_manager=self._profiled_permission_manager,
+            permission_manager=self._permission_manager,
             on_permission_check=on_permission_check,
             denial_tracker=self._denial_tracker,
             trace_processor=trace_processor,
@@ -356,7 +484,7 @@ class ClaudeAgent:
         
         # Build list of accessible directories from the active profile
         working_dir = Path(self._config.working_dir) if self._config.working_dir else AGENT_DIR
-        profile_dirs = self._profiled_permission_manager.get_allowed_dirs()
+        profile_dirs = self._permission_manager.get_allowed_dirs()
         add_dirs = []
         for dir_path in profile_dirs:
             # Resolve relative paths (e.g., "./input") to absolute paths
@@ -377,6 +505,27 @@ class ClaudeAgent:
         # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
         session_dir = self._session_manager.get_session_dir(session_info.session_id)
         
+        # Build MCP servers dict - always include system tools
+        mcp_servers: dict[str, Any] = {}
+        
+        # Add Agentum MCP server (cannot be disabled via permissions)
+        if SYSTEM_TOOLS_AVAILABLE and create_agentum_mcp_server is not None:
+            agentum_server = create_agentum_mcp_server(
+                workspace_path=workspace_dir,
+                session_id=session_info.session_id,
+            )
+            mcp_servers["agentum"] = agentum_server
+            
+            # Add all system tools to allowed_tools (pre-approved, bypass permission check)
+            for tool_name in SYSTEM_TOOLS:
+                if tool_name not in allowed_tools:
+                    allowed_tools.append(tool_name)
+            
+            logger.info(
+                f"SYSTEM TOOLS: Registered Agentum MCP server "
+                f"(tools={SYSTEM_TOOLS})"
+            )
+        
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
             f"tools={all_tools}, allowed_tools={allowed_tools}, "
@@ -384,6 +533,7 @@ class ClaudeAgent:
             f"can_use_tool={'SET' if can_use_tool else 'NONE'}, "
             f"cwd={workspace_dir}, "
             f"CLAUDE_CONFIG_DIR={session_dir}, "
+            f"mcp_servers={list(mcp_servers.keys())}, "
             f"resume={resume_id}, fork_session={fork_session}"
         )
         
@@ -394,6 +544,7 @@ class ClaudeAgent:
             tools=all_tools,  # Available tools (excluding disabled)
             allowed_tools=allowed_tools,  # Pre-approved (no permission check)
             disallowed_tools=disallowed_tools,  # Completely blocked tools
+            mcp_servers=mcp_servers if mcp_servers else None,
             cwd=str(workspace_dir),  # Sandboxed workspace, not session dir
             add_dirs=add_dirs,
             setting_sources=["project"] if self._config.enable_skills else [],
@@ -401,6 +552,7 @@ class ClaudeAgent:
             env={"CLAUDE_CONFIG_DIR": str(session_dir)},  # Per-session storage
             resume=resume_id,  # Claude's session ID for resumption
             fork_session=fork_session,  # Fork instead of continue when resuming
+            enable_file_checkpointing=self._config.enable_file_checkpointing,
         )
     
     def _build_user_prompt(
@@ -485,10 +637,50 @@ class ClaudeAgent:
         system_prompt: Optional[str] = None,
         parameters: Optional[dict] = None,
         resume_session_id: Optional[str] = None,
-        fork_session: bool = False
+        fork_session: bool = False,
+        timeout_seconds: Optional[int] = None
     ) -> AgentResult:
         """
         Execute the agent with a task.
+        
+        Timeout is always enforced. Uses config.timeout_seconds (default 1800s = 30 min)
+        unless overridden via timeout_seconds parameter.
+        
+        Args:
+            task: The task description.
+            system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
+            parameters: Additional template parameters (optional).
+            resume_session_id: Session ID to resume (optional).
+            fork_session: If True, fork to new session when resuming (optional).
+            timeout_seconds: Override timeout (uses config.timeout_seconds if None).
+        
+        Returns:
+            AgentResult with execution outcome.
+        
+        Raises:
+            AgentError: If prompts cannot be loaded or are invalid.
+        """
+        # Determine effective timeout (parameter overrides config)
+        effective_timeout = timeout_seconds or self._config.timeout_seconds
+        
+        # Wrap execution with timeout to ensure every run is time-bounded
+        return await asyncio.wait_for(
+            self._execute(
+                task, system_prompt, parameters, resume_session_id, fork_session
+            ),
+            timeout=effective_timeout,
+        )
+
+    async def _execute(
+        self,
+        task: str,
+        system_prompt: Optional[str] = None,
+        parameters: Optional[dict] = None,
+        resume_session_id: Optional[str] = None,
+        fork_session: bool = False
+    ) -> AgentResult:
+        """
+        Internal execution logic (called by run() with timeout wrapper).
         
         Args:
             task: The task description.
@@ -526,14 +718,19 @@ class ClaudeAgent:
                 working_dir=self._config.working_dir or str(AGENT_DIR)
             )
         
+        # Set file checkpointing flag on session
+        if self._config.enable_file_checkpointing:
+            session_info.file_checkpointing_enabled = True
+            self._session_manager._save_session_info(session_info)
+        
         # Set session context for session-specific permissions
         # This sandboxes the agent to only its own workspace folder
-        if self._profiled_permission_manager is not None:
+        if self._permission_manager is not None:
             workspace_path = f"./sessions/{session_info.session_id}/workspace"
             workspace_absolute = self._session_manager.get_workspace_dir(
                 session_info.session_id
             )
-            self._profiled_permission_manager.set_session_context(
+            self._permission_manager.set_session_context(
                 session_id=session_info.session_id,
                 workspace_path=workspace_path,
                 workspace_absolute_path=workspace_absolute
@@ -559,27 +756,26 @@ class ClaudeAgent:
                 skills_content = self._skill_manager.get_all_skills_prompt_for_workspace()
             
             # Build permission profile data for the template
-            # Use user profile since that's what will be active during task execution
             # Now includes session-specific paths after set_session_context()
             permissions_data = None
-            if self._profiled_permission_manager is not None:
-                user_profile = self._profiled_permission_manager.user_profile
+            if self._permission_manager is not None:
+                active_profile = self._permission_manager.active_profile
                 # Get allow/deny/allowed_dirs from permissions if available
                 allow_rules: list[str] = []
                 deny_rules: list[str] = []
                 allowed_dirs: list[str] = []
-                if user_profile.permissions is not None:
-                    allow_rules = user_profile.permissions.allow
-                    deny_rules = user_profile.permissions.deny
-                    allowed_dirs = user_profile.permissions.allowed_dirs
+                if active_profile.permissions is not None:
+                    allow_rules = active_profile.permissions.allow
+                    deny_rules = active_profile.permissions.deny
+                    allowed_dirs = active_profile.permissions.allowed_dirs
                 
                 permissions_data = {
-                    "name": user_profile.name,
-                    "description": user_profile.description,
+                    "name": active_profile.name,
+                    "description": active_profile.description,
                     "allow": allow_rules,
                     "deny": deny_rules,
-                    "enabled_tools": user_profile.tools.enabled,
-                    "disabled_tools": user_profile.tools.disabled,
+                    "enabled_tools": active_profile.tools.enabled,
+                    "disabled_tools": active_profile.tools.disabled,
                     "allowed_dirs": allowed_dirs,
                 }
             
@@ -588,13 +784,43 @@ class ClaudeAgent:
                 session_info.session_id
             )
             
+            # Load role content from role template file (fail-fast if missing)
+            # Custom role can be specified via parameters["role"] to override config
+            params = parameters or {}
+            role_name = params.get("role", self._config.role)
+            role_file = PROMPTS_DIR / "roles" / f"{role_name}.md"
+            if not role_file.exists():
+                raise AgentError(
+                    f"Role file not found: {role_file}\n"
+                    f"Create the role file in AGENT/prompts/roles/{role_name}.md"
+                )
+            try:
+                role_content = role_file.read_text(encoding="utf-8").strip()
+            except IOError as e:
+                raise AgentError(f"Failed to read role file {role_file}: {e}")
+            
+            # Build template context with all dynamic values
+            template_context = {
+                # Environment info
+                "current_date": datetime.now().strftime("%A, %B %d, %Y"),
+                "model": self._config.model,
+                "session_id": session_info.session_id,
+                "workspace_path": str(workspace_dir),
+                "working_dir": self._config.working_dir or str(workspace_dir),
+                # Role
+                "role_content": role_content,
+                # Permissions
+                "permissions": permissions_data,
+                # Output
+                "output_yaml_schema": OutputSchema.get_yaml_schema_example(),
+                # Skills
+                "enable_skills": self._config.enable_skills,
+                "skills_content": skills_content,
+            }
+            
             try:
                 system_prompt = _jinja_env.get_template("system.j2").render(
-                    enable_skills=self._config.enable_skills,
-                    skills_content=skills_content,
-                    permissions=permissions_data,
-                    output_yaml_schema=OutputSchema.get_yaml_schema_example(),
-                    working_dir=self._config.working_dir or str(workspace_dir),
+                    **template_context
                 )
             except Exception as e:
                 raise AgentError(f"Failed to render system prompt template: {e}")
@@ -627,6 +853,14 @@ class ClaudeAgent:
         log_file = self._session_manager.get_log_file(session_info.session_id)
         result: Optional[ResultMessage] = None
         
+        # Create checkpoint tracker for file change tracking
+        checkpoint_tracker = CheckpointTracker(
+            session_manager=self._session_manager,
+            session_info=session_info,
+            auto_checkpoint_tools=self._config.auto_checkpoint_tools,
+            enabled=self._config.enable_file_checkpointing,
+        )
+        
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(user_prompt)
@@ -638,6 +872,9 @@ class ClaudeAgent:
                         
                         # Process for console tracing
                         trace_processor.process_message(message)
+                        
+                        # Track checkpoints for file-modifying tools
+                        checkpoint_tracker.process_message(message)
                         
                         if isinstance(message, ResultMessage):
                             result = message
@@ -781,10 +1018,13 @@ class ClaudeAgent:
         system_prompt: Optional[str] = None,
         parameters: Optional[dict] = None,
         resume_session_id: Optional[str] = None,
-        fork_session: bool = False
+        fork_session: bool = False,
+        timeout_seconds: Optional[int] = None
     ) -> AgentResult:
         """
-        Execute agent with timeout.
+        Execute agent with timeout (alias for run(), kept for backward compatibility).
+        
+        All runs now enforce timeout by default (30 minutes).
         
         Args:
             task: The task description.
@@ -792,25 +1032,267 @@ class ClaudeAgent:
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional).
             fork_session: If True, fork to new session when resuming (optional).
+            timeout_seconds: Override timeout (uses config.timeout_seconds if None).
         
         Returns:
             AgentResult with execution outcome.
         """
-        return await asyncio.wait_for(
-            self.run(task, system_prompt, parameters, resume_session_id, fork_session),
-            timeout=self._config.timeout_seconds,
+        return await self.run(
+            task, system_prompt, parameters, resume_session_id, fork_session,
+            timeout_seconds=timeout_seconds
         )
+
+    async def compact(self, session_id: str) -> dict[str, Any]:
+        """
+        Compact conversation history for a session.
+        
+        Reduces context size by summarizing older messages while
+        preserving important context. Uses the SDK's /compact command.
+        
+        Args:
+            session_id: The session ID to compact.
+        
+        Returns:
+            Dict with compaction metadata:
+            - pre_tokens: Token count before compaction
+            - post_tokens: Token count after compaction (if available)
+            - trigger: What triggered the compaction
+        
+        Raises:
+            AgentError: If session cannot be loaded or has no resume ID.
+        """
+        session_info = self._session_manager.load_session(session_id)
+        
+        if not session_info.resume_id:
+            raise AgentError(
+                f"Session {session_id} has no Claude session ID to resume"
+            )
+        
+        compact_metadata: dict[str, Any] = {}
+        
+        async with ClaudeSDKClient(
+            options=ClaudeAgentOptions(
+                resume=session_info.resume_id,
+                max_turns=1
+            )
+        ) as client:
+            await client.query("/compact")
+            
+            async for message in client.receive_response():
+                if isinstance(message, SystemMessage):
+                    if message.subtype == "compact_boundary":
+                        compact_metadata = message.data.get("compact_metadata", {})
+        
+        logger.info(
+            f"Compacted session {session_id}: "
+            f"pre_tokens={compact_metadata.get('pre_tokens')}"
+        )
+        
+        return compact_metadata
+
+    # -------------------------------------------------------------------------
+    # Checkpoint Management
+    # -------------------------------------------------------------------------
+
+    def list_checkpoints(self, session_id: str) -> list[Checkpoint]:
+        """
+        List all checkpoints for a session.
+        
+        Args:
+            session_id: The session ID.
+        
+        Returns:
+            List of Checkpoint objects, ordered by creation time.
+        """
+        return self._session_manager.list_checkpoints(session_id)
+
+    def get_checkpoint(
+        self,
+        session_id: str,
+        checkpoint_id: Optional[str] = None,
+        index: Optional[int] = None
+    ) -> Optional[Checkpoint]:
+        """
+        Get a specific checkpoint by UUID or index.
+        
+        Args:
+            session_id: The session ID.
+            checkpoint_id: The checkpoint UUID to find.
+            index: The checkpoint index (0 = first, -1 = last).
+        
+        Returns:
+            The Checkpoint if found, None otherwise.
+        """
+        return self._session_manager.get_checkpoint(
+            session_id, checkpoint_id=checkpoint_id, index=index
+        )
+
+    def create_checkpoint(
+        self,
+        session_id: str,
+        uuid: str,
+        description: Optional[str] = None
+    ) -> Checkpoint:
+        """
+        Manually create a checkpoint for a session.
+        
+        This allows programmatically marking a point in the conversation
+        that can be rewound to later.
+        
+        Args:
+            session_id: The session ID.
+            uuid: The user message UUID from the SDK.
+            description: Optional description of the checkpoint.
+        
+        Returns:
+            The created Checkpoint object.
+        """
+        session_info = self._session_manager.load_session(session_id)
+        return self._session_manager.add_checkpoint(
+            session_info,
+            uuid=uuid,
+            checkpoint_type=CheckpointType.MANUAL,
+            description=description,
+            turn_number=session_info.cumulative_turns,
+        )
+
+    async def rewind_to_checkpoint(
+        self,
+        session_id: str,
+        checkpoint_id: Optional[str] = None,
+        checkpoint_index: Optional[int] = None
+    ) -> dict[str, Any]:
+        """
+        Rewind files to a specific checkpoint.
+        
+        This restores all files to their state at the specified checkpoint,
+        reverting any changes made after that point.
+        
+        Requires enable_file_checkpointing=True in agent config.
+        
+        Args:
+            session_id: The session ID.
+            checkpoint_id: UUID of the checkpoint to rewind to.
+            checkpoint_index: Index of the checkpoint (alternative to UUID).
+        
+        Returns:
+            Dict with rewind metadata:
+            - checkpoint: The checkpoint that was rewound to
+            - checkpoints_removed: Number of subsequent checkpoints removed
+        
+        Raises:
+            AgentError: If session or checkpoint cannot be found,
+                or if file checkpointing is not enabled.
+        """
+        # Load session
+        session_info = self._session_manager.load_session(session_id)
+        
+        # Validate file checkpointing is enabled
+        if not session_info.file_checkpointing_enabled:
+            raise AgentError(
+                f"File checkpointing is not enabled for session {session_id}. "
+                "Set enable_file_checkpointing=True in AgentConfig."
+            )
+        
+        # Validate session has a resume ID
+        if not session_info.resume_id:
+            raise AgentError(
+                f"Session {session_id} has no Claude session ID to resume"
+            )
+        
+        # Get the target checkpoint
+        checkpoint = self._session_manager.get_checkpoint(
+            session_id,
+            checkpoint_id=checkpoint_id,
+            index=checkpoint_index
+        )
+        
+        if checkpoint is None:
+            raise AgentError(
+                f"Checkpoint not found: id={checkpoint_id}, index={checkpoint_index}"
+            )
+        
+        # Use SDK to rewind files
+        async with ClaudeSDKClient(
+            options=ClaudeAgentOptions(
+                resume=session_info.resume_id,
+                max_turns=1,
+                enable_file_checkpointing=True,
+            )
+        ) as client:
+            await client.rewind_files(checkpoint.uuid)
+        
+        # Clear checkpoints after the rewound-to checkpoint
+        removed = self._session_manager.clear_checkpoints_after(
+            session_info, checkpoint.uuid
+        )
+        
+        logger.info(
+            f"Rewound session {session_id} to checkpoint {checkpoint.uuid}, "
+            f"removed {removed} subsequent checkpoints"
+        )
+        
+        # Notify tracer if available
+        if hasattr(self._tracer, 'on_checkpoint_rewind'):
+            self._tracer.on_checkpoint_rewind(checkpoint, removed)
+        
+        return {
+            "checkpoint": checkpoint,
+            "checkpoints_removed": removed,
+        }
+
+    async def rewind_to_latest_checkpoint(
+        self,
+        session_id: str
+    ) -> dict[str, Any]:
+        """
+        Rewind to the most recent checkpoint.
+        
+        Convenience method for undoing the last file-modifying operation.
+        
+        Args:
+            session_id: The session ID.
+        
+        Returns:
+            Dict with rewind metadata (same as rewind_to_checkpoint).
+        
+        Raises:
+            AgentError: If no checkpoints exist or rewind fails.
+        """
+        # Get the second-to-last checkpoint (rewind to state before last change)
+        checkpoints = self.list_checkpoints(session_id)
+        
+        if len(checkpoints) < 2:
+            raise AgentError(
+                f"Session {session_id} needs at least 2 checkpoints to rewind"
+            )
+        
+        # Rewind to the checkpoint before the last one
+        return await self.rewind_to_checkpoint(
+            session_id, checkpoint_index=-2
+        )
+
+    def get_checkpoint_summary(self, session_id: str) -> list[str]:
+        """
+        Get a human-readable summary of all checkpoints.
+        
+        Args:
+            session_id: The session ID.
+        
+        Returns:
+            List of checkpoint summary strings.
+        """
+        checkpoints = self.list_checkpoints(session_id)
+        return [
+            f"[{i}] {cp.to_summary()}"
+            for i, cp in enumerate(checkpoints)
+        ]
 
 
 async def run_agent(
     task: str,
-    profiled_permission_manager: ProfiledPermissionManager,
-    working_dir: Optional[str] = None,
-    model: Optional[str] = None,
-    max_turns: int = 100,
-    timeout_seconds: int = 1800,
-    allowed_tools: Optional[list[str]] = None,
-    enable_skills: bool = False,
+    config: AgentConfig,
+    permission_manager: PermissionManager,
     system_prompt: Optional[str] = None,
     parameters: Optional[dict] = None,
     resume_session_id: Optional[str] = None,
@@ -822,13 +1304,8 @@ async def run_agent(
     
     Args:
         task: The task description.
-        profiled_permission_manager: ProfiledPermissionManager (required).
-        working_dir: Working directory for the agent.
-        model: Claude model to use.
-        max_turns: Maximum number of turns.
-        timeout_seconds: Timeout in seconds.
-        allowed_tools: List of allowed tools.
-        enable_skills: Enable custom skills.
+        config: AgentConfig loaded from agent.yaml (required).
+        permission_manager: PermissionManager (required).
         system_prompt: Custom system prompt.
         parameters: Additional template parameters.
         resume_session_id: Session ID to resume.
@@ -843,23 +1320,25 @@ async def run_agent(
     
     Raises:
         AgentError: If permission manager is not provided or prompts are missing.
-    """
-    config = AgentConfig(
-        model=model or os.environ.get(
-            "ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"
-        ),
-        allowed_tools=allowed_tools or ["Read", "Write", "Edit", "Task", "Skill"],
-        max_turns=max_turns,
-        timeout_seconds=timeout_seconds,
-        enable_skills=enable_skills,
-        working_dir=working_dir,
-        additional_dirs=[],
-    )
     
+    Example:
+        from config import AgentConfigLoader
+        from schemas import AgentConfig
+        
+        loader = AgentConfigLoader()
+        yaml_config = loader.get_config()
+        config = AgentConfig(**yaml_config, working_dir="/path/to/project")
+        
+        result = await run_agent(
+            task="List all files",
+            config=config,
+            permission_manager=manager
+        )
+    """
     agent = ClaudeAgent(
         config,
         tracer=tracer,
-        profiled_permission_manager=profiled_permission_manager
+        permission_manager=permission_manager
     )
     return await agent.run_with_timeout(
         task, system_prompt, parameters, resume_session_id, fork_session

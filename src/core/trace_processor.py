@@ -21,6 +21,7 @@ import re
 from dataclasses import asdict
 from typing import Any, Optional, Union
 
+import yaml
 from claude_agent_sdk import (
     AssistantMessage,
     HookContext,
@@ -41,7 +42,7 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
-from tracer import ExecutionTracer, TracerBase
+from .tracer import ExecutionTracer, TracerBase
 
 
 # Type alias for SDK messages
@@ -430,7 +431,6 @@ class TraceProcessor:
         
         # Try to parse the content as YAML
         try:
-            import yaml
             data = yaml.safe_load(content)
             if isinstance(data, dict) and "status" in data:
                 self._output_status = str(data["status"])

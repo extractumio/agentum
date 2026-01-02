@@ -1,0 +1,38 @@
+{# Module: Tools - Dynamic tool permissions display #}
+{% if permissions %}
+**Permission Profile: {{ permissions.name }}**
+{{ permissions.description }}
+
+*Enabled Tools:* {{ permissions.enabled_tools | join(', ') }}
+{% if permissions.disabled_tools %}
+*Disabled Tools:* {{ permissions.disabled_tools | join(', ') }}
+{% endif %}
+
+*Workspace Access:*
+{% for dir in permissions.allowed_dirs %}
+- `{{ dir }}`
+{% endfor %}
+
+{% set bash_allow = permissions.allow | select_startswith("Bash(") %}
+{% set bash_deny = permissions.deny | select_startswith("Bash(") %}
+{% if bash_allow or bash_deny %}
+**Bash Permissions**
+{% if bash_allow %}
+ALLOWED: {% for p in bash_allow %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %}
+
+{% endif %}
+{% if bash_deny | contains("Bash(*)") %}
+BLOCKED: All Bash except explicitly allowed patterns above.
+{% endif %}
+{% endif %}
+
+{% set glob_blocked = permissions.deny | contains("Glob(*)") %}
+{% set grep_blocked = permissions.deny | contains("Grep(*)") %}
+{% set ls_blocked = permissions.deny | contains("LS(*)") %}
+{% if glob_blocked or grep_blocked or ls_blocked %}
+**Blocked Tools**: {% if glob_blocked %}Glob{% endif %}{% if grep_blocked %}{% if glob_blocked %}, {% endif %}Grep{% endif %}{% if ls_blocked %}{% if glob_blocked or grep_blocked %}, {% endif %}LS{% endif %}
+
+{% endif %}
+
+**Enforcement**: Permission denials use pattern matching. After 3 failed attempts, agent stops.
+{% endif %}

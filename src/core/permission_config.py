@@ -18,7 +18,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator
 
 # Import paths from central config
-from config import AGENT_DIR, CONFIG_DIR
+from ..config import AGENT_DIR, CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 

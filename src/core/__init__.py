@@ -46,6 +46,8 @@ from .permissions import (
 from .schemas import (
     AgentConfig,
     AgentResult,
+    Checkpoint,
+    CheckpointType,
     TaskStatus,
     SessionInfo,
     TokenUsage,
@@ -115,6 +117,8 @@ __all__ = [
     # Schemas
     "AgentConfig",
     "AgentResult",
+    "Checkpoint",
+    "CheckpointType",
     "TaskStatus",
     "SessionInfo",
     "TokenUsage",

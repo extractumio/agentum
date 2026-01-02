@@ -16,6 +16,8 @@ Usage:
     tracer.on_error(error_message)
     tracer.on_agent_complete(result_message)
 """
+import json
+import shutil
 import sys
 import threading
 import time
@@ -24,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Optional
+
+from .schemas import get_model_context_size
 
 
 class Color(StrEnum):
@@ -405,7 +409,6 @@ class ExecutionTracer(TracerBase):
     def _detect_console_width(self) -> int:
         """Detect terminal width, with sensible default."""
         try:
-            import shutil
             width = shutil.get_terminal_size().columns
             # Clamp to reasonable range
             return max(60, min(width, 120))
@@ -626,11 +629,9 @@ class ExecutionTracer(TracerBase):
         Returns:
             List of formatted lines.
         """
-        import json as json_mod
-        
         try:
             if isinstance(value, (dict, list)):
-                formatted = json_mod.dumps(value, indent=indent, ensure_ascii=False)
+                formatted = json.dumps(value, indent=indent, ensure_ascii=False)
             else:
                 formatted = str(value)
         except (TypeError, ValueError):
@@ -1283,6 +1284,10 @@ class ExecutionTracer(TracerBase):
         tool_id: str
     ) -> None:
         """Called before a tool/skill is executed."""
+        # Stop any existing spinner BEFORE writing new output to prevent
+        # the old spinner thread from overwriting the new tool header
+        self._stop_spinner()
+        
         self._turn_count += 1
         self._tool_start_times[tool_id] = time.time()
         
@@ -1304,9 +1309,8 @@ class ExecutionTracer(TracerBase):
                 todos = tool_input.get("todos", [])
                 if isinstance(todos, str):
                     try:
-                        import json as json_mod
-                        todos = json_mod.loads(todos)
-                    except (json_mod.JSONDecodeError, TypeError):
+                        todos = json.loads(todos)
+                    except (json.JSONDecodeError, TypeError):
                         todos = []
                 
                 if isinstance(todos, list) and todos:
@@ -1334,9 +1338,8 @@ class ExecutionTracer(TracerBase):
                         # Parse JSON string if needed
                         if is_json_string:
                             try:
-                                import json as json_mod
-                                value = json_mod.loads(value)
-                            except (json_mod.JSONDecodeError, TypeError):
+                                value = json.loads(value)
+                            except (json.JSONDecodeError, TypeError):
                                 pass
                         
                         # Format and print each line
@@ -1539,7 +1542,6 @@ class ExecutionTracer(TracerBase):
             
             # Add context load if model is known
             if model:
-                from schemas import get_model_context_size
                 context_size = get_model_context_size(model)
                 context_percent = (total_input / context_size) * 100
                 token_parts.append(

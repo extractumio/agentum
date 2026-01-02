@@ -16,8 +16,15 @@ from typing import Optional
 
 import yaml
 
-from exceptions import SessionError
-from schemas import OutputSchema, SessionInfo, TaskStatus, TokenUsage
+from .exceptions import SessionError
+from .schemas import (
+    Checkpoint,
+    CheckpointType,
+    OutputSchema,
+    SessionInfo,
+    TaskStatus,
+    TokenUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +330,209 @@ class SessionManager:
         
         self._save_session_info(session_info)
         return session_info
+
+    # -------------------------------------------------------------------------
+    # Checkpoint Management
+    # -------------------------------------------------------------------------
+
+    def add_checkpoint(
+        self,
+        session_info: SessionInfo,
+        uuid: str,
+        checkpoint_type: CheckpointType = CheckpointType.AUTO,
+        description: Optional[str] = None,
+        turn_number: Optional[int] = None,
+        tool_name: Optional[str] = None,
+        file_path: Optional[str] = None
+    ) -> Checkpoint:
+        """
+        Add a checkpoint to the session.
+        
+        Checkpoints track file system state at specific points, enabling
+        rollback of file changes via rewind_files().
+        
+        Args:
+            session_info: The session to add the checkpoint to.
+            uuid: User message UUID from the SDK.
+            checkpoint_type: Type of checkpoint (AUTO, MANUAL, TURN).
+            description: Optional description of the checkpoint.
+            turn_number: Turn number when checkpoint was created.
+            tool_name: Name of the tool that triggered this checkpoint.
+            file_path: File path that was modified.
+        
+        Returns:
+            The created Checkpoint object.
+        """
+        checkpoint = Checkpoint(
+            uuid=uuid,
+            checkpoint_type=checkpoint_type,
+            description=description,
+            turn_number=turn_number,
+            tool_name=tool_name,
+            file_path=file_path,
+        )
+        session_info.checkpoints.append(checkpoint)
+        self._save_session_info(session_info)
+        logger.debug(f"Added checkpoint: {checkpoint.to_summary()}")
+        return checkpoint
+
+    def list_checkpoints(self, session_id: str) -> list[Checkpoint]:
+        """
+        List all checkpoints for a session.
+        
+        Args:
+            session_id: The session ID.
+        
+        Returns:
+            List of Checkpoint objects, ordered by creation time.
+        """
+        session_info = self.load_session(session_id)
+        return session_info.checkpoints
+
+    def get_checkpoint(
+        self,
+        session_id: str,
+        checkpoint_id: Optional[str] = None,
+        index: Optional[int] = None
+    ) -> Optional[Checkpoint]:
+        """
+        Get a specific checkpoint by UUID or index.
+        
+        Args:
+            session_id: The session ID.
+            checkpoint_id: The checkpoint UUID to find.
+            index: The checkpoint index (0 = first, -1 = last).
+        
+        Returns:
+            The Checkpoint if found, None otherwise.
+        
+        Raises:
+            ValueError: If neither checkpoint_id nor index is provided.
+        """
+        if checkpoint_id is None and index is None:
+            raise ValueError("Either checkpoint_id or index must be provided")
+        
+        checkpoints = self.list_checkpoints(session_id)
+        
+        if not checkpoints:
+            return None
+        
+        if index is not None:
+            try:
+                return checkpoints[index]
+            except IndexError:
+                return None
+        
+        for checkpoint in checkpoints:
+            if checkpoint.uuid == checkpoint_id:
+                return checkpoint
+        
+        return None
+
+    def get_latest_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
+        """
+        Get the most recent checkpoint for a session.
+        
+        Args:
+            session_id: The session ID.
+        
+        Returns:
+            The latest Checkpoint if any exist, None otherwise.
+        """
+        return self.get_checkpoint(session_id, index=-1)
+
+    def clear_checkpoints_after(
+        self,
+        session_info: SessionInfo,
+        checkpoint_uuid: str
+    ) -> int:
+        """
+        Remove all checkpoints after a specific checkpoint.
+        
+        Used when rewinding to a checkpoint - subsequent checkpoints
+        become invalid as the file state has changed.
+        
+        Args:
+            session_info: The session to modify.
+            checkpoint_uuid: The UUID of the checkpoint to keep.
+        
+        Returns:
+            Number of checkpoints removed.
+        """
+        original_count = len(session_info.checkpoints)
+        
+        keep_checkpoints = []
+        found_target = False
+        for checkpoint in session_info.checkpoints:
+            keep_checkpoints.append(checkpoint)
+            if checkpoint.uuid == checkpoint_uuid:
+                found_target = True
+                break
+        
+        if found_target:
+            session_info.checkpoints = keep_checkpoints
+            self._save_session_info(session_info)
+            removed = original_count - len(keep_checkpoints)
+            if removed > 0:
+                logger.info(
+                    f"Cleared {removed} checkpoints after {checkpoint_uuid}"
+                )
+            return removed
+        
+        return 0
+
+    def clear_all_checkpoints(self, session_info: SessionInfo) -> int:
+        """
+        Remove all checkpoints from a session.
+        
+        Args:
+            session_info: The session to clear checkpoints from.
+        
+        Returns:
+            Number of checkpoints removed.
+        """
+        count = len(session_info.checkpoints)
+        session_info.checkpoints = []
+        self._save_session_info(session_info)
+        if count > 0:
+            logger.info(f"Cleared all {count} checkpoints from session")
+        return count
+
+    def get_checkpoints_by_type(
+        self,
+        session_id: str,
+        checkpoint_type: CheckpointType
+    ) -> list[Checkpoint]:
+        """
+        Get checkpoints of a specific type.
+        
+        Args:
+            session_id: The session ID.
+            checkpoint_type: The type of checkpoints to retrieve.
+        
+        Returns:
+            List of matching Checkpoint objects.
+        """
+        checkpoints = self.list_checkpoints(session_id)
+        return [cp for cp in checkpoints if cp.checkpoint_type == checkpoint_type]
+
+    def get_checkpoints_for_file(
+        self,
+        session_id: str,
+        file_path: str
+    ) -> list[Checkpoint]:
+        """
+        Get checkpoints related to a specific file.
+        
+        Args:
+            session_id: The session ID.
+            file_path: The file path to filter by.
+        
+        Returns:
+            List of Checkpoint objects for the specified file.
+        """
+        checkpoints = self.list_checkpoints(session_id)
+        return [cp for cp in checkpoints if cp.file_path == file_path]
     
     def list_sessions(self) -> list[SessionInfo]:
         """
@@ -360,9 +570,11 @@ class SessionManager:
                 # Ensure all fields are present with defaults
                 output = OutputSchema.create_empty(session_id=session_id)
                 return output.model_copy(update=data).model_dump()
-            except yaml.YAMLError:
-                pass
-        # Return default output with all fields
+            except yaml.YAMLError as e:
+                logger.warning(f"Failed to parse output.yaml for session {session_id}: {e}")
+        else:
+            logger.debug(f"No output.yaml found for session {session_id}")
+        # Return default output with all fields (status=FAILED)
         return OutputSchema.create_empty(session_id=session_id).model_dump()
 
 
@@ -371,4 +583,3 @@ def generate_session_id() -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     uid = uuid.uuid4().hex[:8]
     return f"{ts}_{uid}"
-

@@ -3,25 +3,17 @@
 Entry point for Agentum.
 
 This is a wrapper that imports from src/core/agent.py.
+Configuration is loaded from config/agent.yaml and config/secrets.yaml.
 """
 import sys
 from pathlib import Path
 
-# Add src to path FIRST so we can import config
-_src_dir = Path(__file__).parent / "src"
-sys.path.insert(0, str(_src_dir))
-sys.path.insert(0, str(_src_dir / "core"))
+# Add project root to sys.path so that 'src' can be imported as a package
+_project_root = Path(__file__).parent
+sys.path.insert(0, str(_project_root))
+sys.path.insert(0, str(_project_root / "tools"))
 
-# Load .env from central config location
-from config import ENV_FILE
-
-if ENV_FILE.exists():
-    from dotenv import load_dotenv
-    import os
-    result = load_dotenv(ENV_FILE, override=True)
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-from agent import main
+from src.core.agent import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,0 +1,37 @@
+# Agentum Agent Configuration
+# Override via CLI: --set agent.model=... or --model ...
+
+agent:
+  # Claude model to use
+  # Available: claude-haiku-4-5-20251001, claude-sonnet-4-5-20250929, claude-opus-4-5-20251101
+  model: claude-haiku-4-5-20251001
+
+  # Maximum conversation turns before stopping
+  max_turns: 100
+
+  # Execution timeout in seconds (1800 = 30 minutes)
+  timeout_seconds: 1800
+
+  # Enable custom skills from skills/ directory
+  enable_skills: true
+
+  # Enable file change tracking for checkpoint/rewind functionality
+  enable_file_checkpointing: true
+
+  # Permission mode for tool usage
+  # Options: default, acceptEdits, plan, bypassPermissions
+  permission_mode: default
+
+  # Role template name (loads prompts/roles/<role>.md)
+  # Create custom roles in prompts/roles/ directory
+  role: default
+
+  # SDK-specific options
+  # Maximum buffer size for streaming (null = SDK default)
+  max_buffer_size: null
+
+  # Output format: null (default), text, json, stream-json
+  output_format: null
+
+  # Include partial/incomplete messages in output
+  include_partial_messages: false

@@ -31,7 +31,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from schemas import SessionInfo, TaskStatus, TokenUsage
+from .schemas import SessionInfo, TaskStatus, TokenUsage
 
 logger = logging.getLogger(__name__)
 

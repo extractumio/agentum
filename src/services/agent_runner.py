@@ -1,0 +1,409 @@
+"""
+Agent runner service for Agentum API.
+
+Manages background agent execution tasks with cancellation support.
+Follows the same execution flow as CLI (src/core/agent.py).
+"""
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from ..config import AgentConfigLoader, SESSIONS_DIR, LOGS_DIR
+from ..core.agent_core import ClaudeAgent
+from ..core.permission_profiles import PermissionManager
+from ..core.schemas import AgentConfig
+from ..core.tracer import NullTracer
+from ..db.database import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TaskParams:
+    """
+    Parameters for agent task execution.
+
+    Matches CLI arguments and agent.yaml configuration options.
+    All fields are optional - if not provided, values from agent.yaml are used.
+    """
+    # Task
+    task: str
+
+    # Session
+    session_id: str
+    resume_session_id: Optional[str] = None
+    fork_session: bool = False
+
+    # Working directory (CLI: --dir, --add-dir)
+    working_dir: Optional[str] = None
+    additional_dirs: list[str] = None
+
+    # Agent config overrides (CLI: --model, --max-turns, --timeout, etc.)
+    model: Optional[str] = None
+    max_turns: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+    enable_skills: Optional[bool] = None
+    enable_file_checkpointing: Optional[bool] = None
+    permission_mode: Optional[str] = None
+    role: Optional[str] = None
+    max_buffer_size: Optional[int] = None
+    output_format: Optional[str] = None
+    include_partial_messages: Optional[bool] = None
+
+    # Permission profile (CLI: --profile)
+    profile: Optional[str] = None
+
+    def __post_init__(self):
+        if self.additional_dirs is None:
+            self.additional_dirs = []
+
+
+class AgentRunner:
+    """
+    Manages background agent execution.
+
+    Provides methods to start, cancel, and track agent tasks.
+    Each task runs in a background asyncio Task.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the agent runner."""
+        self._running_tasks: dict[str, asyncio.Task] = {}
+        self._cancel_flags: dict[str, bool] = {}
+        self._event_queues: dict[str, asyncio.Queue] = {}
+        self._results: dict[str, dict[str, Any]] = {}
+
+    async def _update_session_status(
+        self,
+        session_id: str,
+        status: str,
+        model: Optional[str] = None,
+        num_turns: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        total_cost_usd: Optional[float] = None,
+    ) -> None:
+        """
+        Update session status in database using a fresh session.
+
+        This method creates its own database session to avoid issues
+        with closed sessions from request handlers.
+        """
+        from ..db.models import Session
+
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            result = await db.execute(
+                select(Session).where(Session.id == session_id)
+            )
+            session = result.scalar_one_or_none()
+
+            if session:
+                session.status = status
+                session.updated_at = datetime.now(timezone.utc)
+
+                if model is not None:
+                    session.model = model
+                if num_turns is not None:
+                    session.num_turns = num_turns
+                if duration_ms is not None:
+                    session.duration_ms = duration_ms
+                if total_cost_usd is not None:
+                    session.total_cost_usd = total_cost_usd
+                if status in ("completed", "failed", "cancelled"):
+                    session.completed_at = datetime.now(timezone.utc)
+
+                await db.commit()
+                logger.debug(f"Updated session {session_id} status to {status}")
+
+    async def start_task(self, params: TaskParams) -> None:
+        """
+        Start agent execution in background.
+
+        Args:
+            params: TaskParams with all execution parameters.
+
+        Raises:
+            RuntimeError: If task is already running for this session.
+        """
+        session_id = params.session_id
+
+        if session_id in self._running_tasks:
+            raise RuntimeError(f"Task already running for session: {session_id}")
+
+        # Initialize cancel flag and event queue
+        self._cancel_flags[session_id] = False
+        self._event_queues[session_id] = asyncio.Queue()
+
+        # Start the background task
+        task_coro = self._run_agent(params)
+        self._running_tasks[session_id] = asyncio.create_task(task_coro)
+
+        logger.info(f"Started background task for session: {session_id}")
+
+    async def _run_agent(self, params: TaskParams) -> None:
+        """
+        Run the agent in background.
+
+        Follows the same execution flow as CLI execute_task() in src/core/agent.py.
+        """
+        session_id = params.session_id
+
+        try:
+            # Determine working directory (matching CLI: resolve to absolute)
+            # Unlike CLI which defaults to cwd, API defaults to AGENT_DIR for server context
+            if params.working_dir:
+                resolved_working_dir = Path(params.working_dir).resolve()
+            else:
+                # Use AGENT_DIR as sensible default for API (not server's cwd)
+                from ..config import AGENT_DIR
+                resolved_working_dir = AGENT_DIR
+
+            logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
+            logger.info(f"Working directory: {resolved_working_dir}")
+
+            # Load configuration from agent.yaml
+            config_loader = AgentConfigLoader()
+            config_data = config_loader.get_config()
+
+            # Apply parameter overrides (matching CLI pattern)
+            # Use explicit None checks to allow falsy values (0, False) to be valid overrides
+            model = params.model or config_data["model"]
+            max_turns = (
+                params.max_turns if params.max_turns is not None
+                else config_data["max_turns"]
+            )
+            timeout_seconds = (
+                params.timeout_seconds if params.timeout_seconds is not None
+                else config_data["timeout_seconds"]
+            )
+            enable_skills = (
+                params.enable_skills if params.enable_skills is not None
+                else config_data["enable_skills"]
+            )
+            enable_file_checkpointing = (
+                params.enable_file_checkpointing if params.enable_file_checkpointing is not None
+                else config_data["enable_file_checkpointing"]
+            )
+            permission_mode = params.permission_mode or config_data["permission_mode"]
+            role = params.role or config_data["role"]
+            max_buffer_size = (
+                params.max_buffer_size if params.max_buffer_size is not None
+                else config_data.get("max_buffer_size")
+            )
+            output_format = params.output_format or config_data.get("output_format")
+            include_partial_messages = (
+                params.include_partial_messages if params.include_partial_messages is not None
+                else config_data.get("include_partial_messages", False)
+            )
+
+            logger.info(f"Config: model={model}, max_turns={max_turns}, timeout={timeout_seconds}s")
+
+            # Load permission manager from profile (matching CLI pattern)
+            profile_path = Path(params.profile) if params.profile else None
+            permission_manager = PermissionManager(profile_path=profile_path)
+
+            if params.profile:
+                logger.info(f"Using profile: {params.profile}")
+
+            # Get allowed tools from permission profile (matching CLI)
+            perm_profile = permission_manager.profile
+            profile_tools = perm_profile.tools
+            allowed_tools = list(set(profile_tools.enabled) - set(profile_tools.disabled))
+
+            # Get auto_checkpoint_tools from profile (with fallback)
+            if perm_profile.checkpointing:
+                auto_checkpoint_tools = perm_profile.checkpointing.auto_checkpoint_tools
+            else:
+                auto_checkpoint_tools = ["Write", "Edit"]  # Reasonable default
+
+            logger.info(f"Allowed tools: {', '.join(allowed_tools)}")
+            logger.info(f"Auto checkpoint tools: {', '.join(auto_checkpoint_tools)}")
+
+            # Build AgentConfig with explicit fields (matching CLI pattern exactly)
+            agent_config = AgentConfig(
+                model=model,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
+                enable_skills=enable_skills,
+                enable_file_checkpointing=enable_file_checkpointing,
+                permission_mode=permission_mode,
+                role=role,
+                auto_checkpoint_tools=auto_checkpoint_tools,
+                working_dir=str(resolved_working_dir),
+                additional_dirs=params.additional_dirs,
+                allowed_tools=allowed_tools,
+                permissions_config=None,  # Not used in API mode
+                max_buffer_size=max_buffer_size,
+                output_format=output_format,
+                include_partial_messages=include_partial_messages,
+            )
+
+            # Use NullTracer for API execution (SSE will be added in Stage 2)
+            tracer = NullTracer()
+
+            logger.info(
+                f"Starting agent for session {session_id}: "
+                f"model={agent_config.model}, max_turns={agent_config.max_turns}"
+            )
+            if params.resume_session_id:
+                logger.info(
+                    f"Resuming from session: {params.resume_session_id} "
+                    f"(fork={params.fork_session})"
+                )
+
+            # Create and run agent (matching CLI pattern)
+            agent = ClaudeAgent(
+                config=agent_config,
+                sessions_dir=SESSIONS_DIR,
+                logs_dir=LOGS_DIR,
+                tracer=tracer,
+                permission_manager=permission_manager,
+            )
+
+            # Execute the agent
+            # Pass session_id to ensure the agent uses the same ID as the database
+            result = await agent.run(
+                task=params.task,
+                resume_session_id=params.resume_session_id,
+                fork_session=params.fork_session,
+                session_id=session_id,  # Use the API's session ID
+            )
+
+            # Store result
+            self._results[session_id] = {
+                "status": result.status.value,
+                "output": result.output,
+                "error": result.error,
+                "comments": result.comments,
+                "result_files": result.result_files,
+                "metrics": result.metrics.model_dump() if result.metrics else None,
+            }
+
+            # Update database with final status and metrics
+            metrics = result.metrics
+            await self._update_session_status(
+                session_id=session_id,
+                status="completed",
+                model=metrics.model if metrics else model,
+                num_turns=metrics.num_turns if metrics else None,
+                duration_ms=metrics.duration_ms if metrics else None,
+                total_cost_usd=metrics.total_cost_usd if metrics else None,
+            )
+
+            logger.info(f"Agent completed for session: {session_id}")
+
+        except asyncio.CancelledError:
+            logger.info(f"Agent cancelled for session: {session_id}")
+            self._results[session_id] = {
+                "status": "cancelled",
+                "error": "Task was cancelled",
+            }
+            await self._update_session_status(session_id, "cancelled")
+            raise
+
+        except Exception as e:
+            logger.exception(f"Agent failed for session: {session_id}")
+            self._results[session_id] = {
+                "status": "failed",
+                "error": str(e),
+            }
+            await self._update_session_status(session_id, "failed")
+
+        finally:
+            # Cleanup
+            self._running_tasks.pop(session_id, None)
+            self._cancel_flags.pop(session_id, None)
+            # Keep event queue until client disconnects
+
+    async def cancel_task(self, session_id: str) -> bool:
+        """
+        Cancel a running task.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            True if cancelled, False if not running.
+        """
+        if session_id not in self._running_tasks:
+            return False
+
+        # Set cancel flag (for graceful cancellation)
+        self._cancel_flags[session_id] = True
+
+        # Cancel the asyncio task
+        task = self._running_tasks[session_id]
+        task.cancel()
+
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+        logger.info(f"Cancelled task for session: {session_id}")
+        return True
+
+    def is_running(self, session_id: str) -> bool:
+        """
+        Check if a task is currently running.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            True if running.
+        """
+        return session_id in self._running_tasks
+
+    def is_cancellation_requested(self, session_id: str) -> bool:
+        """
+        Check if cancellation was requested.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            True if cancellation was requested.
+        """
+        return self._cancel_flags.get(session_id, False)
+
+    def get_event_queue(self, session_id: str) -> Optional[asyncio.Queue]:
+        """
+        Get the SSE event queue for a session.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            The event queue, or None if not found.
+        """
+        return self._event_queues.get(session_id)
+
+    def get_result(self, session_id: str) -> Optional[dict]:
+        """
+        Get the result of a completed task.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            Result dictionary, or None if not found.
+        """
+        return self._results.get(session_id)
+
+    def cleanup_session(self, session_id: str) -> None:
+        """
+        Cleanup resources for a session.
+
+        Args:
+            session_id: The session ID.
+        """
+        self._event_queues.pop(session_id, None)
+        self._results.pop(session_id, None)
+
+
+# Global agent runner instance
+agent_runner = AgentRunner()

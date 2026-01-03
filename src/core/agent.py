@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agentum - Entry Point
+Agentum - CLI Entry Point
 
 A self-sufficient AI agent with tool use capabilities.
 
@@ -29,9 +29,7 @@ Usage:
 import argparse
 import asyncio
 import logging
-import shutil
 import sys
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -44,7 +42,23 @@ from ..config import (
     get_config_loader,
 )
 from .agent_core import ClaudeAgent
+from .cli_common import (
+    add_cli_arguments,
+    add_config_override_arguments,
+    add_directory_arguments,
+    add_logging_arguments,
+    add_output_arguments,
+    add_permission_arguments,
+    add_role_argument,
+    add_session_arguments,
+    add_task_arguments,
+    create_common_parser,
+    parse_set_overrides,
+)
+from .constants import AnsiColors, LOG_PREVIEW_LENGTH, StatusIcons
 from .exceptions import AgentError, TaskError
+from .logging_config import setup_cli_logging
+from .output import format_result, print_sessions_table
 from .permission_config import (
     AVAILABLE_TOOLS,
     create_default_permissions_file,
@@ -62,108 +76,19 @@ from .schemas import AgentConfig, TaskStatus
 from .sessions import SessionManager
 from .tasks import load_task
 
-# Configure basic logging (will be reconfigured by setup_logging)
+# Configure basic logging (will be reconfigured by setup_cli_logging)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
 
 
-def parse_set_overrides(set_args: list[str]) -> dict[str, any]:
-    """
-    Parse --set KEY=VALUE arguments into a dictionary of overrides.
-    
-    Args:
-        set_args: List of "key=value" strings from --set arguments.
-        
-    Returns:
-        Dictionary mapping keys to values. Nested keys use dot notation
-        (e.g., "agent.model" becomes {"model": value}).
-        
-    Raises:
-        ValueError: If a --set argument is malformed.
-    """
-    overrides = {}
-    
-    for arg in set_args:
-        if "=" not in arg:
-            raise ValueError(
-                f"Invalid --set argument: '{arg}'\n"
-                f"Expected format: KEY=VALUE (e.g., agent.model=claude-sonnet-4-5)"
-            )
-        
-        key, value = arg.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        
-        # Remove "agent." prefix if present (for consistency)
-        if key.startswith("agent."):
-            key = key[6:]
-        
-        # Type conversion for known fields
-        if key in ("max_turns", "timeout_seconds", "max_buffer_size"):
-            try:
-                value = int(value)
-            except ValueError:
-                raise ValueError(
-                    f"Invalid value for {key}: '{value}' (expected integer)"
-                )
-        elif key in ("enable_skills", "enable_file_checkpointing", "include_partial_messages"):
-            value = value.lower() in ("true", "1", "yes", "on")
-        elif value.lower() == "null" or value.lower() == "none":
-            value = None
-        
-        overrides[key] = value
-        logger.debug(f"--set override: {key}={value}")
-    
-    return overrides
-
-
-def setup_logging(
-    log_level: str = "INFO",
-    log_file: Optional[Path] = None,
-    max_bytes: int = 10 * 1024 * 1024,
-    backup_count: int = 5
-) -> None:
-    """
-    Configure file-based logging with rotation for the agent.
-
-    Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR).
-        log_file: Path to log file. Defaults to AGENT/logs/agent.jsonl.
-        max_bytes: Maximum size of log file before rotation (default: 10 MB).
-        backup_count: Number of backup files to keep (default: 5).
-    """
-    level = getattr(logging, log_level.upper(), logging.INFO)
-
-    # Default to AGENT/logs/agent.jsonl if no file specified
-    if log_file is None:
-        log_file = LOGS_DIR / "agent.jsonl"
-
-    # Ensure log directory exists
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Create rotating file handler
-    rotating_handler = RotatingFileHandler(
-        filename=str(log_file),
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
-    rotating_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    )
-
-    # Clear existing handlers and configure root logger
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-    root_logger.setLevel(level)
-    root_logger.addHandler(rotating_handler)
-
+# =============================================================================
+# Argument Parsing
+# =============================================================================
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
+    parser = create_common_parser(
         description="Agentum - Execute tasks with AI agent",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s --task "List all Python files" --dir ./my-project
@@ -176,200 +101,29 @@ Examples:
         """
     )
 
-    # Task specification
-    task_group = parser.add_mutually_exclusive_group()
-    task_group.add_argument(
-        "--task", "-t",
-        type=str,
-        help="Task description to execute"
-    )
-    task_group.add_argument(
-        "--task-file", "-f",
-        type=str,
-        help="Path to file containing task description"
-    )
-
-    # Working directory
-    parser.add_argument(
-        "--dir", "-d",
-        type=str,
-        help="Working directory for the agent"
-    )
-    parser.add_argument(
-        "--add-dir", "-a",
-        action="append",
-        default=[],
-        help="Additional directories the agent can access (can be repeated)"
-    )
-
-    # Session management
-    parser.add_argument(
-        "--resume", "-r",
-        type=str,
-        metavar="SESSION_ID",
-        help="Resume a previous session by ID"
-    )
-    parser.add_argument(
-        "--fork-session",
-        action="store_true",
-        help="Fork to new session when resuming instead of continuing original"
-    )
-    parser.add_argument(
-        "--list-sessions", "-l",
-        action="store_true",
-        help="List all sessions and exit"
-    )
-
-    # Agent configuration file
-    parser.add_argument(
-        "--config", "-c",
-        type=str,
-        metavar="PATH",
-        help="Path to agent.yaml configuration file (default: config/agent.yaml)"
-    )
-    parser.add_argument(
-        "--secrets",
-        type=str,
-        metavar="PATH",
-        help="Path to secrets.yaml file (default: config/secrets.yaml)"
-    )
-    
-    # Agent configuration overrides (override values from agent.yaml)
-    parser.add_argument(
-        "--model", "-m",
-        type=str,
-        default=None,
-        help="Claude model to use (overrides agent.yaml)"
-    )
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=None,
-        help="Maximum number of turns (overrides agent.yaml)"
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=None,
-        help="Timeout in seconds (overrides agent.yaml)"
-    )
-    parser.add_argument(
-        "--no-skills",
-        action="store_true",
-        help="Disable custom skills (overrides agent.yaml)"
-    )
-    
-    # Universal configuration overrides using dot notation
-    parser.add_argument(
-        "--set",
-        action="append",
-        metavar="KEY=VALUE",
-        default=[],
-        help="""
-Override any agent.yaml value using dot notation.
-Can be repeated. Examples:
-  --set agent.model=claude-sonnet-4-5-20250929
-  --set agent.max_turns=50
-  --set agent.permission_mode=acceptEdits"""
-    )
-
-    # Permission configuration
-    parser.add_argument(
-        "--permissions-config", "-p",
-        type=str,
-        metavar="PATH",
-        help="Path to legacy permissions.json configuration file"
-    )
-    parser.add_argument(
-        "--profile",
-        type=str,
-        metavar="PATH",
-        help="""
-Path to permission profile file (YAML or JSON).
-Overrides default AGENT/config/permissions.yaml."""
-    )
-    parser.add_argument(
-        "--permission-mode",
-        type=str,
-        choices=["default", "acceptEdits", "plan", "bypassPermissions"],
-        default=None,
-        help="Permission mode to use (overrides config file)"
-    )
-    parser.add_argument(
-        "--show-tools",
-        action="store_true",
-        help="Show all available tools and their descriptions"
-    )
-    parser.add_argument(
-        "--show-permissions",
-        action="store_true",
-        help="Show current permission configuration"
-    )
-    parser.add_argument(
-        "--init-permissions",
-        action="store_true",
-        help="Create default permissions.json in AGENT/config/"
-    )
-    parser.add_argument(
-        "--check-profile",
-        action="store_true",
-        help="""
-Validate that permission profile file exists in AGENT/config/:
-  - permissions.yaml
-Supports .yaml, .yml, and .json formats."""
-    )
-
-    # Output
-    parser.add_argument(
-        "--output", "-o",
-        type=str,
-        help="Output file for results (default: stdout)"
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output results as JSON"
-    )
-
-    # Logging
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)"
-    )
-
-    # Setup
-    parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Initialize .claude settings in working directory"
-    )
+    # Add all argument groups using shared functions
+    add_task_arguments(parser)
+    add_directory_arguments(parser)
+    add_session_arguments(parser)
+    add_cli_arguments(parser)  # CLI-specific: --config, --secrets, --set, etc.
+    add_config_override_arguments(parser)
+    add_permission_arguments(parser)
+    add_role_argument(parser)
+    add_output_arguments(parser)
+    add_logging_arguments(parser)
 
     return parser.parse_args()
 
 
+# =============================================================================
+# Special Commands
+# =============================================================================
+
 def list_sessions() -> None:
-    """List all sessions and their status."""
+    """List all sessions from file-based storage and print them."""
     session_manager = SessionManager(SESSIONS_DIR)
     sessions = session_manager.list_sessions()
-
-    if not sessions:
-        print("No sessions found.")
-        return
-
-    print(f"\n{'Session ID':<30} {'Status':<10} {'Created':<20} {'Working Dir'}")
-    print("-" * 100)
-
-    for session in sessions:
-        created = session.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        working_dir = session.working_dir
-        if len(working_dir) > 40:
-            working_dir = "..." + working_dir[-37:]
-        print(f"{session.session_id:<30} {session.status:<10} {created:<20} {working_dir}")
-
-    print()
+    print_sessions_table(sessions)
 
 
 def init_settings(working_dir: Path) -> None:
@@ -472,9 +226,9 @@ def show_permissions(permissions_config: Optional[str] = None) -> None:
 
     # Show hooks if configured
     hooks_configured = (
-        config.hooks.PreToolUse or
-        config.hooks.PostToolUse or
-        config.hooks.PermissionRequest
+        config.hooks.PreToolUse
+        or config.hooks.PostToolUse
+        or config.hooks.PermissionRequest
     )
     if hooks_configured:
         print("\n[HOOKS]")
@@ -487,6 +241,10 @@ def show_permissions(permissions_config: Optional[str] = None) -> None:
 
     print("\n" + "=" * 70 + "\n")
 
+
+# =============================================================================
+# Task Execution
+# =============================================================================
 
 async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoader) -> int:
     """
@@ -513,14 +271,11 @@ async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoade
         logger.error(f"Task error: {e}")
         return 1
 
-    logger.info(f"Task: {task[:100]}{'...' if len(task) > 100 else ''}")
+    logger.info(f"Task: {task[:LOG_PREVIEW_LENGTH]}{'...' if len(task) > LOG_PREVIEW_LENGTH else ''}")
     logger.info(f"Working directory: {working_dir}")
 
     # Load permission profile (required)
-    profile_path = (
-        Path(args.profile) if args.profile else None
-    )
-
+    profile_path = Path(args.profile) if args.profile else None
     permission_manager = PermissionManager(profile_path=profile_path)
 
     if args.profile:
@@ -542,7 +297,7 @@ async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoade
 
     # Get configuration from loader (already has CLI overrides applied)
     yaml_config = config_loader.get_config()
-    
+
     # Determine enable_skills: CLI --no-skills takes precedence
     enable_skills = yaml_config["enable_skills"]
     if args.no_skills:
@@ -614,232 +369,9 @@ async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoade
         return 1
 
 
-def format_result(result) -> str:
-    """
-    Format agent result for human-readable output.
-
-    Args:
-        result: AgentResult object.
-
-    Returns:
-        Formatted string.
-    """
-    lines = [f"Status: {result.status}"]
-
-    if result.error:
-        lines.append(f"Error: {result.error}")
-
-    if result.comments:
-        lines.append(f"Comments: {result.comments}")
-
-    if result.output:
-        lines.append(f"Output: {result.output}")
-
-    if result.result_files:
-        lines.append("Files:")
-        for filepath in result.result_files:
-            lines.append(f"  - {filepath}")
-
-    if result.session_info:
-        lines.append(f"Session: {result.session_info.session_id}")
-
-    return "\n".join(lines)
-
-
-def wrap_text(text: str, width: int = 70) -> list[str]:
-    """Wrap text to specified width, preserving words."""
-    if len(text) <= width:
-        return [text]
-    
-    words = text.split()
-    lines: list[str] = []
-    current_line: list[str] = []
-    current_len = 0
-    
-    for word in words:
-        word_len = len(word)
-        if current_len + word_len + (1 if current_line else 0) <= width:
-            current_line.append(word)
-            current_len += word_len + (1 if len(current_line) > 1 else 0)
-        else:
-            if current_line:
-                lines.append(" ".join(current_line))
-            current_line = [word]
-            current_len = word_len
-    
-    if current_line:
-        lines.append(" ".join(current_line))
-    
-    return lines
-
-
-def get_terminal_width() -> int:
-    """Get terminal width with sensible default."""
-    try:
-        width = shutil.get_terminal_size().columns
-        return max(50, min(width, 120))
-    except Exception:
-        return 80
-
-
-def print_result_box(result) -> None:
-    """
-    Print a compact result summary to stdout (statistics only).
-    
-    Args:
-        result: AgentResult object with status, output, error, and session_info.
-    """
-    # Colors
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    
-    # Single-line box characters
-    TL, TR, BL, BR = "┌", "┐", "└", "┘"
-    H, V = "─", "│"
-    LT, RT = "├", "┤"
-    
-    terminal_width = get_terminal_width()
-    width = min(terminal_width - 4, 55)
-    inner_width = width - 2
-    
-    status_upper = str(result.status).upper()
-    is_complete = status_upper in ("COMPLETE", "TASKSTATUS.COMPLETE")
-    is_partial = status_upper in ("PARTIAL", "TASKSTATUS.PARTIAL")
-    
-    if is_complete:
-        status_color = GREEN
-        status_icon = "✓"
-        status_text = "COMPLETE"
-    elif is_partial:
-        status_color = YELLOW
-        status_icon = "!"
-        status_text = "PARTIAL"
-    else:
-        status_color = RED
-        status_icon = "✗"
-        status_text = "FAILED"
-    
-    print()
-    
-    # Top border
-    print(f"{status_color}{TL}{H * inner_width}{TR}{RESET}")
-    
-    # Status line (centered)
-    status_content = f" {status_icon} {status_text} "
-    status_padding = (inner_width - len(status_content)) // 2
-    print(
-        f"{status_color}{V}{RESET}"
-        f"{' ' * status_padding}"
-        f"{status_color}{BOLD}{status_content}{RESET}"
-        f"{' ' * (inner_width - status_padding - len(status_content))}"
-        f"{status_color}{V}{RESET}"
-    )
-    
-    # Separator
-    print(f"{status_color}{LT}{H * inner_width}{RT}{RESET}")
-    
-    # Session line (if available)
-    if result.session_info:
-        session_line = f" Session: {result.session_info.session_id}"
-        padding = inner_width - len(session_line)
-        print(
-            f"{status_color}{V}{RESET}"
-            f"{GRAY}{session_line}{RESET}"
-            f"{' ' * max(0, padding)}"
-            f"{status_color}{V}{RESET}"
-        )
-    
-    # Metrics (if available)
-    if result.metrics:
-        duration_ms = result.metrics.duration_ms
-        if duration_ms < 1000:
-            duration_str = f"{duration_ms}ms"
-        elif duration_ms < 60000:
-            duration_str = f"{duration_ms / 1000:.1f}s"
-        else:
-            minutes = duration_ms // 60000
-            seconds = (duration_ms % 60000) / 1000
-            duration_str = f"{minutes}m {seconds:.1f}s"
-        
-        turns = result.metrics.num_turns
-        cost = result.metrics.total_cost_usd or 0
-        
-        metrics_line = f" Duration: {duration_str} | Turns: {turns} | ${cost:.4f}"
-        padding = inner_width - len(metrics_line)
-        print(
-            f"{status_color}{V}{RESET}"
-            f"{WHITE}{metrics_line}{RESET}"
-            f"{' ' * max(0, padding)}"
-            f"{status_color}{V}{RESET}"
-        )
-    
-    # Error summary (if any)
-    if result.error:
-        error_preview = result.error[:40] + "..." if len(result.error) > 40 else result.error
-        error_line = f" Error: {error_preview}"
-        padding = inner_width - len(error_line)
-        print(
-            f"{status_color}{V}{RESET}"
-            f"{RED}{error_line}{RESET}"
-            f"{' ' * max(0, padding)}"
-            f"{status_color}{V}{RESET}"
-        )
-    
-    # Comments (if any)
-    if result.comments:
-        comments_preview = result.comments[:40] + "..." if len(result.comments) > 40 else result.comments
-        comments_line = f" Comments: {comments_preview}"
-        padding = inner_width - len(comments_line)
-        print(
-            f"{status_color}{V}{RESET}"
-            f"{GRAY}{comments_line}{RESET}"
-            f"{' ' * max(0, padding)}"
-            f"{status_color}{V}{RESET}"
-        )
-    
-    # Result files (if any)
-    if result.result_files:
-        files_count = len(result.result_files)
-        files_line = f" Files: {files_count} generated"
-        padding = inner_width - len(files_line)
-        print(
-            f"{status_color}{V}{RESET}"
-            f"{WHITE}{files_line}{RESET}"
-            f"{' ' * max(0, padding)}"
-            f"{status_color}{V}{RESET}"
-        )
-        # Show first 2 files
-        for filepath in result.result_files[:2]:
-            file_line = f"   - {filepath}"
-            if len(file_line) > inner_width:
-                file_line = file_line[:inner_width - 3] + "..."
-            padding = inner_width - len(file_line)
-            print(
-                f"{status_color}{V}{RESET}"
-                f"{DIM}{file_line}{RESET}"
-                f"{' ' * max(0, padding)}"
-                f"{status_color}{V}{RESET}"
-            )
-        if files_count > 2:
-            more_line = f"   ... +{files_count - 2} more"
-            padding = inner_width - len(more_line)
-            print(
-                f"{status_color}{V}{RESET}"
-                f"{DIM}{more_line}{RESET}"
-                f"{' ' * max(0, padding)}"
-                f"{status_color}{V}{RESET}"
-            )
-    
-    # Bottom border
-    print(f"{status_color}{BL}{H * inner_width}{BR}{RESET}")
-    print()
-
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 def main() -> int:
     """
@@ -851,7 +383,7 @@ def main() -> int:
     args = parse_args()
 
     # Setup logging
-    setup_logging(args.log_level)
+    setup_cli_logging(args.log_level)
 
     # Handle special commands
     if args.list_sessions:
@@ -890,41 +422,44 @@ def main() -> int:
     try:
         config_path = Path(args.config) if args.config else None
         secrets_path = Path(args.secrets) if args.secrets else None
-        
+
         config_loader = get_config_loader(
             config_path=config_path,
             secrets_path=secrets_path,
             force_new=True
         )
-        
+
         # Parse and apply --set overrides first
         if args.set:
             set_overrides = parse_set_overrides(args.set)
             config_loader.apply_cli_overrides(**set_overrides)
-        
+
         # Apply direct CLI overrides (take precedence over --set)
         config_loader.apply_cli_overrides(
             model=args.model,
             max_turns=args.max_turns,
             timeout_seconds=args.timeout,
         )
-        
+
         # Load and validate configuration (sets ANTHROPIC_API_KEY env var)
         config_loader.load()
-        
+
         # Show API key confirmation
+        C = AnsiColors
         api_key = config_loader.get_api_key()
         key_preview = api_key[:20] + "..." if len(api_key) > 20 else api_key
-        print(f"\033[92m✓\033[0m API Key loaded: \033[90m{key_preview}\033[0m")
-        print(f"\033[92m✓\033[0m Config loaded: \033[90m{config_loader.config_path}\033[0m")
-        
+        print(f"{C.SUCCESS}{StatusIcons.SUCCESS}{C.RESET} API Key loaded: {C.GRAY}{key_preview}{C.RESET}")
+        print(f"{C.SUCCESS}{StatusIcons.SUCCESS}{C.RESET} Config loaded: {C.GRAY}{config_loader.config_path}{C.RESET}")
+
     except (ConfigNotFoundError, ConfigValidationError) as e:
-        print("\n\033[91m✗ Configuration Error\033[0m\n", file=sys.stderr)
+        C = AnsiColors
+        print(f"\n{C.ERROR}{StatusIcons.FAILURE} Configuration Error{C.RESET}\n", file=sys.stderr)
         print(f"{e}\n", file=sys.stderr)
         return 1
     except ValueError as e:
         # Handle --set parsing errors
-        print("\n\033[91m✗ CLI Argument Error\033[0m\n", file=sys.stderr)
+        C = AnsiColors
+        print(f"\n{C.ERROR}{StatusIcons.FAILURE} CLI Argument Error{C.RESET}\n", file=sys.stderr)
         print(f"{e}\n", file=sys.stderr)
         return 1
 

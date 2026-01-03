@@ -4,9 +4,12 @@ Execution Tracer for Agentum.
 Provides real-time, fashionable console output for agent execution tracing
 with spinners, colors, and dynamic content updates.
 
+Uses shared constants and utilities from constants.py and output.py
+for consistent styling across all terminal output.
+
 Usage:
     tracer = ExecutionTracer(verbose=True)
-    
+
     # Hook into agent execution
     tracer.on_agent_start(session_id, model, tools)
     tracer.on_tool_start(tool_name, tool_input)
@@ -17,141 +20,108 @@ Usage:
     tracer.on_agent_complete(result_message)
 """
 import json
-import shutil
 import sys
 import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from typing import Any, Optional
 
+from .constants import (
+    AnsiColors,
+    BoxChars,
+    JSON_PREVIEW_MAX_LINE_LENGTH,
+    JSON_PREVIEW_MAX_LINES,
+    MESSAGE_PREVIEW_LENGTH,
+    PATH_TRUNCATE_LENGTH,
+    StatusIcons,
+    TerminalControl,
+    TODO_CONTENT_MAX_LENGTH,
+    TODO_PLAN_INDENT,
+    TOOL_GRID_COLUMN_WIDTH,
+    TOOL_GRID_COLUMNS,
+)
+from .output import (
+    format_cost,
+    format_duration,
+    get_terminal_width,
+    is_tty,
+    print_output_box,
+    truncate_path,
+    truncate_text,
+    wrap_text,
+)
 from .schemas import get_model_context_size
 
 
-class Color(StrEnum):
-    """ANSI color codes for terminal output."""
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    ITALIC = "\033[3m"
-    UNDERLINE = "\033[4m"
-    
-    # Foreground colors
-    BLACK = "\033[30m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    
-    # Bright foreground colors
-    BRIGHT_BLACK = "\033[90m"
-    BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
-    BRIGHT_YELLOW = "\033[93m"
-    BRIGHT_BLUE = "\033[94m"
-    BRIGHT_MAGENTA = "\033[95m"
-    BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
-    
-    # Background colors
-    BG_BLACK = "\033[40m"
-    BG_RED = "\033[41m"
-    BG_GREEN = "\033[42m"
-    BG_YELLOW = "\033[43m"
-    BG_BLUE = "\033[44m"
-    BG_MAGENTA = "\033[45m"
-    BG_CYAN = "\033[46m"
-    BG_WHITE = "\033[47m"
+# Type aliases for backward compatibility
+# Use AnsiColors from constants as the canonical Color type
+Color = AnsiColors
 
 
 class Symbol:
-    """Unicode symbols for terminal decoration."""
-    # Box drawing
-    BOX_H = "─"
-    BOX_V = "│"
-    BOX_TL = "┌"
-    BOX_TR = "┐"
-    BOX_BL = "└"
-    BOX_BR = "┘"
-    BOX_T = "┬"
-    BOX_B = "┴"
-    BOX_L = "├"
-    BOX_R = "┤"
-    BOX_X = "┼"
-    
+    """
+    Symbol constants for terminal decoration.
+
+    Wraps BoxChars and StatusIcons from constants.py for backward compatibility.
+    New code should import directly from constants.py.
+    """
+    # Box drawing (from BoxChars)
+    BOX_H = BoxChars.HORIZONTAL
+    BOX_V = BoxChars.VERTICAL
+    BOX_TL = BoxChars.TOP_LEFT
+    BOX_TR = BoxChars.TOP_RIGHT
+    BOX_BL = BoxChars.BOTTOM_LEFT
+    BOX_BR = BoxChars.BOTTOM_RIGHT
+    BOX_T = BoxChars.TOP_T
+    BOX_B = BoxChars.BOTTOM_T
+    BOX_L = BoxChars.LEFT_T
+    BOX_R = BoxChars.RIGHT_T
+    BOX_X = BoxChars.CROSS
+
     # Double box drawing
-    DBOX_H = "═"
-    DBOX_V = "║"
-    DBOX_TL = "╔"
-    DBOX_TR = "╗"
-    DBOX_BL = "╚"
-    DBOX_BR = "╝"
-    
-    # Arrows and pointers
-    ARROW_RIGHT = "→"
-    ARROW_LEFT = "←"
-    ARROW_UP = "↑"
-    ARROW_DOWN = "↓"
-    TRIANGLE_RIGHT = "▶"
-    TRIANGLE_DOWN = "▼"
-    POINTER = "❯"
-    
-    # Status indicators
-    CHECK = "✓"
-    CROSS = "✗"
-    WARN = "⚠"
-    INFO = "ℹ"
-    BULLET = "•"
-    CIRCLE = "○"
-    CIRCLE_FILLED = "●"
-    STAR = "★"
-    LIGHTNING = "⚡"
-    
+    DBOX_H = BoxChars.DOUBLE_HORIZONTAL
+    DBOX_V = BoxChars.DOUBLE_VERTICAL
+    DBOX_TL = BoxChars.DOUBLE_TOP_LEFT
+    DBOX_TR = BoxChars.DOUBLE_TOP_RIGHT
+    DBOX_BL = BoxChars.DOUBLE_BOTTOM_LEFT
+    DBOX_BR = BoxChars.DOUBLE_BOTTOM_RIGHT
+
+    # Status indicators (from StatusIcons)
+    CHECK = StatusIcons.SUCCESS
+    CROSS = StatusIcons.FAILURE
+    WARN = StatusIcons.WARNING
+    INFO = StatusIcons.INFO
+    BULLET = StatusIcons.BULLET
+    CIRCLE = StatusIcons.CIRCLE
+    CIRCLE_FILLED = StatusIcons.CIRCLE_FILLED
+    STAR = StatusIcons.STAR
+    LIGHTNING = StatusIcons.LIGHTNING
+    POINTER = StatusIcons.POINTER
+    GEAR = StatusIcons.GEAR
+    FOLDER = StatusIcons.FOLDER
+    FILE = StatusIcons.FILE
+    CLOCK = StatusIcons.CLOCK
+    BRAIN = StatusIcons.BRAIN
+    ARROW_RIGHT = StatusIcons.ARROW_RIGHT
+    ARROW_LEFT = StatusIcons.ARROW_LEFT
+    ARROW_UP = StatusIcons.ARROW_UP
+    ARROW_DOWN = StatusIcons.ARROW_DOWN
+    TRIANGLE_RIGHT = StatusIcons.TRIANGLE_RIGHT
+    TRIANGLE_DOWN = StatusIcons.TRIANGLE_DOWN
+
     # Spinners
-    SPINNER_DOTS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    SPINNER_LINE = ["—", "\\", "|", "/"]
-    SPINNER_ARROW = ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"]
+    SPINNER_DOTS = list(StatusIcons.SPINNER)
+    SPINNER_LINE = list(StatusIcons.SPINNER_LINE)
+    SPINNER_ARROW = list(StatusIcons.SPINNER_ARROW)
+
+    # Additional symbols not in constants (tracer-specific)
+    TOOL = StatusIcons.GEAR
+    ROCKET = "»"
+    MONEY = "◈"
     SPINNER_BOUNCE = ["⠁", "⠂", "⠄", "⠂"]
     SPINNER_PULSE = ["◐", "◓", "◑", "◒"]
-    
-    # Misc - single-width Unicode symbols (no picture emojis)
-    BRAIN = "◆"
-    GEAR = "⚙"
-    ROCKET = "»"
-    TOOL = "⚙"
-    FOLDER = "▣"
-    FILE = "▫"
-    CLOCK = "◔"
-    MONEY = "◈"
-
-
-class TerminalControl:
-    """ANSI escape sequences for terminal control."""
-    CLEAR_LINE = "\033[2K"
-    CURSOR_UP = "\033[1A"
-    CURSOR_DOWN = "\033[1B"
-    CURSOR_START = "\033[0G"
-    CURSOR_HIDE = "\033[?25l"
-    CURSOR_SHOW = "\033[?25h"
-    SAVE_CURSOR = "\033[s"
-    RESTORE_CURSOR = "\033[u"
-    
-    @staticmethod
-    def move_up(n: int = 1) -> str:
-        return f"\033[{n}A"
-    
-    @staticmethod
-    def move_down(n: int = 1) -> str:
-        return f"\033[{n}B"
-    
-    @staticmethod
-    def move_to_column(col: int) -> str:
-        return f"\033[{col}G"
 
 
 @dataclass
@@ -362,14 +332,16 @@ class TracerBase(ABC):
 class ExecutionTracer(TracerBase):
     """
     Fashionable console tracer for Agentum execution.
-    
+
     Provides rich terminal output with:
     - Colored status indicators
     - Animated spinners for ongoing operations
     - Box-drawn sections for clarity
     - Dynamic line updates
     - Timing and cost information
-    
+
+    Uses shared formatting utilities from output.py for consistent styling.
+
     Args:
         verbose: Show detailed output including tool parameters.
         show_thinking: Display thinking block content.
@@ -377,43 +349,34 @@ class ExecutionTracer(TracerBase):
         use_colors: Enable ANSI colors (auto-detect TTY).
         use_unicode: Enable Unicode symbols (fallback to ASCII).
     """
-    
+
     def __init__(
         self,
         verbose: bool = True,
         show_thinking: bool = True,
-        max_preview_length: int = 80,
+        max_preview_length: int = MESSAGE_PREVIEW_LENGTH,
         use_colors: bool = True,
         use_unicode: bool = True
     ) -> None:
         self.verbose = verbose
         self.show_thinking = show_thinking
         self.max_preview_length = max_preview_length
-        self.use_colors = use_colors and sys.stdout.isatty()
+        self.use_colors = use_colors and is_tty()
         self.use_unicode = use_unicode
-        
+
         self._spinner = SpinnerState()
         self._start_time: Optional[float] = None
         self._tool_start_times: dict[str, float] = {}
         self._turn_count = 0
         self._lock = threading.Lock()
         self._current_model: str = ""
-        
-        # Detect console width once at initialization
-        self._console_width = self._detect_console_width()
-        
+
+        # Use shared terminal width detection from output.py
+        self._console_width = get_terminal_width()
+
         # Track agent start state and stored profile info
         self._agent_started: bool = False
         self._pending_profile: Optional[dict[str, Any]] = None
-    
-    def _detect_console_width(self) -> int:
-        """Detect terminal width, with sensible default."""
-        try:
-            width = shutil.get_terminal_size().columns
-            # Clamp to reasonable range
-            return max(60, min(width, 120))
-        except Exception:
-            return 80  # Safe default
     
     def _get_short_model_id(self, model: str) -> str:
         """
@@ -459,46 +422,31 @@ class ExecutionTracer(TracerBase):
         return f"{minutes}m {seconds:.1f}s"
     
     def _truncate(self, text: str, max_len: Optional[int] = None) -> str:
-        """Truncate text with ellipsis."""
+        """
+        Truncate text with ellipsis using shared utility.
+
+        Args:
+            text: Text to truncate.
+            max_len: Maximum length (defaults to self.max_preview_length).
+
+        Returns:
+            Truncated text.
+        """
         max_len = max_len or self.max_preview_length
-        text = text.replace("\n", " ").replace("\r", "").strip()
-        if len(text) <= max_len:
-            return text
-        return text[:max_len - 3] + "..."
-    
-    def _truncate_path(self, path: str, max_len: int = 80) -> str:
+        return truncate_text(text, max_len)
+
+    def _truncate_path(self, path: str, max_len: int = PATH_TRUNCATE_LENGTH) -> str:
         """
-        Truncate a path intelligently, keeping both start and end visible.
-        
-        Shows the beginning of the path and the filename/end portion,
-        with '...' in the middle.
-        
-        Example:
-            '/home/user/projects/myapp/src/components/Button.tsx'
-            -> '/home/user/pro.../components/Button.tsx'
+        Truncate a path intelligently using shared utility.
+
+        Args:
+            path: File path to truncate.
+            max_len: Maximum display length.
+
+        Returns:
+            Truncated path string.
         """
-        if len(path) <= max_len:
-            return path
-        
-        # Reserve space for ellipsis
-        ellipsis = "..."
-        available = max_len - len(ellipsis)
-        
-        # Try to find a good split point - prefer keeping more of the end (filename)
-        # Give ~40% to start, ~60% to end
-        start_len = available * 2 // 5
-        end_len = available - start_len
-        
-        # Ensure minimum lengths
-        start_len = max(start_len, 10)
-        end_len = max(end_len, 15)
-        
-        # Adjust if path is shorter than expected
-        if start_len + end_len > available:
-            start_len = available // 2
-            end_len = available - start_len
-        
-        return path[:start_len] + ellipsis + path[-end_len:]
+        return truncate_path(path, max_len)
     
     def _is_path_like(self, key: str, value: str) -> bool:
         """Check if a key-value pair looks like a file path."""
@@ -613,19 +561,19 @@ class ExecutionTracer(TracerBase):
     def _format_json_preview(
         self,
         value: Any,
-        max_lines: int = 10,
-        max_line_length: int = 80,
+        max_lines: int = JSON_PREVIEW_MAX_LINES,
+        max_line_length: int = JSON_PREVIEW_MAX_LINE_LENGTH,
         indent: int = 2
     ) -> list[str]:
         """
         Format a JSON-like object as pretty-printed preview lines.
-        
+
         Args:
             value: The value to format (dict, list, or other).
             max_lines: Maximum number of lines to return.
             max_line_length: Maximum length per line.
             indent: Indentation spaces for JSON.
-        
+
         Returns:
             List of formatted lines.
         """
@@ -655,7 +603,7 @@ class ExecutionTracer(TracerBase):
     def _format_todo_plan(
         self,
         todos: list[dict[str, Any]],
-        indent: int = 6
+        indent: int = TODO_PLAN_INDENT
     ) -> list[str]:
         """
         Format todos as a plan-like tree with:
@@ -663,22 +611,22 @@ class ExecutionTracer(TracerBase):
         - In-progress items bold
         - Pending items normal
         - Shows: previous completed, current, next 2, then <...>
-        
+
         Args:
             todos: List of todo items with 'content' and 'status' fields.
             indent: Number of spaces for base indentation.
-        
+
         Returns:
             List of formatted lines to print.
         """
         if not todos:
             return []
-        
+
         lines: list[str] = []
         bar = self._symbol(Symbol.BOX_V, "|")
         branch = self._symbol(Symbol.BOX_L, "|-")
         last_branch = self._symbol(Symbol.BOX_BL, "`-")
-        
+
         # Find current in-progress item index
         current_idx = -1
         for i, todo in enumerate(todos):
@@ -686,13 +634,13 @@ class ExecutionTracer(TracerBase):
             if status == "in_progress":
                 current_idx = i
                 break
-        
+
         # Determine which items to show:
         # - One previous completed (if exists)
         # - Current in_progress
         # - Next 2 pending
         # - <...> if more exist
-        
+
         if current_idx == -1:
             # No in_progress - show first few items
             start_idx = 0
@@ -705,21 +653,21 @@ class ExecutionTracer(TracerBase):
                 if todos[i].get("status") == "completed":
                     prev_completed_idx = i
                     break
-            
+
             # Calculate visible range
             start_idx = prev_completed_idx if prev_completed_idx >= 0 else current_idx
             end_idx = min(current_idx + 3, len(todos))  # current + next 2
-            
+
             # Check if there are hidden items before
             hidden_before = start_idx > 0
             show_ellipsis = end_idx < len(todos)
-            
+
             if hidden_before:
                 lines.append(
                     f"{' ' * indent}{self._color(bar, Color.DIM)} "
                     f"{self._color('<...>', Color.DIM)}"
                 )
-        
+
         # Status symbols
         status_symbols = {
             "completed": self._symbol(Symbol.CHECK, "v"),
@@ -727,19 +675,18 @@ class ExecutionTracer(TracerBase):
             "pending": self._symbol(Symbol.CIRCLE, "o"),
             "cancelled": self._symbol(Symbol.CROSS, "x"),
         }
-        
+
         for i in range(start_idx, end_idx):
             todo = todos[i]
             is_last = (i == end_idx - 1) and not show_ellipsis
             connector = last_branch if is_last else branch
-            
+
             status = todo.get("status", "pending")
             content = todo.get("content", "")
-            
-            # Truncate long content
-            max_content_len = 55
-            if len(content) > max_content_len:
-                content = content[:max_content_len - 3] + "..."
+
+            # Truncate long content using constant
+            if len(content) > TODO_CONTENT_MAX_LENGTH:
+                content = content[:TODO_CONTENT_MAX_LENGTH - 3] + "..."
             
             # Format based on status
             sym = status_symbols.get(status, self._symbol(Symbol.CIRCLE, "o"))
@@ -783,21 +730,12 @@ class ExecutionTracer(TracerBase):
         return lines
     
     def _format_duration(self, ms: int) -> str:
-        """Format duration in milliseconds to human readable."""
-        if ms < 1000:
-            return f"{ms}ms"
-        elif ms < 60000:
-            return f"{ms / 1000:.1f}s"
-        else:
-            minutes = ms // 60000
-            seconds = (ms % 60000) / 1000
-            return f"{minutes}m {seconds:.1f}s"
-    
+        """Format duration using shared utility."""
+        return format_duration(ms)
+
     def _format_cost(self, cost: float) -> str:
-        """Format cost in USD."""
-        if cost < 0.01:
-            return f"${cost:.4f}"
-        return f"${cost:.2f}"
+        """Format cost using shared utility."""
+        return format_cost(cost)
     
     # ═══════════════════════════════════════════════════════════════
     # Output Methods
@@ -1085,8 +1023,8 @@ class ExecutionTracer(TracerBase):
     def _format_tools_grid(
         self,
         tools: list[str],
-        columns: int = 4,
-        col_width: int = 18
+        columns: int = TOOL_GRID_COLUMNS,
+        col_width: int = TOOL_GRID_COLUMN_WIDTH
     ) -> list[str]:
         """Format tools into a neat grid layout."""
         lines = []
@@ -1095,32 +1033,10 @@ class ExecutionTracer(TracerBase):
             row = "  ".join(tool.ljust(col_width)[:col_width] for tool in row_tools)
             lines.append(row)
         return lines
-    
+
     def _wrap_text(self, text: str, width: int = 70) -> list[str]:
-        """Wrap text to specified width, preserving words."""
-        if len(text) <= width:
-            return [text]
-        
-        words = text.split()
-        lines = []
-        current_line: list[str] = []
-        current_len = 0
-        
-        for word in words:
-            word_len = len(word)
-            if current_len + word_len + (1 if current_line else 0) <= width:
-                current_line.append(word)
-                current_len += word_len + (1 if len(current_line) > 1 else 0)
-            else:
-                if current_line:
-                    lines.append(" ".join(current_line))
-                current_line = [word]
-                current_len = word_len
-        
-        if current_line:
-            lines.append(" ".join(current_line))
-        
-        return lines
+        """Wrap text using shared utility."""
+        return wrap_text(text, width)
     
     def on_agent_start(
         self,
@@ -1605,98 +1521,21 @@ class ExecutionTracer(TracerBase):
         result_files: Optional[list[str]] = None,
         status: Optional[str] = None
     ) -> None:
-        """Display the parsed output.yaml content in a styled box."""
-        width = self._console_width - 2
-        inner_width = width - 4  # Account for box borders and padding
-        
-        content_lines: list[str] = []
-        
-        # Show error if present
-        if error and error.strip():
-            error_text = str(error).strip()
-            content_lines.append(
-                f" {self._symbol(Symbol.CROSS, 'X')} Error: {error_text[:inner_width - 10]}"
-            )
-        
-        # Show comments if present
-        if comments and comments.strip():
-            comments_text = str(comments).strip()
-            content_lines.append(f" Comments: {comments_text[:inner_width - 12]}")
-        
-        # Show output text (up to 10 lines)
-        if output and output.strip():
-            if content_lines:
-                content_lines.append("")  # Empty line separator
-            
-            raw_lines = str(output).strip().split("\n")
-            output_lines: list[str] = []
-            
-            for raw_line in raw_lines:
-                raw_line = raw_line.rstrip()
-                if not raw_line:
-                    output_lines.append("")
-                elif len(raw_line) <= inner_width - 3:
-                    output_lines.append(raw_line)
-                else:
-                    # Truncate long lines
-                    output_lines.append(raw_line[:inner_width - 6] + "...")
-            
-            max_lines = 10
-            for i, line in enumerate(output_lines[:max_lines]):
-                prefix = " > " if i == 0 else "   "
-                content_lines.append(prefix + line)
-            
-            if len(output_lines) > max_lines:
-                content_lines.append(
-                    f"   ... +{len(output_lines) - max_lines} more lines"
-                )
-        
-        # Show result_files if present
-        if result_files and isinstance(result_files, list) and len(result_files) > 0:
-            if content_lines:
-                content_lines.append("")  # Empty line separator
-            content_lines.append(
-                f" {self._symbol(Symbol.FOLDER, '📁')} Result Files:"
-            )
-            max_files = 8
-            for filepath in result_files[:max_files]:
-                # Truncate long paths
-                display_path = str(filepath)
-                if len(display_path) > inner_width - 6:
-                    display_path = "..." + display_path[-(inner_width - 9):]
-                content_lines.append(f"   - {display_path}")
-            if len(result_files) > max_files:
-                content_lines.append(
-                    f"   ... +{len(result_files) - max_files} more files"
-                )
-        
-        # Only display if we have content
-        if content_lines:
-            # Determine box color based on status
-            if status:
-                status_upper = status.upper()
-                if status_upper in ("COMPLETE", "OK", "COMPLETED", "SUCCESS"):
-                    border_color = Color.BRIGHT_GREEN
-                    title = f"{self._symbol(Symbol.FILE, '📄')} Output"
-                elif status_upper == "PARTIAL":
-                    border_color = Color.BRIGHT_YELLOW
-                    title = f"{self._symbol(Symbol.WARN, '!')} Partial Output"
-                else:
-                    border_color = Color.BRIGHT_RED
-                    title = f"{self._symbol(Symbol.CROSS, 'X')} Output"
-            else:
-                border_color = Color.CYAN
-                title = f"{self._symbol(Symbol.FILE, '📄')} Output"
-            
-            self._print_box(
-                lines=content_lines,
-                title=title,
-                color=Color.WHITE,
-                title_color=border_color,
-                border_color=border_color,
-                width=width,
-                center_title=False
-            )
+        """
+        Display the parsed output.yaml content in a styled box.
+
+        Uses the shared print_output_box function for consistent formatting
+        across CLI and HTTP client output.
+        """
+        # Use shared output box function for consistent formatting
+        print_output_box(
+            output=output,
+            error=error,
+            comments=comments,
+            result_files=result_files,
+            status=status or "COMPLETE",
+            terminal_width=self._console_width,
+        )
     
     # ═══════════════════════════════════════════════════════════════
     # Additional Utility Methods

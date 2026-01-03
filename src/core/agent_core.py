@@ -55,17 +55,30 @@ from .permissions import (
 )
 from .permission_profiles import PermissionManager
 
-# Import system tools (path configured in entry point agent.py)
+# Ensure tools directory is in sys.path for agentum imports
+import sys
+_tools_dir = str(AGENT_DIR / "tools")
+if _tools_dir not in sys.path:
+    sys.path.insert(0, _tools_dir)
+
+# Import system tools (path now guaranteed by above)
 try:
     from agentum.system_write_output import (
         SYSTEM_TOOLS,
         create_agentum_mcp_server,
     )
     SYSTEM_TOOLS_AVAILABLE = True
-except ImportError:
+except ImportError as _import_err:
     SYSTEM_TOOLS_AVAILABLE = False
     SYSTEM_TOOLS: list[str] = []
     create_agentum_mcp_server = None
+    # Log warning - this should never happen if tools/ exists
+    import warnings
+    warnings.warn(
+        f"Failed to import agentum.system_write_output: {_import_err}. "
+        f"MCP system tools will not be available. "
+        f"Expected path: {_tools_dir}/agentum/system_write_output/"
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -638,7 +651,8 @@ class ClaudeAgent:
         parameters: Optional[dict] = None,
         resume_session_id: Optional[str] = None,
         fork_session: bool = False,
-        timeout_seconds: Optional[int] = None
+        timeout_seconds: Optional[int] = None,
+        session_id: Optional[str] = None
     ) -> AgentResult:
         """
         Execute the agent with a task.
@@ -653,6 +667,8 @@ class ClaudeAgent:
             resume_session_id: Session ID to resume (optional).
             fork_session: If True, fork to new session when resuming (optional).
             timeout_seconds: Override timeout (uses config.timeout_seconds if None).
+            session_id: Session ID to use for new session (optional, auto-generated if None).
+                        Used by API to ensure database session ID matches file-based session.
         
         Returns:
             AgentResult with execution outcome.
@@ -666,7 +682,8 @@ class ClaudeAgent:
         # Wrap execution with timeout to ensure every run is time-bounded
         return await asyncio.wait_for(
             self._execute(
-                task, system_prompt, parameters, resume_session_id, fork_session
+                task, system_prompt, parameters, resume_session_id, fork_session,
+                session_id=session_id
             ),
             timeout=effective_timeout,
         )
@@ -677,7 +694,8 @@ class ClaudeAgent:
         system_prompt: Optional[str] = None,
         parameters: Optional[dict] = None,
         resume_session_id: Optional[str] = None,
-        fork_session: bool = False
+        fork_session: bool = False,
+        session_id: Optional[str] = None
     ) -> AgentResult:
         """
         Internal execution logic (called by run() with timeout wrapper).
@@ -688,6 +706,7 @@ class ClaudeAgent:
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional).
             fork_session: If True, fork to new session when resuming (optional).
+            session_id: Session ID to use for new session (optional).
         
         Returns:
             AgentResult with execution outcome.
@@ -711,11 +730,13 @@ class ClaudeAgent:
             except Exception as e:
                 logger.warning(f"Could not resume session: {e}. Creating new.")
                 session_info = self._session_manager.create_session(
-                    working_dir=self._config.working_dir or str(AGENT_DIR)
+                    working_dir=self._config.working_dir or str(AGENT_DIR),
+                    session_id=session_id
                 )
         else:
             session_info = self._session_manager.create_session(
-                working_dir=self._config.working_dir or str(AGENT_DIR)
+                working_dir=self._config.working_dir or str(AGENT_DIR),
+                session_id=session_id
             )
         
         # Set file checkpointing flag on session
@@ -1019,7 +1040,8 @@ class ClaudeAgent:
         parameters: Optional[dict] = None,
         resume_session_id: Optional[str] = None,
         fork_session: bool = False,
-        timeout_seconds: Optional[int] = None
+        timeout_seconds: Optional[int] = None,
+        session_id: Optional[str] = None
     ) -> AgentResult:
         """
         Execute agent with timeout (alias for run(), kept for backward compatibility).
@@ -1033,13 +1055,14 @@ class ClaudeAgent:
             resume_session_id: Session ID to resume (optional).
             fork_session: If True, fork to new session when resuming (optional).
             timeout_seconds: Override timeout (uses config.timeout_seconds if None).
+            session_id: Session ID to use for new session (optional).
         
         Returns:
             AgentResult with execution outcome.
         """
         return await self.run(
             task, system_prompt, parameters, resume_session_id, fork_session,
-            timeout_seconds=timeout_seconds
+            timeout_seconds=timeout_seconds, session_id=session_id
         )
 
     async def compact(self, session_id: str) -> dict[str, Any]:

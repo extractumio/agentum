@@ -16,3 +16,19 @@ pyyaml>=6.0.0
 # Environment variables
 python-dotenv>=1.0.0
 
+# Colored console logging
+colorlog>=6.10.0
+
+# FastAPI Backend (Stage 1)
+fastapi>=0.128.0
+uvicorn[standard]>=0.40.0
+aiosqlite>=0.22.1
+sqlalchemy[asyncio]>=2.0.45
+pyjwt>=2.10.1
+httpx>=0.28.0
+python-multipart>=0.0.21
+
+# Testing
+pytest>=9.0.0
+pytest-asyncio>=1.3.0
+

@@ -22,9 +22,9 @@ tools:
     - WebFetch
     - WebSearch
     - NotebookEdit
-  disabled:
     - Write
     - Bash
+  disabled:
   permission_checked:
     - Read
     - Write

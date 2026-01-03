@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Entry point for Agentum.
+CLI Entry point for Agentum (direct execution).
 
-This is a wrapper that imports from src/core/agent.py.
+This script runs the agent directly without going through the HTTP API.
+It imports from src/core/agent.py and executes tasks locally.
+
 Configuration is loaded from config/agent.yaml and config/secrets.yaml.
+
+For HTTP-based execution via the API, use agent_http.py instead.
 """
 import sys
 from pathlib import Path

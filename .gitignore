@@ -16,6 +16,12 @@ __pycache__/
 dist/
 build/
 
+# Node.js / Frontend
+node_modules/
+package-lock.json
+dist/
+.vite/
+
 # IDE
 .idea/
 .vscode/

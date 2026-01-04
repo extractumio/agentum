@@ -2,23 +2,26 @@
 
 ## Executive Summary
 
-Agentum is a Claude Code SDK-based AI agent platform that provides two execution modes:
+Agentum is a Claude Code SDK-based AI agent platform that provides three execution modes:
 1. **CLI Mode** (`agent_cli.py`) - Direct execution with console tracing
 2. **HTTP Mode** (`agent_http.py`) - REST API-based execution through FastAPI backend
+3. **Web UI Mode** (`src/web_terminal_client/`) - Browser-based React terminal interface
 
-Both modes share a common core that handles agent execution, permissions, sessions, and skills. This document describes the current implementation, component interfaces, control flow, and implementation status.
+All three modes share a common core that handles agent execution, permissions, sessions, and skills. This document describes the current implementation, component interfaces, control flow, and implementation status.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture Overview](#1-architecture-overview)
-2. [Entry Points: CLI vs HTTP](#2-entry-points-cli-vs-http)
+2. [Entry Points: CLI vs HTTP vs Web UI](#2-entry-points-cli-vs-http-vs-web-ui)
 3. [Core Components](#3-core-components)
 4. [Control Flow Diagrams](#4-control-flow-diagrams)
 5. [Component Interfaces](#5-component-interfaces)
 6. [Implementation Status](#6-implementation-status)
 7. [File Structure Reference](#7-file-structure-reference)
+8. [Recent Changes (SSE Streaming)](#8-recent-changes-branch-codexadd-sse-real-time-event-streaming)
+9. [Web Terminal UI Architecture (Stage 3)](#9-web-terminal-ui-architecture-stage-3)
 
 ---
 
@@ -30,24 +33,24 @@ Both modes share a common core that handles agent execution, permissions, sessio
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            ENTRY POINTS                                      │
 │                                                                              │
-│   ┌────────────────────┐              ┌────────────────────┐                │
-│   │   agent_cli.py     │              │   agent_http.py    │                │
-│   │   (Direct CLI)     │              │   (HTTP Client)    │                │
-│   └─────────┬──────────┘              └─────────┬──────────┘                │
-│             │                                   │                            │
-│             │ Imports & Executes                │ HTTP Requests to           │
-│             │                                   │                            │
-│             ▼                                   ▼                            │
-│   ┌────────────────────┐              ┌────────────────────┐                │
-│   │  src/core/agent.py │              │  src/api/main.py   │                │
-│   │  (CLI Entry)       │              │  (FastAPI App)     │                │
-│   └─────────┬──────────┘              └─────────┬──────────┘                │
-│             │                                   │                            │
-└─────────────┼───────────────────────────────────┼────────────────────────────┘
-              │                                   │
-              │ TaskExecutionParams               │ TaskExecutionParams
-              │ + ExecutionTracer                 │ + BackendConsoleTracer
-              ▼                                   ▼
+│   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐    │
+│   │  agent_cli.py    │   │  agent_http.py   │   │   Web Terminal UI    │    │
+│   │  (Direct CLI)    │   │  (HTTP Client)   │   │   (React/Vite)       │    │
+│   └────────┬─────────┘   └────────┬─────────┘   └──────────┬───────────┘    │
+│            │                      │                        │                 │
+│            │ Imports              │ HTTP                   │ HTTP + SSE      │
+│            │                      │                        │                 │
+│            ▼                      ▼                        ▼                 │
+│   ┌──────────────────┐   ┌────────────────────────────────────────────┐     │
+│   │ src/core/agent.py│   │            src/api/main.py                 │     │
+│   │ (CLI Entry)      │   │            (FastAPI App)                   │     │
+│   └────────┬─────────┘   └────────────────────┬───────────────────────┘     │
+│            │                                   │                             │
+└────────────┼───────────────────────────────────┼─────────────────────────────┘
+             │                                   │
+             │ TaskExecutionParams               │ TaskExecutionParams
+             │ + ExecutionTracer                 │ + EventingTracer
+             ▼                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      UNIFIED TASK RUNNER LAYER                               │
 │                                                                              │
@@ -120,21 +123,22 @@ Both modes share a common core that handles agent execution, permissions, sessio
 
 ---
 
-## 2. Entry Points: CLI vs HTTP
+## 2. Entry Points: CLI vs HTTP vs Web UI
 
 ### 2.1 Comparison Matrix
 
-| Aspect | CLI (`agent_cli.py`) | HTTP (`agent_http.py`) |
-|--------|---------------------|------------------------|
-| **Execution** | Direct, synchronous | Background async task |
-| **Task Runner** | `execute_agent_task()` | `execute_agent_task()` |
-| **Console Output** | `ExecutionTracer` (rich, interactive) | `EventingTracer` wrapping `BackendConsoleTracer` |
-| **Real-time Events** | Direct tracer output | SSE streaming via `/sessions/{id}/events` |
-| **Session Storage** | File-based only | SQLite + File-based |
-| **Authentication** | None | JWT Bearer Token |
-| **Configuration** | YAML files + CLI args | YAML files + API request body |
-| **Result Delivery** | stdout + output file | SSE stream + fallback to polling |
-| **Special Commands** | `--show-tools`, `--init-permissions` | N/A |
+| Aspect | CLI (`agent_cli.py`) | HTTP (`agent_http.py`) | Web UI (React) |
+|--------|---------------------|------------------------|----------------|
+| **Execution** | Direct, synchronous | Background async task | Background async task |
+| **Task Runner** | `execute_agent_task()` | `execute_agent_task()` | `execute_agent_task()` (via API) |
+| **Console Output** | `ExecutionTracer` (rich) | `ExecutionTracer` (via SSE) | Custom terminal rendering |
+| **Real-time Events** | Direct tracer output | SSE streaming | SSE streaming (EventSource) |
+| **Session Storage** | File-based only | SQLite + File-based | SQLite + File-based |
+| **Authentication** | None | None (implicit) | JWT Bearer Token (localStorage) |
+| **Configuration** | YAML files + CLI args | YAML files + CLI args | YAML + API requests |
+| **Result Delivery** | stdout + output file | SSE + fallback polling | SSE stream + UI display |
+| **Special Commands** | `--show-tools`, etc. | N/A | UI buttons & controls |
+| **User Interface** | Terminal TUI | Terminal TUI | Web-based GUI |
 
 ### 2.2 Entry Point Flow
 
@@ -187,6 +191,48 @@ Both modes share a common core that handles agent execution, permissions, sessio
 │        │                                                                     │
 │   [Fallback] Poll: GET /sessions/{id}  ←───────────────────────────────────│
 │   Result: GET /sessions/{id}/result                                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          WEB UI MODE                                         │
+│                                                                              │
+│   Browser (React App)                    │   FastAPI Backend (:40080)        │
+│   http://localhost:50080                 │                                   │
+│        │                                 │                                   │
+│        ▼                                 │                                   │
+│   [Load config.yaml]                     │                                   │
+│   [Check localStorage for token]         │                                   │
+│        │                                 │                                   │
+│        ▼ (no token)                      │                                   │
+│   POST /api/v1/auth/token          ──────▶│   routes/auth.py                 │
+│        │                                 │   └─ Return JWT token             │
+│        ▼                                 │                                   │
+│   [Store token in localStorage]    ◀─────│                                   │
+│        │                                 │                                   │
+│        ▼                                 │                                   │
+│   [User enters task + clicks Execute]    │                                   │
+│        │                                 │                                   │
+│        ▼                                 │                                   │
+│   POST /api/v1/sessions/run        ──────▶│   routes/sessions.py::run_task() │
+│        │                                 │   └─ Start background task        │
+│        ▼                                 │                                   │
+│   [Receive session_id]             ◀─────│                                   │
+│        │                                 │                                   │
+│        ▼                                 │                                   │
+│   [Connect EventSource to SSE]           │                                   │
+│   GET /sessions/{id}/events        ──────▶│   SSE Event Stream               │
+│        │                                 │                                   │
+│        ▼                                 │   EventingTracer emits:           │
+│   [Receive real-time events]       ◀─────│   ├─ agent_start                  │
+│   ├─ agent_start → Render box            │   ├─ tool_start / tool_complete   │
+│   ├─ tool_start → Show ⚙ + params        │   ├─ thinking / message           │
+│   ├─ thinking → Show ❯ + text            │   ├─ output_display               │
+│   ├─ agent_complete → Render box         │   └─ agent_complete               │
+│        │                                 │                                   │
+│        ▼                                 │                                   │
+│   [Update UI stats: turns, cost]         │                                   │
+│   [Display final result]                 │                                   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -839,12 +885,12 @@ class EventingTracer(TracerBase):
 | Authentication | N/A | ✅ | JWT Bearer tokens |
 | MCP system tools | ✅ | ✅ | agentum:write_output |
 
-### 6.2 Missing / Planned Features
+### 6.2 Feature Status
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | SSE streaming | ✅ **Completed (Stage 2)** | Real-time execution events via SSE |
-| Web terminal UI | 🔄 Planned (Stage 3) | React-based terminal |
+| Web terminal UI | ✅ **Completed (Stage 3)** | React/TypeScript terminal with SSE |
 | Multi-agent context sharing | 🔄 Future | Shared session access |
 | Session archival to DB | 🔄 Future | PostgreSQL session storage |
 | Docker deployment | 🔄 Future | Containerized deployment |
@@ -926,11 +972,26 @@ Project/
 │   │   ├── __init__.py
 │   │   ├── database.py       # SQLAlchemy setup
 │   │   └── models.py         # User, Session models
-│   └── services/             # Business logic
-│       ├── __init__.py
-│       ├── agent_runner.py   # Background task runner
-│       ├── auth_service.py   # JWT authentication
-│       └── session_service.py # Session CRUD service
+│   ├── services/             # Business logic
+│   │   ├── __init__.py
+│   │   ├── agent_runner.py   # Background task runner
+│   │   ├── auth_service.py   # JWT authentication
+│   │   └── session_service.py # Session CRUD service
+│   └── web_terminal_client/  # React Web UI (Stage 3)
+│       ├── index.html        # HTML entry point
+│       ├── package.json      # npm dependencies
+│       ├── vite.config.ts    # Vite dev server (port 50080)
+│       ├── tsconfig.json     # TypeScript configuration
+│       ├── public/
+│       │   └── config.yaml   # Frontend config (API URL)
+│       └── src/
+│           ├── main.tsx      # React entry point
+│           ├── App.tsx       # Main component (terminal UI)
+│           ├── api.ts        # REST API client
+│           ├── sse.ts        # SSE event streaming
+│           ├── config.ts     # Config loader
+│           ├── types.ts      # TypeScript types
+│           └── styles.css    # Dark terminal theme
 ├── tools/                    # MCP tools
 │   └── agentum/
 │       └── system_write_output/  # agentum:write_output tool
@@ -941,24 +1002,27 @@ Project/
 
 ## Summary
 
-Agentum provides a well-structured dual-entry architecture where:
+Agentum provides a well-structured tri-entry architecture where:
 
-1. **Unified Task Runner** (`task_runner.py`) provides a single entry point for both CLI and HTTP
+1. **Unified Task Runner** (`task_runner.py`) provides a single entry point for CLI, HTTP, and Web UI
 2. **CLI Mode** provides direct execution with rich interactive console output (`ExecutionTracer`)
-3. **HTTP Mode** provides API-based execution with linear console + file logging (`BackendConsoleTracer`)
+3. **HTTP Mode** provides API-based execution with SSE streaming for real-time events
+4. **Web UI Mode** provides browser-based terminal with React/TypeScript and SSE streaming
 
-The key components (ClaudeAgent, SessionManager, PermissionManager, SkillManager) are designed with clear interfaces and separation of concerns. The tracer pattern allows different output strategies for CLI vs API modes, while the unified task runner ensures consistent behavior across both entry points.
+The key components (ClaudeAgent, SessionManager, PermissionManager, SkillManager) are designed with clear interfaces and separation of concerns. The tracer pattern allows different output strategies for CLI vs API modes, while the unified task runner ensures consistent behavior across all entry points.
 
 **Architecture Benefits:**
 - Single source of truth for task execution logic
-- Easy to add new entry points (WebSocket, gRPC, etc.)
-- Consistent behavior guaranteed across CLI and HTTP
+- Three entry points sharing the same backend
+- Consistent behavior guaranteed across CLI, HTTP, and Web UI
+- Real-time SSE streaming for HTTP and Web UI modes
 - ~40% code reduction in entry points through unification
 
-**Next Steps (per TODO_AND_MISSING.md):**
+**Implementation Status:**
+- ✅ Stage 1: CLI and HTTP client modes (COMPLETED)
 - ✅ Stage 2: SSE streaming for real-time execution events (COMPLETED)
-- Stage 3: Build React web terminal UI
-- Future: Multi-agent context sharing, PostgreSQL migration, Docker deployment
+- ✅ Stage 3: React web terminal UI (COMPLETED)
+- 🔄 Future: Multi-agent context sharing, PostgreSQL migration, Docker deployment
 
 ---
 
@@ -1061,4 +1125,223 @@ Expected output:
 - Monotonic sequence numbers starting at 1
 - All events have timestamps
 - Metrics in agent_complete event
+
+---
+
+## 9. Web Terminal UI Architecture (Stage 3)
+
+### 9.1 Technology Stack
+
+| Component | Technology | Version | Purpose |
+|-----------|-----------|---------|---------|
+| **Frontend Framework** | React | 18.3.1 | UI component library |
+| **Language** | TypeScript | 5.6.3 | Type-safe development |
+| **Build Tool** | Vite | 5.4.11 | Fast dev server & bundler |
+| **API Client** | Fetch API | Native | REST API communication |
+| **SSE Client** | EventSource API | Native | Real-time event streaming |
+| **Configuration** | YAML | 2.5.1 | Frontend config loading |
+
+### 9.2 Component Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         WEB TERMINAL UI ARCHITECTURE                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                              BROWSER (http://localhost:50080)
+                                         │
+                    ┌────────────────────┴────────────────────┐
+                    │                                         │
+                    ▼                                         ▼
+         ┌────────────────────┐                  ┌────────────────────┐
+         │    App.tsx         │                  │   config.yaml      │
+         │  (Main Component)  │                  │  (UI Config)       │
+         └──────────┬─────────┘                  └────────────────────┘
+                    │
+      ┌─────────────┼─────────────┬─────────────┬──────────────┐
+      │             │             │             │              │
+      ▼             ▼             ▼             ▼              ▼
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ api.ts   │  │ sse.ts   │  │ config.ts│  │ types.ts │  │styles.css│
+│(REST API)│  │(SSE      │  │(Config   │  │(TypeScript│  │(Dark UI) │
+│          │  │ Stream)  │  │ Loader)  │  │ Types)   │  │          │
+└─────┬────┘  └─────┬────┘  └──────────┘  └──────────┘  └──────────┘
+      │             │
+      │             │
+      ▼             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FastAPI Backend (http://localhost:40080)                  │
+│                                                                              │
+│   REST API Endpoints:                    SSE Endpoint:                       │
+│   ├─ POST /api/v1/auth/token            GET /api/v1/sessions/{id}/events    │
+│   ├─ POST /api/v1/sessions/run          │                                   │
+│   ├─ GET  /api/v1/sessions              │ Real-time event stream            │
+│   ├─ GET  /api/v1/sessions/{id}         │ (EventingTracer → Queue → SSE)    │
+│   ├─ POST /api/v1/sessions/{id}/cancel  │                                   │
+│   └─ GET  /api/v1/sessions/{id}/result  │                                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.3 Configuration Files
+
+**Backend: `config/api.yaml`**
+```yaml
+api:
+  host: "0.0.0.0"
+  port: 40080
+  cors_origins:
+    - "http://localhost:50080"    # Frontend origin
+    - "http://127.0.0.1:50080"
+```
+
+**Frontend: `src/web_terminal_client/vite.config.ts`**
+```typescript
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 50080,
+    host: '0.0.0.0',
+  },
+});
+```
+
+**Frontend Config: `src/web_terminal_client/public/config.yaml`**
+```yaml
+api:
+  base_url: "http://localhost:40080"
+
+ui:
+  max_output_lines: 1000
+  auto_scroll: true
+```
+
+### 9.4 Component Interfaces
+
+**REST API Client (`api.ts`):**
+```typescript
+fetchToken(baseUrl: string): Promise<TokenResponse>
+listSessions(baseUrl: string, token: string): Promise<SessionListResponse>
+getSession(baseUrl: string, token: string, sessionId: string): Promise<SessionResponse>
+runTask(baseUrl: string, token: string, task: string): Promise<TaskStartedResponse>
+cancelSession(baseUrl: string, token: string, sessionId: string): Promise<void>
+getResult(baseUrl: string, token: string, sessionId: string): Promise<ResultResponse>
+```
+
+**SSE Client (`sse.ts`):**
+```typescript
+connectSSE(
+  baseUrl: string,
+  sessionId: string,
+  token: string,
+  onEvent: (event: SSEEvent) => void,
+  onError: (error: Error) => void
+): () => void  // Returns cleanup function
+```
+
+### 9.5 SSE Event Type Rendering
+
+The Web UI renders all SSE event types from `EventingTracer`:
+
+| SSE Event Type | UI Rendering | Description |
+|----------------|-------------|-------------|
+| `agent_start` | Box with session ID, model | Agent initialization |
+| `tool_start` | ⚙ Tool name + input params | Tool execution begins |
+| `tool_complete` | └─ Tool status (OK/FAILED) + duration | Tool execution ends |
+| `thinking` | ❯ Thinking text | Claude's reasoning |
+| `message` | ✦ Message text | Agent messages |
+| `profile_switch` | Profile name + rule counts | Permission profile change |
+| `output_display` | Output YAML content box | Final output display |
+| `agent_complete` | Box with status, metrics | Task completion |
+| `error` | ✖ Error message | Error occurred |
+| `cancelled` | ● Cancelled message | Task cancelled |
+| `conversation_turn` | (Updates turn counter) | Turn tracking |
+
+### 9.6 UI Features
+
+| Feature | Implementation | Notes |
+|---------|---------------|-------|
+| **Task Submission** | Textarea + Execute button | Ctrl+Enter shortcut |
+| **Real-time Execution** | SSE streaming via `EventSource` | Live tool execution, thinking |
+| **Session Management** | Dropdown to select/switch sessions | Automatic session list refresh |
+| **Task Cancellation** | Cancel button during execution | POST /sessions/{id}/cancel |
+| **Status Display** | Footer with turn/token/cost metrics | Real-time updates |
+| **Session History** | Dropdown with session list | Click to load past sessions |
+| **Terminal Output** | Scrollable event log | Auto-scroll, max 1000 lines |
+| **Authentication** | JWT token (auto-generated) | Stored in localStorage |
+| **Dark Theme** | Terminal-style CSS | Black background, monospace font |
+
+### 9.7 Development Setup
+
+**VSCode Launch Configurations (`.vscode/launch.json`):**
+
+```json
+{
+  "configurations": [
+    {
+      "name": "Backend API Server",
+      "type": "debugpy",
+      "module": "uvicorn",
+      "args": ["src.api.main:app", "--host", "0.0.0.0", "--port", "40080", "--reload"]
+    },
+    {
+      "name": "Web UI (React/Vite)",
+      "type": "node-terminal",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/Project/src/web_terminal_client"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full Stack (Backend + Web UI)",
+      "configurations": ["Backend API Server", "Web UI (React/Vite)"]
+    }
+  ]
+}
+```
+
+**Setup Process:**
+
+1. Install Frontend Dependencies:
+   ```bash
+   cd Project/src/web_terminal_client
+   npm install
+   ```
+
+2. Start Full Stack (VSCode):
+   - Press `F5` and select "Full Stack (Backend + Web UI)"
+   - Both services start automatically
+   - Browser opens to http://localhost:50080
+
+3. Manual Start:
+   ```bash
+   # Terminal 1 - Backend
+   cd Project && source venv/bin/activate
+   uvicorn src.api.main:app --host 0.0.0.0 --port 40080 --reload
+
+   # Terminal 2 - Frontend
+   cd Project/src/web_terminal_client
+   npm run dev
+   ```
+
+### 9.8 Access URLs
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| **Web UI** | http://localhost:50080 | React terminal interface |
+| **Backend API** | http://localhost:40080 | FastAPI REST endpoints |
+| **API Docs (Swagger)** | http://localhost:40080/api/docs | Interactive API documentation |
+| **API Docs (ReDoc)** | http://localhost:40080/api/redoc | Alternative API documentation |
+
+### 9.9 Missing UI Features (Not Yet Implemented)
+
+| Feature | Priority | Notes |
+|---------|----------|-------|
+| **Resume/Fork Sessions** | Medium | API supports it, UI doesn't expose |
+| **Working Directory Selector** | Medium | Currently uses default |
+| **Config Overrides** | Low | Model, max_turns, timeout, etc. |
+| **Role Selection** | Low | Role picker dropdown |
+| **Permission Profile Picker** | Low | Profile dropdown |
+| **Checkpoint UI** | Low | View/rewind checkpoints |
+| **Session Export** | Low | Download session as JSON |
 

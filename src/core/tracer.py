@@ -19,6 +19,7 @@ Usage:
     tracer.on_error(error_message)
     tracer.on_agent_complete(result_message)
 """
+import asyncio
 import json
 import logging
 import sys
@@ -26,7 +27,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .constants import (
@@ -2241,6 +2242,317 @@ class BackendConsoleTracer(TracerBase):
         """Log session disconnect."""
         duration_str = self._format_duration(total_duration_ms)
         self._log(f"Session ended: {total_turns} turns, {duration_str}")
+
+
+class EventingTracer(TracerBase):
+    """
+    Tracer wrapper that emits structured events to an asyncio queue.
+
+    This allows real-time streaming (SSE/Web) while preserving the original
+    tracer output for CLI or backend logging.
+    """
+
+    def __init__(
+        self,
+        tracer: TracerBase,
+        event_queue: Optional[asyncio.Queue] = None,
+    ) -> None:
+        self._tracer = tracer
+        self._event_queue = event_queue
+        self._sequence = 0
+
+    def emit_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit a structured event to the queue."""
+        if self._event_queue is None:
+            return
+
+        self._sequence += 1
+        event = {
+            "type": event_type,
+            "data": data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sequence": self._sequence,
+        }
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            loop.create_task(self._event_queue.put(event))
+        else:
+            try:
+                self._event_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    def on_agent_start(
+        self,
+        session_id: str,
+        model: str,
+        tools: list[str],
+        working_dir: str,
+        skills: Optional[list[str]] = None,
+        task: Optional[str] = None
+    ) -> None:
+        self._tracer.on_agent_start(
+            session_id=session_id,
+            model=model,
+            tools=tools,
+            working_dir=working_dir,
+            skills=skills,
+            task=task,
+        )
+        self.emit_event(
+            "agent_start",
+            {
+                "session_id": session_id,
+                "model": model,
+                "tools": tools,
+                "working_dir": working_dir,
+                "skills": skills,
+                "task": task,
+            },
+        )
+
+    def on_tool_start(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_id: str
+    ) -> None:
+        self._tracer.on_tool_start(tool_name, tool_input, tool_id)
+        self.emit_event(
+            "tool_start",
+            {
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_id": tool_id,
+            },
+        )
+
+    def on_tool_complete(
+        self,
+        tool_name: str,
+        tool_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        self._tracer.on_tool_complete(
+            tool_name=tool_name,
+            tool_id=tool_id,
+            result=result,
+            duration_ms=duration_ms,
+            is_error=is_error,
+        )
+        self.emit_event(
+            "tool_complete",
+            {
+                "tool_name": tool_name,
+                "tool_id": tool_id,
+                "result": result,
+                "duration_ms": duration_ms,
+                "is_error": is_error,
+            },
+        )
+
+    def on_thinking(self, thinking_text: str) -> None:
+        self._tracer.on_thinking(thinking_text)
+        self.emit_event("thinking", {"text": thinking_text})
+
+    def on_message(self, text: str, is_partial: bool = False) -> None:
+        self._tracer.on_message(text, is_partial=is_partial)
+        self.emit_event(
+            "message",
+            {
+                "text": text,
+                "is_partial": is_partial,
+            },
+        )
+
+    def on_error(self, error_message: str, error_type: str = "error") -> None:
+        self._tracer.on_error(error_message, error_type=error_type)
+        self.emit_event(
+            "error",
+            {
+                "message": error_message,
+                "error_type": error_type,
+            },
+        )
+
+    def on_agent_complete(
+        self,
+        status: str,
+        num_turns: int,
+        duration_ms: int,
+        total_cost_usd: Optional[float],
+        result: Optional[str],
+        session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        model: Optional[str] = None,
+        cumulative_cost_usd: Optional[float] = None,
+        cumulative_turns: Optional[int] = None,
+        cumulative_tokens: Optional[int] = None
+    ) -> None:
+        self._tracer.on_agent_complete(
+            status=status,
+            num_turns=num_turns,
+            duration_ms=duration_ms,
+            total_cost_usd=total_cost_usd,
+            result=result,
+            session_id=session_id,
+            usage=usage,
+            model=model,
+            cumulative_cost_usd=cumulative_cost_usd,
+            cumulative_turns=cumulative_turns,
+            cumulative_tokens=cumulative_tokens,
+        )
+        self.emit_event(
+            "agent_complete",
+            {
+                "status": status,
+                "num_turns": num_turns,
+                "duration_ms": duration_ms,
+                "total_cost_usd": total_cost_usd,
+                "result": result,
+                "session_id": session_id,
+                "usage": usage,
+                "model": model,
+                "cumulative_cost_usd": cumulative_cost_usd,
+                "cumulative_turns": cumulative_turns,
+                "cumulative_tokens": cumulative_tokens,
+            },
+        )
+
+    def on_output_display(
+        self,
+        output: Optional[str] = None,
+        error: Optional[str] = None,
+        comments: Optional[str] = None,
+        result_files: Optional[list[str]] = None,
+        status: Optional[str] = None
+    ) -> None:
+        self._tracer.on_output_display(
+            output=output,
+            error=error,
+            comments=comments,
+            result_files=result_files,
+            status=status,
+        )
+        self.emit_event(
+            "output_display",
+            {
+                "output": output,
+                "error": error,
+                "comments": comments,
+                "result_files": result_files,
+                "status": status,
+            },
+        )
+
+    def on_profile_switch(
+        self,
+        profile_type: str,
+        profile_name: str,
+        tools: list[str],
+        allow_rules_count: int = 0,
+        deny_rules_count: int = 0,
+        profile_path: Optional[str] = None
+    ) -> None:
+        self._tracer.on_profile_switch(
+            profile_type=profile_type,
+            profile_name=profile_name,
+            tools=tools,
+            allow_rules_count=allow_rules_count,
+            deny_rules_count=deny_rules_count,
+            profile_path=profile_path,
+        )
+        self.emit_event(
+            "profile_switch",
+            {
+                "profile_type": profile_type,
+                "profile_name": profile_name,
+                "tools": tools,
+                "allow_rules_count": allow_rules_count,
+                "deny_rules_count": deny_rules_count,
+                "profile_path": profile_path,
+            },
+        )
+
+    def on_hook_triggered(
+        self,
+        hook_event: str,
+        tool_name: Optional[str] = None,
+        decision: Optional[str] = None,
+        message: Optional[str] = None
+    ) -> None:
+        self._tracer.on_hook_triggered(
+            hook_event=hook_event,
+            tool_name=tool_name,
+            decision=decision,
+            message=message,
+        )
+        self.emit_event(
+            "hook_triggered",
+            {
+                "hook_event": hook_event,
+                "tool_name": tool_name,
+                "decision": decision,
+                "message": message,
+            },
+        )
+
+    def on_conversation_turn(
+        self,
+        turn_number: int,
+        prompt_preview: str,
+        response_preview: str,
+        duration_ms: int,
+        tools_used: list[str]
+    ) -> None:
+        self._tracer.on_conversation_turn(
+            turn_number=turn_number,
+            prompt_preview=prompt_preview,
+            response_preview=response_preview,
+            duration_ms=duration_ms,
+            tools_used=tools_used,
+        )
+        self.emit_event(
+            "conversation_turn",
+            {
+                "turn_number": turn_number,
+                "prompt_preview": prompt_preview,
+                "response_preview": response_preview,
+                "duration_ms": duration_ms,
+                "tools_used": tools_used,
+            },
+        )
+
+    def on_session_connect(self, session_id: Optional[str] = None) -> None:
+        self._tracer.on_session_connect(session_id=session_id)
+        self.emit_event("session_connect", {"session_id": session_id})
+
+    def on_session_disconnect(
+        self,
+        session_id: Optional[str] = None,
+        total_turns: int = 0,
+        total_duration_ms: int = 0
+    ) -> None:
+        self._tracer.on_session_disconnect(
+            session_id=session_id,
+            total_turns=total_turns,
+            total_duration_ms=total_duration_ms,
+        )
+        self.emit_event(
+            "session_disconnect",
+            {
+                "session_id": session_id,
+                "total_turns": total_turns,
+                "total_duration_ms": total_duration_ms,
+            },
+        )
 
 
 class NullTracer(TracerBase):

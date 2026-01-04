@@ -13,7 +13,48 @@ import { loadConfig } from './config';
 import { connectSSE } from './sse';
 import type { AppConfig, ResultResponse, SessionResponse, TerminalEvent } from './types';
 
-const BOX_WIDTH = 62;
+type ConversationItem =
+  | {
+      type: 'user';
+      id: string;
+      time: string;
+      content: string;
+    }
+  | {
+      type: 'agent';
+      id: string;
+      task: AgentTaskView;
+    };
+
+type ToolCallView = {
+  id: string;
+  tool: string;
+  time: string;
+  status: 'running' | 'complete' | 'failed';
+  durationMs?: number;
+  input?: unknown;
+  output?: string;
+  thinking?: string;
+  error?: string;
+  suggestion?: string;
+};
+
+type AgentTaskView = {
+  id: string;
+  title: string;
+  summary: string;
+  status: 'running' | 'complete' | 'failed' | 'partial';
+  durationMs?: number;
+  turns?: number;
+  cost?: number;
+  model?: string;
+  time: string;
+  outputTime?: string;
+  toolCalls: ToolCallView[];
+  outputParts: string[];
+  error?: string;
+  files: string[];
+};
 
 const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
@@ -33,6 +74,31 @@ const STATUS_CLASS: Record<string, string> = {
 
 const EMPTY_EVENTS: TerminalEvent[] = [];
 
+const TOOL_COLOR_CLASS: Record<string, string> = {
+  Read: 'tool-read',
+  Bash: 'tool-bash',
+  Write: 'tool-write',
+  WebFetch: 'tool-webfetch',
+  Output: 'tool-output',
+  Think: 'tool-think',
+};
+
+const TOOL_SYMBOL: Record<string, string> = {
+  Read: '◉',
+  Bash: '▶',
+  Write: '✎',
+  WebFetch: '⬡',
+  Output: '◈',
+  Think: '◇',
+};
+
+const STATUS_ICON: Record<AgentTaskView['status'], { symbol: string; className: string }> = {
+  complete: { symbol: '✓', className: 'status-complete' },
+  partial: { symbol: '◐', className: 'status-partial' },
+  failed: { symbol: '✗', className: 'status-failed' },
+  running: { symbol: '◌', className: 'status-running' },
+};
+
 function normalizeStatus(value: string): string {
   const statusValue = value.toLowerCase();
   if (statusValue === 'completed' || statusValue === 'complete') {
@@ -48,21 +114,6 @@ function normalizeStatus(value: string): string {
     return 'running';
   }
   return statusValue || 'idle';
-}
-
-function padBoxLine(content: string): string {
-  const maxContentWidth = BOX_WIDTH - 4;
-  const trimmed = content.length > maxContentWidth
-    ? `${content.slice(0, maxContentWidth - 3)}...`
-    : content;
-  return `│ ${trimmed.padEnd(maxContentWidth, ' ')} │`;
-}
-
-function buildBox(lines: string[]): string[] {
-  const top = `┌${'─'.repeat(BOX_WIDTH - 2)}┐`;
-  const mid = `├${'─'.repeat(BOX_WIDTH - 2)}┤`;
-  const bottom = `└${'─'.repeat(BOX_WIDTH - 2)}┘`;
-  return [top, padBoxLine(lines[0] ?? ''), mid, ...lines.slice(1).map(padBoxLine), bottom];
 }
 
 function formatDuration(durationMs?: number | null): string {
@@ -81,15 +132,45 @@ function formatCost(cost?: number | null): string {
   return `$${cost.toFixed(4)}`;
 }
 
+function formatTimestamp(timestamp?: string): string {
+  if (!timestamp) {
+    return '--:--:--';
+  }
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString('en-US', { hour12: false });
+}
+
 function renderMarkdown(text: string): JSX.Element[] {
   const lines = text.split('\n');
   const elements: JSX.Element[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    if (line.trim().startsWith('```')) {
+      if (inCodeBlock) {
+        elements.push(
+          <pre key={`code-${i}`} className="md-code-block">
+            {codeLines.join('\n')}
+          </pre>
+        );
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
     let element: JSX.Element;
 
-    // Headers
     if (line.startsWith('### ')) {
       element = (
         <div key={i} className="md-h3">
@@ -108,22 +189,16 @@ function renderMarkdown(text: string): JSX.Element[] {
           {renderInlineMarkdown(line.slice(2))}
         </div>
       );
-    }
-    // Horizontal rule
-    else if (/^[-—─]{3,}$/.test(line.trim())) {
+    } else if (/^[-—─]{3,}$/.test(line.trim())) {
       element = <hr key={i} className="md-hr" />;
-    }
-    // List items
-    else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
+    } else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
       const indent = line.length - line.trimStart().length;
       element = (
         <div key={i} className="md-li" style={{ marginLeft: indent * 4 }}>
           • {renderInlineMarkdown(line.trimStart().slice(2))}
         </div>
       );
-    }
-    // Numbered list
-    else if (/^\s*\d+\.\s/.test(line)) {
+    } else if (/^\s*\d+\.\s/.test(line)) {
       const match = line.match(/^(\s*)(\d+)\.\s(.*)$/);
       if (match) {
         const [, spaces, num, content] = match;
@@ -135,17 +210,21 @@ function renderMarkdown(text: string): JSX.Element[] {
       } else {
         element = <div key={i}>{renderInlineMarkdown(line)}</div>;
       }
-    }
-    // Empty line
-    else if (line.trim() === '') {
+    } else if (line.trim() === '') {
       element = <div key={i} className="md-spacer" />;
-    }
-    // Regular paragraph
-    else {
+    } else {
       element = <div key={i}>{renderInlineMarkdown(line)}</div>;
     }
 
     elements.push(element);
+  }
+
+  if (inCodeBlock && codeLines.length > 0) {
+    elements.push(
+      <pre key="code-final" className="md-code-block">
+        {codeLines.join('\n')}
+      </pre>
+    );
   }
 
   return elements;
@@ -155,13 +234,11 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
   const result: (string | JSX.Element)[] = [];
   let key = 0;
 
-  // Process inline markdown: bold, italic, code, links
   const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
   let lastIndex = 0;
   let match;
 
   while ((match = regex.exec(text)) !== null) {
-    // Add text before match
     if (match.index > lastIndex) {
       result.push(text.slice(lastIndex, match.index));
     }
@@ -169,11 +246,23 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
     const [fullMatch, , bold, italic, code, linkText, linkUrl] = match;
 
     if (bold) {
-      result.push(<strong key={key++} className="md-bold">{bold}</strong>);
+      result.push(
+        <strong key={key++} className="md-bold">
+          {bold}
+        </strong>
+      );
     } else if (italic) {
-      result.push(<em key={key++} className="md-italic">{italic}</em>);
+      result.push(
+        <em key={key++} className="md-italic">
+          {italic}
+        </em>
+      );
     } else if (code) {
-      result.push(<code key={key++} className="md-code">{code}</code>);
+      result.push(
+        <code key={key++} className="md-code">
+          {code}
+        </code>
+      );
     } else if (linkText && linkUrl) {
       result.push(
         <a key={key++} href={linkUrl} className="md-link" target="_blank" rel="noopener noreferrer">
@@ -185,7 +274,6 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
     lastIndex = match.index + fullMatch.length;
   }
 
-  // Add remaining text
   if (lastIndex < text.length) {
     result.push(text.slice(lastIndex));
   }
@@ -205,20 +293,29 @@ function formatTokens(result?: ResultResponse | null): { input: number; output: 
 
 function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse | null): TerminalEvent[] {
   const now = new Date().toISOString();
-  const events: TerminalEvent[] = [
-    {
-      type: 'agent_start',
-      data: {
-        session_id: session.id,
-        model: session.model ?? 'unknown',
-        tools: [],
-        working_dir: session.working_dir ?? 'unknown',
-        task: session.task ?? '',
-      },
+  const events: TerminalEvent[] = [];
+
+  if (session.task) {
+    events.push({
+      type: 'user_message',
+      data: { text: session.task },
       timestamp: now,
-      sequence: 1,
+      sequence: 0,
+    });
+  }
+
+  events.push({
+    type: 'agent_start',
+    data: {
+      session_id: session.id,
+      model: session.model ?? 'unknown',
+      tools: [],
+      working_dir: session.working_dir ?? 'unknown',
+      task: session.task ?? '',
     },
-  ];
+    timestamp: now,
+    sequence: 1,
+  });
 
   if (result) {
     events.push({
@@ -252,9 +349,295 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
   return events;
 }
 
+function ToolTag({ type, count }: { type: string; count?: number }): JSX.Element {
+  const colorClass = TOOL_COLOR_CLASS[type] ?? 'tool-read';
+  const symbol = TOOL_SYMBOL[type] ?? TOOL_SYMBOL.Read;
+
+  return (
+    <span className={`tool-tag ${colorClass}`}>
+      <span className="tool-symbol">{symbol}</span>
+      <span className="tool-name">{type}</span>
+      {count !== undefined && (
+        <span className="tool-count">×{count}</span>
+      )}
+    </span>
+  );
+}
+
+function MessageBlock({ sender, time, content }: { sender: string; time: string; content: string }): JSX.Element {
+  return (
+    <div className="message-block user-message">
+      <div className="message-header">
+        <span className="message-icon">⟩</span>
+        <span className="message-sender">{sender}</span>
+        <span className="message-time">@ {time}</span>
+      </div>
+      <div className="message-content">{content}</div>
+    </div>
+  );
+}
+
+function ToolCallBlock({
+  tool,
+  expanded,
+  onToggle,
+  isLast,
+}: {
+  tool: ToolCallView;
+  expanded: boolean;
+  onToggle: () => void;
+  isLast: boolean;
+}): JSX.Element {
+  const hasContent = Boolean(tool.thinking || tool.input || tool.output || tool.error);
+  const treeChar = isLast ? '└──' : '├──';
+  const previewSource = tool.output ?? tool.input;
+  const previewText = previewSource
+    ? String(typeof previewSource === 'string' ? previewSource : JSON.stringify(previewSource))
+    : '';
+
+  return (
+    <div className="tool-call">
+      <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button">
+        <span className="tool-tree">{treeChar}</span>
+        {hasContent && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
+        <ToolTag type={tool.tool} />
+        <span className="tool-time">@ {tool.time}</span>
+        {!expanded && previewText && (
+          <span className="tool-preview">
+            — {previewText.slice(0, 60)}
+            {previewText.length > 60 ? '...' : ''}
+          </span>
+        )}
+      </div>
+      {expanded && hasContent && (
+        <div className="tool-call-body">
+          {tool.thinking && (
+            <div className="tool-thinking">💭 {tool.thinking}</div>
+          )}
+          {tool.input && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ command ─────────</div>
+              <pre className="tool-section-body">$ {typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input, null, 2)}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {tool.output && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ output ──────────</div>
+              <pre className="tool-section-body tool-output">{tool.output}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {tool.error && (
+            <div className="tool-error">
+              <div className="tool-error-title">⚠ ERROR: {tool.error}</div>
+              {tool.suggestion && <div className="tool-suggestion">→ {tool.suggestion}</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentResponse({
+  task,
+  expanded,
+  onToggle,
+  toolExpanded,
+  onToggleTool,
+}: {
+  task: AgentTaskView;
+  expanded: boolean;
+  onToggle: () => void;
+  toolExpanded: Set<string>;
+  onToggleTool: (id: string) => void;
+}): JSX.Element {
+  const status = STATUS_ICON[task.status];
+
+  return (
+    <div className="agent-response">
+      <div className="message-block agent-processing">
+        <div className="message-header">
+          <span className="message-icon">◆</span>
+          <span className="message-sender">AGENT</span>
+          <span className="message-divider">│</span>
+          <span className="message-meta">{task.model ?? 'unknown'}</span>
+          <span className="message-divider">│</span>
+          <span className="message-meta">⏱ {formatDuration(task.durationMs)}</span>
+          <span className="message-divider">│</span>
+          <span className="message-meta">↻ {task.turns ?? 0}</span>
+          <span className="message-divider">│</span>
+          <span className="message-meta">◈ {task.toolCalls.length}</span>
+          <span className="message-divider">│</span>
+          <span className="message-meta cost">{formatCost(task.cost)}</span>
+        </div>
+        <div className="agent-task" onClick={onToggle} role="button">
+          <span className="task-toggle">{expanded ? '▼' : '▶'}</span>
+          <span className={`task-status ${status.className}`}>[{status.symbol}]</span>
+          <span className="task-title">{task.title}</span>
+        </div>
+        {expanded && (
+          <div className="agent-details">
+            <div className="agent-summary">{task.summary}</div>
+            <div className="tool-call-section">
+              <div className="tool-call-title">─── Tool Calls ({task.toolCalls.length}) ───</div>
+              {task.toolCalls.length === 0 ? (
+                <div className="tool-call-empty">No tool calls recorded.</div>
+              ) : (
+                task.toolCalls.map((tool, index) => (
+                  <ToolCallBlock
+                    key={tool.id}
+                    tool={tool}
+                    expanded={toolExpanded.has(tool.id)}
+                    onToggle={() => onToggleTool(tool.id)}
+                    isLast={index === task.toolCalls.length - 1}
+                  />
+                ))
+              )}
+            </div>
+            {task.files.length > 0 && (
+              <div className="agent-files">
+                <div className="agent-files-title">╭─ Files Created ─────────────────────</div>
+                {task.files.map((file) => (
+                  <div key={file} className="agent-file-row">
+                    <span className="agent-file-marker">│</span>
+                    <span className="agent-file-icon">📄</span>
+                    <span className="agent-file-name">{file}</span>
+                    <span className="agent-file-copy">[copy]</span>
+                  </div>
+                ))}
+                <div className="agent-files-title">╰─────────────────────────────────────</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="message-block output-block">
+        <div className="message-header">
+          <span className="message-icon">◆</span>
+          <span className="message-sender">OUTPUT</span>
+          <span className="message-time">@ {task.outputTime ?? task.time}</span>
+        </div>
+        <div className="message-content md-container">
+          {task.outputParts.length > 0
+            ? task.outputParts.map((part, index) => (
+                <div key={`${task.id}-${index}`} className="output-part">
+                  {renderMarkdown(part)}
+                </div>
+              ))
+            : 'No output yet.'}
+        </div>
+        {task.error && <div className="output-error">{task.error}</div>}
+      </div>
+    </div>
+  );
+}
+
+function InputField({
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+  isRunning,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  isRunning: boolean;
+}): JSX.Element {
+  return (
+    <div className="input-shell">
+      <div className="input-row">
+        <span className="input-prompt">⟩</span>
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              if (!isRunning) {
+                onSubmit();
+              }
+            }
+          }}
+          placeholder="Enter your request..."
+          className="input-textarea"
+          disabled={isRunning}
+          rows={1}
+        />
+        {isRunning ? (
+          <button className="input-button cancel" type="button" onClick={onCancel}>
+            ■ Cancel
+          </button>
+        ) : (
+          <button className="input-button" type="button" onClick={onSubmit}>
+            Send ↵
+          </button>
+        )}
+      </div>
+      <div className="input-footer">
+        <span className="input-footer-item">📎 Attach</span>
+        <span className="input-footer-item">📁 Files</span>
+        <span className="input-divider">│</span>
+        <span className="input-footer-item">[skills]</span>
+        <span className="input-footer-item">[model ▼]</span>
+      </div>
+    </div>
+  );
+}
+
+function StatusFooter({
+  isRunning,
+  statusLabel,
+  statusClass,
+  stats,
+  connected,
+}: {
+  isRunning: boolean;
+  statusLabel: string;
+  statusClass: string;
+  stats: {
+    turns: number;
+    tokensIn: number;
+    tokensOut: number;
+    cost: number;
+    durationMs: number;
+  };
+  connected: boolean;
+}): JSX.Element {
+  return (
+    <div className="terminal-status">
+      <div className="status-left">
+        <span className={`status-connection ${connected ? 'connected' : 'disconnected'}`}>
+          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+        </span>
+        <span className="status-divider">│</span>
+        <span className={`status-state ${statusClass}`}>
+          {isRunning ? (
+            <>
+              <span className="status-spinner">◐</span> Running...
+            </>
+          ) : (
+            <>{statusLabel === 'Idle' ? '● Idle' : statusLabel}</>
+          )}
+        </span>
+      </div>
+      <div className="status-right">
+        <span className="status-metric">Turns: <strong>{stats.turns}</strong></span>
+        <span className="status-metric">Tokens: <strong>{stats.tokensIn}</strong> in / <strong>{stats.tokensOut}</strong> out</span>
+        <span className="status-metric cost">${stats.cost.toFixed(4)}</span>
+        <span className="status-metric">{formatDuration(stats.durationMs)}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App(): JSX.Element {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('agentum_token'));
+  const [userId, setUserId] = useState<string>('');
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionResponse | null>(null);
   const [events, setEvents] = useState<TerminalEvent[]>(EMPTY_EVENTS);
@@ -262,6 +645,9 @@ export default function App(): JSX.Element {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
+  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -274,15 +660,10 @@ export default function App(): JSX.Element {
   const outputRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const activeTurnRef = useRef(0);
-  const isFirstTaskRef = useRef(true);
-  const lastProfileRef = useRef<string | null>(null);
-  const [sessionHeaderShown, setSessionHeaderShown] = useState(false);
 
   const isRunning = status === 'running';
-
   const statusLabel = STATUS_LABELS[status] ?? STATUS_LABELS.idle;
   const statusClass = STATUS_CLASS[status] ?? STATUS_CLASS.idle;
-  const statusSymbol = status === 'idle' ? '○' : '●';
 
   useEffect(() => {
     loadConfig().then(setConfig).catch(() => setConfig(null));
@@ -297,6 +678,7 @@ export default function App(): JSX.Element {
       .then((response) => {
         localStorage.setItem('agentum_token', response.access_token);
         setToken(response.access_token);
+        setUserId(response.user_id);
       })
       .catch((err) => {
         setError(`Failed to fetch token: ${err.message}`);
@@ -351,10 +733,8 @@ export default function App(): JSX.Element {
       let enriched = event;
 
       if (event.type === 'conversation_turn') {
-        // Track current turn within the task for tool association
         const turnNumber = Number(event.data.turn_number ?? 0);
         activeTurnRef.current = turnNumber;
-        // Turns are accumulated in agent_complete handler, not here
       }
 
       if (event.type === 'tool_start') {
@@ -367,15 +747,6 @@ export default function App(): JSX.Element {
         };
       }
 
-      // Skip duplicate profile_switch events
-      if (event.type === 'profile_switch') {
-        const profileName = String(event.data.profile_name ?? '');
-        if (profileName === lastProfileRef.current) {
-          return;
-        }
-        lastProfileRef.current = profileName;
-      }
-
       appendEvent(enriched);
 
       if (event.type === 'agent_start') {
@@ -383,7 +754,6 @@ export default function App(): JSX.Element {
         setError(null);
         const eventSessionId = String(event.data.session_id ?? '');
         setCurrentSession((prev) => ({
-          // Preserve database session ID - don't overwrite with file-based session ID from event
           id: prev?.id || eventSessionId || 'unknown',
           status: 'running',
           task: (event.data.task as string | undefined) ?? prev?.task,
@@ -401,9 +771,6 @@ export default function App(): JSX.Element {
           ...prev,
           model: String(event.data.model ?? prev.model ?? ''),
         }));
-        // Mark that we've seen the first task and shown the header
-        isFirstTaskRef.current = false;
-        setSessionHeaderShown(true);
       }
 
       if (event.type === 'agent_complete') {
@@ -419,7 +786,6 @@ export default function App(): JSX.Element {
           : 0;
         const newTokensOut = usage?.output_tokens ?? 0;
 
-        // Accumulate stats across tasks in the same session
         setStats((prev) => ({
           ...prev,
           turns: prev.turns + Number(event.data.num_turns ?? 0),
@@ -430,7 +796,6 @@ export default function App(): JSX.Element {
         }));
         setStatus(normalizedStatus);
 
-        // Update currentSession status so continuation logic works correctly
         setCurrentSession((prev) =>
           prev
             ? {
@@ -515,19 +880,16 @@ export default function App(): JSX.Element {
     setStatus('running');
     activeTurnRef.current = 0;
 
-    // Check if we should continue an existing session or create a new one
+    appendEvent({
+      type: 'user_message',
+      data: { text: taskText },
+      timestamp: new Date().toISOString(),
+      sequence: Date.now(),
+    });
+
     const shouldContinue = currentSession && currentSession.status !== 'running';
 
     if (shouldContinue) {
-      // Continue existing session: keep events, accumulate stats
-      // Add a visual separator for the new task
-      appendEvent({
-        type: 'message',
-        data: { text: `━━━ Follow-up: ${taskText.slice(0, 60)}${taskText.length > 60 ? '...' : ''} ━━━` },
-        timestamp: new Date().toISOString(),
-        sequence: Date.now(),
-      });
-
       try {
         const response = await continueTask(
           config.api.base_url,
@@ -550,11 +912,9 @@ export default function App(): JSX.Element {
         setError(`Failed to continue task: ${(err as Error).message}`);
       }
     } else {
-      // New session: clear events and reset stats
       setEvents([]);
-      isFirstTaskRef.current = true;
-      lastProfileRef.current = null;
-      setSessionHeaderShown(false);
+      setExpandedTasks(new Set());
+      setExpandedTools(new Set());
       setStats({
         turns: 0,
         cost: 0,
@@ -618,12 +978,7 @@ export default function App(): JSX.Element {
         result = await getResult(config.api.base_url, token, sessionId);
       }
 
-      // Reset state for loaded session
-      setSessionHeaderShown(false);
-      lastProfileRef.current = null;
       setEvents(buildSyntheticEvents(session, result));
-      // Mark header as shown after building synthetic events
-      setSessionHeaderShown(true);
 
       if (result?.metrics) {
         const tokens = formatTokens(result);
@@ -654,9 +1009,8 @@ export default function App(): JSX.Element {
     setCurrentSession(null);
     setEvents([]);
     setStatus('idle');
-    isFirstTaskRef.current = true;
-    lastProfileRef.current = null;
-    setSessionHeaderShown(false);
+    setExpandedTasks(new Set());
+    setExpandedTools(new Set());
     setStats({
       turns: 0,
       cost: 0,
@@ -667,176 +1021,274 @@ export default function App(): JSX.Element {
     });
   };
 
-  const sessionIdLabel = currentSession?.id
-    ? `${currentSession.id.slice(0, 8)}...`
-    : 'new';
+  const conversation = useMemo<ConversationItem[]>(() => {
+    const items: ConversationItem[] = [];
+    let currentTask: AgentTaskView | null = null;
+    let lastUserMessage = 'New task';
 
-  const renderEvent = useCallback((event: TerminalEvent, index: number) => {
-    switch (event.type) {
-      case 'agent_start': {
-        const sessionId = String(event.data.session_id ?? 'unknown');
-        const model = String(event.data.model ?? 'unknown');
-
-        // For the first task, show full session box
-        // For follow-up tasks, show a minimal indicator
-        if (index === 0 || !sessionHeaderShown) {
-          const lines = buildBox([
-            '★ AGENTUM | Self-Improving Agent',
-            `⚡ SESSION ${sessionId}`,
-            `• Model: ${model}`,
-          ]);
-          return (
-            <pre key={`${event.sequence}-${index}`} className="terminal-box">
-              {lines.join('\n')}
-            </pre>
-          );
+    const findOpenTool = (toolName: string): ToolCallView | undefined => {
+      if (!currentTask) {
+        return undefined;
+      }
+      for (let i = currentTask.toolCalls.length - 1; i >= 0; i -= 1) {
+        const tool = currentTask.toolCalls[i];
+        if (tool.tool === toolName && tool.status === 'running') {
+          return tool;
         }
+      }
+      return undefined;
+    };
 
-        // Follow-up task: minimal indicator
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            <span className="event-icon">▶</span>
-            <span>Task started (model: {model})</span>
-          </div>
-        );
+    events.forEach((event) => {
+      switch (event.type) {
+        case 'user_message': {
+          const content = String(event.data.text ?? '');
+          lastUserMessage = content || lastUserMessage;
+          items.push({
+            type: 'user',
+            id: `user-${event.sequence}`,
+            time: formatTimestamp(event.timestamp),
+            content,
+          });
+          break;
+        }
+        case 'agent_start': {
+          const model = String(event.data.model ?? 'unknown');
+          currentTask = {
+            id: `task-${event.sequence}`,
+            title: String(event.data.task ?? lastUserMessage ?? 'New task'),
+            summary: 'Processing task and executing tools.',
+            status: 'running',
+            durationMs: 0,
+            turns: 0,
+            cost: 0,
+            model,
+            time: formatTimestamp(event.timestamp),
+            toolCalls: [],
+            outputParts: [],
+            files: [],
+          };
+          items.push({ type: 'agent', id: currentTask.id, task: currentTask });
+          break;
+        }
+        case 'thinking': {
+          if (!currentTask) {
+            break;
+          }
+          currentTask.toolCalls.push({
+            id: `think-${event.sequence}`,
+            tool: 'Think',
+            time: formatTimestamp(event.timestamp),
+            status: 'complete',
+            thinking: String(event.data.text ?? ''),
+          });
+          break;
+        }
+        case 'tool_start': {
+          if (!currentTask) {
+            break;
+          }
+          const toolName = String(event.data.tool_name ?? 'Tool');
+          currentTask.toolCalls.push({
+            id: `tool-${event.sequence}`,
+            tool: toolName,
+            time: formatTimestamp(event.timestamp),
+            status: 'running',
+            input: event.data.tool_input ?? '',
+          });
+          break;
+        }
+        case 'tool_complete': {
+          if (!currentTask) {
+            break;
+          }
+          const toolName = String(event.data.tool_name ?? 'Tool');
+          const durationMs = Number(event.data.duration_ms ?? 0);
+          const isError = Boolean(event.data.is_error);
+          const result = event.data.result;
+          const tool = findOpenTool(toolName);
+          if (tool) {
+            tool.status = isError ? 'failed' : 'complete';
+            tool.durationMs = durationMs;
+            if (result !== undefined && result !== null) {
+              tool.output = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+            }
+            if (isError) {
+              tool.error = String(event.data.error ?? 'Tool failed');
+            }
+          }
+          break;
+        }
+        case 'message': {
+          if (!currentTask) {
+            break;
+          }
+          const text = String(event.data.text ?? '').trim();
+          if (text) {
+            currentTask.outputParts.push(text);
+          }
+          break;
+        }
+        case 'output_display': {
+          if (!currentTask) {
+            break;
+          }
+          const output = String(event.data.output ?? '').trim();
+          const comments = String(event.data.comments ?? '').trim();
+          const errorText = String(event.data.error ?? '').trim();
+          const files = Array.isArray(event.data.result_files)
+            ? (event.data.result_files as string[])
+            : [];
+
+          if (output) {
+            currentTask.outputParts.push(output);
+          }
+          if (comments) {
+            currentTask.outputParts.push(comments);
+          }
+          if (errorText) {
+            currentTask.error = errorText;
+          }
+          currentTask.files = files;
+          currentTask.outputTime = formatTimestamp(event.timestamp);
+          break;
+        }
+        case 'agent_complete': {
+          if (!currentTask) {
+            break;
+          }
+          const statusValue = normalizeStatus(String(event.data.status ?? 'complete'));
+          currentTask.status = statusValue === 'cancelled' ? 'partial' : (statusValue as AgentTaskView['status']);
+          currentTask.durationMs = Number(event.data.duration_ms ?? 0);
+          currentTask.turns = Number(event.data.num_turns ?? 0);
+          currentTask.cost = Number(event.data.total_cost_usd ?? 0);
+          break;
+        }
+        case 'cancelled': {
+          if (currentTask) {
+            currentTask.status = 'partial';
+          }
+          break;
+        }
+        case 'error': {
+          if (currentTask) {
+            currentTask.status = 'failed';
+            currentTask.error = String(event.data.message ?? 'Unknown error');
+          }
+          break;
+        }
+        default:
+          break;
       }
-      case 'tool_start': {
-        const toolName = String(event.data.tool_name ?? 'Tool');
-        const turn = event.meta?.turn ? ` [${event.meta.turn}]` : '';
-        const input = event.data.tool_input;
-        const inputLines = typeof input === 'object' && input
-          ? Object.entries(input as Record<string, unknown>)
-              .slice(0, 6)
-              .map(([key, value]) => {
-                const formatted = typeof value === 'string' ? value : JSON.stringify(value);
-                const trimmed = formatted.length > 80 ? `${formatted.slice(0, 77)}...` : formatted;
-                return `  │ • ${key}: ${trimmed}`;
-              })
-          : [];
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            <div className="terminal-line">
-              <span className="event-icon">⚙</span>
-              <span className="event-dim">{turn}</span>
-              <span className="event-tool">{toolName}</span>
-            </div>
-            {inputLines.length > 0 && (
-              <pre className="terminal-subline">{inputLines.join('\n')}</pre>
-            )}
-          </div>
-        );
-      }
-      case 'tool_complete': {
-        const toolName = String(event.data.tool_name ?? 'Tool');
-        const durationMs = Number(event.data.duration_ms ?? 0);
-        const isError = Boolean(event.data.is_error);
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            <div className={`terminal-line ${isError ? 'event-error' : 'event-success'}`}>
-              <span className="event-icon">└─</span>
-              <span className="event-tool">{toolName}</span>
-              <span>{isError ? 'FAILED' : 'OK'}</span>
-              <span className="event-dim">({durationMs}ms)</span>
-            </div>
-          </div>
-        );
-      }
-      case 'thinking': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-thinking">
-            <span className="event-icon">❯</span>
-            <span>{String(event.data.text ?? '')}</span>
-          </div>
-        );
-      }
-      case 'message': {
-        const text = String(event.data.text ?? '');
-        const hasMarkdown = /[#*`\-\[]/.test(text) && text.includes('\n');
-        return hasMarkdown ? (
-          <div key={`${event.sequence}-${index}`} className="terminal-block event-message">
-            <div className="terminal-line">
-              <span className="event-icon">✦</span>
-            </div>
-            <div className="terminal-message-content md-container">
-              {renderMarkdown(text)}
-            </div>
-          </div>
-        ) : (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-message">
-            <span className="event-icon">✦</span>
-            <span>{text}</span>
-          </div>
-        );
-      }
-      case 'profile_switch': {
-        const profileName = String(event.data.profile_name ?? 'profile');
-        const allowCount = Number(event.data.allow_rules_count ?? 0);
-        const denyCount = Number(event.data.deny_rules_count ?? 0);
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            profile: <span className="event-highlight">{profileName}</span>
-            <span className="event-dim"> [allow={allowCount}, deny={denyCount}]</span>
-          </div>
-        );
-      }
-      case 'output_display': {
-        const output = String(event.data.output ?? '').trim();
-        const errorText = String(event.data.error ?? '').trim();
-        const comments = String(event.data.comments ?? '').trim();
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            {output && (
-              <div className="terminal-output-block md-container">
-                {renderMarkdown(output)}
-              </div>
-            )}
-            {comments && (
-              <div className="terminal-line event-comment">{comments}</div>
-            )}
-            {errorText && (
-              <div className="terminal-line event-error">{errorText}</div>
-            )}
-          </div>
-        );
-      }
-      case 'agent_complete': {
-        const statusValue = String(event.data.status ?? 'COMPLETE').toUpperCase();
-        const durationMs = Number(event.data.duration_ms ?? 0);
-        const numTurns = Number(event.data.num_turns ?? 0);
-        const cost = Number(event.data.total_cost_usd ?? 0);
-        const lines = buildBox([
-          `✓ ${statusValue}`,
-          `Duration: ${formatDuration(durationMs)} | Turns: ${numTurns} | Cost: ${formatCost(cost)}`,
-        ]);
-        return (
-          <pre key={`${event.sequence}-${index}`} className="terminal-box event-complete">
-            {lines.join('\n')}
-          </pre>
-        );
-      }
-      case 'error': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-error">
-            ✖ {String(event.data.message ?? 'Unknown error')}
-          </div>
-        );
-      }
-      case 'cancelled': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-warning">
-            ● Cancelled: {String(event.data.message ?? 'Task was cancelled')}
-          </div>
-        );
-      }
-      default: {
-        return (
-          <pre key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            {JSON.stringify(event.data)}
-          </pre>
-        );
-      }
+    });
+
+    return items;
+  }, [events]);
+
+  const tasks = useMemo(() => conversation.filter((item) => item.type === 'agent'), [conversation]);
+
+  useEffect(() => {
+    if (tasks.length === 0) {
+      return;
     }
-  }, [sessionHeaderShown]);
+    setExpandedTasks((prev) => {
+      if (prev.size > 0) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.add(tasks[0].id);
+      return next;
+    });
+  }, [tasks]);
+
+  const toggleTask = (id: string) => {
+    setExpandedTasks((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleTool = (id: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const expandAllSections = () => {
+    const allTaskIds = tasks.map((item) => item.id);
+    const allToolIds = tasks.flatMap((item) => item.task.toolCalls.map((tool) => tool.id));
+    setExpandedTasks(new Set(allTaskIds));
+    setExpandedTools(new Set(allToolIds));
+  };
+
+  const collapseAllSections = () => {
+    setExpandedTasks(new Set());
+    setExpandedTools(new Set());
+  };
+
+  const toggleAllSections = () => {
+    const allTaskIds = tasks.map((item) => item.id);
+    if (expandedTasks.size === allTaskIds.length && allTaskIds.length > 0) {
+      collapseAllSections();
+    } else {
+      expandAllSections();
+    }
+  };
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && isRunning) {
+        handleCancel();
+      }
+      if (event.key === '/' && event.ctrlKey) {
+        event.preventDefault();
+        toggleAllSections();
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [handleCancel, isRunning, toggleAllSections]);
+
+  const toolStats = useMemo(() => {
+    const statsMap: Record<string, number> = {};
+    tasks.forEach((item) => {
+      item.task.toolCalls.forEach((tool) => {
+        const toolName = tool.tool;
+        statsMap[toolName] = (statsMap[toolName] ?? 0) + 1;
+      });
+    });
+    return statsMap;
+  }, [tasks]);
+
+  const totalToolCalls = Object.values(toolStats).reduce((sum, count) => sum + count, 0);
+
+  const headerStats = useMemo(() => {
+    const counts = { complete: 0, partial: 0, failed: 0 };
+    tasks.forEach((item) => {
+      if (item.task.status === 'complete') {
+        counts.complete += 1;
+      } else if (item.task.status === 'partial') {
+        counts.partial += 1;
+      } else if (item.task.status === 'failed') {
+        counts.failed += 1;
+      }
+    });
+    return counts;
+  }, [tasks]);
+
+  const sessionDuration = formatDuration(stats.durationMs);
+  const sessionIdLabel = currentSession?.id ?? 'new';
 
   const sessionItems = useMemo(() => {
     return sessions.map((session) => (
@@ -857,82 +1309,118 @@ export default function App(): JSX.Element {
 
   return (
     <div className="terminal-app">
-      <header className="terminal-menu">
-        <div className="menu-left">
-          <span className="menu-logo">[::] AGENTUM</span>
-          <div className="session-dropdown">
-            <span className="session-current">{sessionIdLabel}</span>
-            <div className="session-list">{sessionItems}</div>
+      <header className="terminal-header">
+        <div className="header-top">
+          <div className="header-title">
+            <span className="header-icon">◆</span>
+            <span className="header-label">AGENT SESSION</span>
+            <span className="header-divider">│</span>
+            <span className="header-meta">{sessionIdLabel}</span>
+            <span className="header-divider">│</span>
+            <span className="header-meta">user: {userId || 'unknown'}</span>
           </div>
-          <button className="menu-button" type="button" onClick={handleNewSession}>
-            + New
-          </button>
+          <div className="session-dropdown">
+            <span className="session-current">session list</span>
+            <div className="session-list">
+              {sessionItems}
+              <button className="session-item session-new" type="button" onClick={handleNewSession}>
+                + New Session
+              </button>
+            </div>
+          </div>
         </div>
-        <div className="menu-right">
-          <span className="menu-title">Agentum | Self-Improving Agent</span>
+        <div className="header-stats">
+          <span>Tasks: <strong>{tasks.length}</strong></span>
+          <span>Duration: <strong>{sessionDuration}</strong></span>
+          <span>Tools: <strong>{totalToolCalls}</strong></span>
+          <span className="header-status">
+            <span className="status-complete">✓ {headerStats.complete}</span>
+            <span className="status-partial">◐ {headerStats.partial}</span>
+            <span className="status-failed">✗ {headerStats.failed}</span>
+          </span>
+        </div>
+        <div className="header-filters">
+          <span className="filter-label">Filter:</span>
+          {(['all', 'complete', 'partial', 'failed'] as const).map((item) => (
+            <button
+              key={item}
+              className={`filter-button ${filter === item ? 'active' : ''}`}
+              type="button"
+              onClick={() => setFilter(item)}
+            >
+              [{item}]
+            </button>
+          ))}
+          <div className="filter-actions">
+            <button className="filter-button" type="button" onClick={expandAllSections}>
+              [expand all]
+            </button>
+            <button className="filter-button" type="button" onClick={collapseAllSections}>
+              [collapse all]
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="terminal-body">
         <div ref={outputRef} className="terminal-output">
-          {events.length === 0 ? (
+          {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
           ) : (
-            events.map(renderEvent)
+            conversation.map((item) => {
+              if (item.type === 'user') {
+                return (
+                  <MessageBlock
+                    key={item.id}
+                    sender="USER"
+                    time={item.time}
+                    content={item.content}
+                  />
+                );
+              }
+              if (filter !== 'all' && item.task.status !== filter) {
+                return null;
+              }
+              return (
+                <AgentResponse
+                  key={item.id}
+                  task={item.task}
+                  expanded={expandedTasks.has(item.id)}
+                  onToggle={() => toggleTask(item.id)}
+                  toolExpanded={expandedTools}
+                  onToggleTool={toggleTool}
+                />
+              );
+            })
           )}
-        </div>
-
-        <div className="terminal-input">
-          <div className="input-header">
-            <span className="input-label">❯ input</span>
-            <span className="input-shortcut">Ctrl+Enter</span>
-          </div>
-          <div className="input-row">
-            <textarea
-              value={inputValue}
-              onChange={(event) => setInputValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                  event.preventDefault();
-                  handleSubmit();
-                }
-              }}
-              placeholder="Enter task..."
-              className="input-textarea"
-              disabled={!config || !token || isRunning}
-            />
-            <div className="input-actions">
-              <button
-                className="execute-button"
-                type="button"
-                onClick={handleSubmit}
-                disabled={!inputValue.trim() || !config || !token || isRunning}
-              >
-                {isRunning ? 'Running...' : 'Execute'}
-              </button>
-              {isRunning && currentSession && (
-                <button className="cancel-button" type="button" onClick={handleCancel}>
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-          {error && <div className={reconnecting ? "terminal-warning" : "terminal-error"}>{error}</div>}
         </div>
       </main>
 
-      <footer className="terminal-status">
-        <div className="status-left">
-          <span className={`status-indicator ${statusClass}`}>{statusSymbol}</span>
-          <span>{statusLabel}</span>
-          <span className="status-metric">Turns: {stats.turns}</span>
+      <div className="terminal-footer">
+        <div className="tool-usage-bar">
+          <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
+          {Object.keys(TOOL_SYMBOL).map((tool) => (
+            <ToolTag key={tool} type={tool} count={toolStats[tool] ?? 0} />
+          ))}
         </div>
-        <div className="status-right">
-          <span className="status-metric">Tokens: {stats.tokensIn} in / {stats.tokensOut} out</span>
-          <span className="status-metric">Cost: {formatCost(stats.cost)}</span>
-          <span className="status-metric">{formatDuration(stats.durationMs)}</span>
+        <div className="input-wrapper">
+          <InputField
+            value={inputValue}
+            onChange={setInputValue}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
+            isRunning={isRunning}
+          />
+          {error && <div className={reconnecting ? 'terminal-warning' : 'terminal-error'}>{error}</div>}
         </div>
-      </footer>
+        <StatusFooter
+          isRunning={isRunning}
+          statusLabel={statusLabel}
+          statusClass={statusClass}
+          stats={stats}
+          connected={Boolean(token) && !reconnecting}
+        />
+      </div>
     </div>
   );
 }

@@ -14,7 +14,7 @@ from typing import Any, Optional
 from ..config import AGENT_DIR
 from ..core.schemas import TaskExecutionParams
 from ..core.task_runner import execute_agent_task
-from ..core.tracer import BackendConsoleTracer
+from ..core.tracer import BackendConsoleTracer, EventingTracer
 from ..db.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ class AgentRunner:
 
         # Initialize cancel flag and event queue
         self._cancel_flags[session_id] = False
-        self._event_queues[session_id] = asyncio.Queue()
+        self._event_queues.setdefault(session_id, asyncio.Queue())
 
         # Start the background task
         task_coro = self._run_agent(params)
@@ -161,6 +161,10 @@ class AgentRunner:
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
 
             # Build TaskExecutionParams from TaskParams
+            event_queue = self._event_queues.get(session_id)
+            base_tracer = BackendConsoleTracer(session_id=session_id)
+            tracer = EventingTracer(base_tracer, event_queue=event_queue)
+
             exec_params = TaskExecutionParams(
                 task=params.task,
                 working_dir=working_dir,
@@ -178,7 +182,7 @@ class AgentRunner:
                 enable_skills=params.enable_skills,
                 enable_file_checkpointing=params.enable_file_checkpointing,
                 # Backend uses BackendConsoleTracer for linear logging
-                tracer=BackendConsoleTracer(session_id=session_id),
+                tracer=tracer,
             )
 
             # Execute using unified task runner
@@ -213,6 +217,14 @@ class AgentRunner:
                 "status": "cancelled",
                 "error": "Task was cancelled",
             }
+            if "tracer" in locals():
+                tracer.emit_event(
+                    "cancelled",
+                    {
+                        "session_id": session_id,
+                        "message": "Task was cancelled",
+                    },
+                )
             await self._update_session_status(session_id, "cancelled")
             raise
 
@@ -222,6 +234,14 @@ class AgentRunner:
                 "status": "failed",
                 "error": str(e),
             }
+            if "tracer" in locals():
+                tracer.emit_event(
+                    "error",
+                    {
+                        "message": str(e),
+                        "error_type": "server_error",
+                    },
+                )
             await self._update_session_status(session_id, "failed")
 
         finally:
@@ -293,6 +313,29 @@ class AgentRunner:
             The event queue, or None if not found.
         """
         return self._event_queues.get(session_id)
+
+    def get_or_create_event_queue(self, session_id: str) -> asyncio.Queue:
+        """
+        Get or create the SSE event queue for a session.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            The event queue.
+        """
+        if session_id not in self._event_queues:
+            self._event_queues[session_id] = asyncio.Queue()
+        return self._event_queues[session_id]
+
+    def clear_event_queue(self, session_id: str) -> None:
+        """
+        Remove the event queue for a session.
+
+        Args:
+            session_id: The session ID.
+        """
+        self._event_queues.pop(session_id, None)
 
     def get_result(self, session_id: str) -> Optional[dict]:
         """

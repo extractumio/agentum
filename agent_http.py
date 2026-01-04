@@ -50,6 +50,7 @@ from src.core.constants import (  # noqa: E402
     StatusIcons,
     TASK_PREVIEW_LENGTH,
 )
+from src.core.tracer import ExecutionTracer  # noqa: E402
 from src.core.logging_config import setup_http_logging  # noqa: E402
 from src.core.output import (  # noqa: E402
     format_result,
@@ -339,6 +340,147 @@ def poll_for_completion(
         time.sleep(poll_interval)
 
 
+def apply_sse_event(tracer: ExecutionTracer, event: dict[str, Any]) -> None:
+    """Dispatch an SSE event to the execution tracer."""
+    event_type = event.get("type")
+    data = event.get("data", {}) or {}
+
+    if event_type == "agent_start":
+        tracer.on_agent_start(
+            session_id=data.get("session_id", "unknown"),
+            model=data.get("model", "unknown"),
+            tools=data.get("tools", []),
+            working_dir=data.get("working_dir", "."),
+            skills=data.get("skills"),
+            task=data.get("task"),
+        )
+    elif event_type == "tool_start":
+        tracer.on_tool_start(
+            tool_name=data.get("tool_name", "unknown"),
+            tool_input=data.get("tool_input", {}),
+            tool_id=data.get("tool_id", "unknown"),
+        )
+    elif event_type == "tool_complete":
+        tracer.on_tool_complete(
+            tool_name=data.get("tool_name", "unknown"),
+            tool_id=data.get("tool_id", "unknown"),
+            result=data.get("result"),
+            duration_ms=data.get("duration_ms", 0),
+            is_error=data.get("is_error", False),
+        )
+    elif event_type == "thinking":
+        tracer.on_thinking(data.get("text", ""))
+    elif event_type == "message":
+        tracer.on_message(
+            data.get("text", ""),
+            is_partial=data.get("is_partial", False),
+        )
+    elif event_type == "error":
+        tracer.on_error(
+            data.get("message", "Unknown error"),
+            error_type=data.get("error_type", "error"),
+        )
+    elif event_type == "agent_complete":
+        tracer.on_agent_complete(
+            status=data.get("status", "COMPLETE"),
+            num_turns=data.get("num_turns", 0),
+            duration_ms=data.get("duration_ms", 0),
+            total_cost_usd=data.get("total_cost_usd"),
+            result=data.get("result"),
+            session_id=data.get("session_id"),
+            usage=data.get("usage"),
+            model=data.get("model"),
+            cumulative_cost_usd=data.get("cumulative_cost_usd"),
+            cumulative_turns=data.get("cumulative_turns"),
+            cumulative_tokens=data.get("cumulative_tokens"),
+        )
+    elif event_type == "output_display":
+        tracer.on_output_display(
+            output=data.get("output"),
+            error=data.get("error"),
+            comments=data.get("comments"),
+            result_files=data.get("result_files"),
+            status=data.get("status"),
+        )
+    elif event_type == "profile_switch":
+        tracer.on_profile_switch(
+            profile_type=data.get("profile_type", "user"),
+            profile_name=data.get("profile_name", "default"),
+            tools=data.get("tools", []),
+            allow_rules_count=data.get("allow_rules_count", 0),
+            deny_rules_count=data.get("deny_rules_count", 0),
+            profile_path=data.get("profile_path"),
+        )
+    elif event_type == "hook_triggered":
+        tracer.on_hook_triggered(
+            hook_event=data.get("hook_event", "hook"),
+            tool_name=data.get("tool_name"),
+            decision=data.get("decision"),
+            message=data.get("message"),
+        )
+    elif event_type == "conversation_turn":
+        tracer.on_conversation_turn(
+            turn_number=data.get("turn_number", 0),
+            prompt_preview=data.get("prompt_preview", ""),
+            response_preview=data.get("response_preview", ""),
+            duration_ms=data.get("duration_ms", 0),
+            tools_used=data.get("tools_used", []),
+        )
+    elif event_type == "session_connect":
+        tracer.on_session_connect(session_id=data.get("session_id"))
+    elif event_type == "session_disconnect":
+        tracer.on_session_disconnect(
+            session_id=data.get("session_id"),
+            total_turns=data.get("total_turns", 0),
+            total_duration_ms=data.get("total_duration_ms", 0),
+        )
+    elif event_type == "cancelled":
+        tracer.on_error(
+            data.get("message", "Task was cancelled"),
+            error_type="cancelled",
+        )
+
+
+def stream_events(
+    base_url: str,
+    token: str,
+    session_id: str,
+    tracer: ExecutionTracer,
+) -> None:
+    """Stream SSE events and render them via the execution tracer."""
+    url = f"{base_url}/sessions/{session_id}/events?token={token}"
+    request = Request(
+        url,
+        headers={
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=3600) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload:
+                    continue
+                event = json.loads(payload)
+                apply_sse_event(tracer, event)
+                if event.get("type") in ("agent_complete", "error", "cancelled"):
+                    break
+    except HTTPError as e:
+        raise APIError(f"SSE HTTP {e.code}: {e.reason}") from e
+    except URLError as e:
+        raise APIError(f"SSE connection failed: {e.reason}") from e
+    except TimeoutError:
+        raise APIError("SSE request timed out") from None
+
+
 def print_api_error(message: str) -> None:
     """Print an API error with server startup instructions."""
     print(f"\n{AnsiColors.ERROR}✗ {message}{AnsiColors.RESET}")
@@ -459,9 +601,16 @@ def main() -> int:
         print_status("Use --resume to continue or check status later.", "dim")
         return 0
 
-    # Poll for completion
     print()
-    poll_for_completion(client, session_id, args.poll_interval)
+    tracer = ExecutionTracer()
+    try:
+        stream_events(base_url, token, session_id, tracer)
+    except APIError as e:
+        print(
+            f"{AnsiColors.WARNING}⚠ SSE failed ({e}); falling back to polling."
+            f"{AnsiColors.RESET}"
+        )
+        poll_for_completion(client, session_id, args.poll_interval)
 
     # Get result
     try:

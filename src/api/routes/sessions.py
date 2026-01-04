@@ -10,13 +10,17 @@ Provides endpoints for:
 - POST /sessions/{id}/cancel - Cancel running task
 - GET /sessions/{id}/result - Get task result
 """
+import asyncio
+import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
 from ...services.agent_runner import agent_runner, TaskParams
+from ...services.auth_service import auth_service
 from ...services.session_service import session_service
 from ..deps import get_current_user_id
 from ..models import (
@@ -316,6 +320,73 @@ async def start_task(
         status="running",
         message="Task execution started",
         resumed_from=resume_from if resume_from != session_id else None,
+    )
+
+
+# =============================================================================
+# GET /sessions/{id}/events - SSE event stream
+# =============================================================================
+
+@router.get("/{session_id}/events")
+async def stream_events(
+    session_id: str,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """
+    Stream real-time execution events for a session (SSE).
+
+    Note: token is passed via query parameter to support EventSource.
+    """
+    user_id = auth_service.validate_token(token)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    session = await session_service.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    queue = agent_runner.get_or_create_event_queue(session_id)
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    if not agent_runner.is_running(session_id) and queue.empty():
+                        break
+                    continue
+
+                payload = json.dumps(event, default=str)
+                yield f"id: {event.get('sequence')}\n"
+                yield f"data: {payload}\n\n"
+
+                if event.get("type") in ("agent_complete", "error", "cancelled"):
+                    break
+        finally:
+            if not agent_runner.is_running(session_id):
+                agent_runner.clear_event_queue(session_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 

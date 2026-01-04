@@ -374,13 +374,31 @@ def main() -> int:
     # Create client without token first
     client = APIClient(base_url)
 
-    # Authenticate
-    try:
-        token = client.get_token()
-        client.token = token
-    except APIError as e:
-        print_api_error(f"Failed to authenticate: {e}")
-        return 1
+    # Authenticate with retry (server may still be starting)
+    max_retries = 10
+    retry_delay = 1.0
+    
+    for attempt in range(max_retries):
+        try:
+            token = client.get_token()
+            client.token = token
+            break
+        except APIError as e:
+            if attempt < max_retries - 1:
+                print(
+                    f"\r{AnsiColors.DIM}Waiting for API server... "
+                    f"(attempt {attempt + 1}/{max_retries}){AnsiColors.RESET}",
+                    end="",
+                    flush=True
+                )
+                time.sleep(retry_delay)
+            else:
+                print()  # Clear the waiting line
+                print_api_error(f"Failed to authenticate: {e}")
+                return 1
+    
+    # Clear waiting message if any
+    print("\r" + " " * 60 + "\r", end="")
 
     # Handle --list-sessions
     if args.list_sessions:

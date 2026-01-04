@@ -27,6 +27,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import CONFIG_DIR
+from .tool_utils import extract_patterns_for_tool
 from .permission_config import (
     PermissionConfig,
     PermissionConfigManager,
@@ -658,18 +659,7 @@ class PermissionManager:
         profile = self.active_profile
         if profile.permissions is None:
             return []
-
-        patterns = []
-        prefix = f"{tool_name}("
-
-        for pattern in profile.permissions.allow:
-            if pattern.startswith(prefix):
-                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
-                patterns.append(inner)
-            elif pattern == tool_name:
-                patterns.append("*")
-
-        return patterns
+        return extract_patterns_for_tool(tool_name, profile.permissions.allow)
 
     def get_denied_patterns_for_tool(self, tool_name: str) -> list[str]:
         """
@@ -684,18 +674,7 @@ class PermissionManager:
         profile = self.active_profile
         if profile.permissions is None:
             return []
-
-        patterns = []
-        prefix = f"{tool_name}("
-
-        for pattern in profile.permissions.deny:
-            if pattern.startswith(prefix):
-                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
-                patterns.append(inner)
-            elif pattern == tool_name:
-                patterns.append("*")
-
-        return patterns
+        return extract_patterns_for_tool(tool_name, profile.permissions.deny)
 
     def save_profile(
         self,

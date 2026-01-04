@@ -1,0 +1,84 @@
+# Permission profile for E2E tests
+# Agent is sandboxed to its workspace with skill access
+
+name: test
+description: Test profile for E2E testing with skill support
+
+defaultMode: default
+
+tools:
+  enabled:
+    - Read
+    - Edit
+    - MultiEdit
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - Glob
+    - Grep
+    - LS
+    - WebFetch
+    - WebSearch
+    - NotebookEdit
+    - Write
+    - Bash
+  disabled:
+  permission_checked:
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Bash
+
+session_workspace:
+  description: Patterns for session-specific workspace permissions.
+  allow:
+    # Session workspace access (output.yaml, results, etc.)
+    - Read({workspace}/**)
+    - Write({workspace}/**)
+    - Edit({workspace}/**)
+    - MultiEdit({workspace}/**)
+    # Relative paths from cwd (which is set to workspace)
+    - Read(./**)
+    - Write(./**)
+    - Edit(./**)
+    - MultiEdit(./**)
+    # Skills directory read access
+    - Read({workspace}/skills/**)
+    - Read(./skills/**)
+    # Allow running skill scripts
+    - Bash(python {workspace}/skills/**/*.py)
+    - Bash(python3 {workspace}/skills/**/*.py)
+    - Bash(python ./skills/**/*.py)
+    - Bash(python3 ./skills/**/*.py)
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    # Allow WebFetch for meow skill API calls
+    - WebFetch(*)
+  deny:
+    # Skills directory is READ-ONLY
+    - Write({workspace}/skills/**)
+    - Edit({workspace}/skills/**)
+    - MultiEdit({workspace}/skills/**)
+    - Write(./skills/**)
+    - Edit(./skills/**)
+    - MultiEdit(./skills/**)
+    # Block all other bash commands
+    - Bash(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+  allowed_dirs:
+    - "{workspace}"
+    - "{workspace}/skills"
+
+# File checkpointing configuration
+checkpointing:
+  auto_checkpoint_tools:
+    - Write
+    - Edit
+    - MultiEdit
+

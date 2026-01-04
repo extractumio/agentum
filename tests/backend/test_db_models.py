@@ -2,7 +2,6 @@
 Tests for database models.
 """
 import pytest
-import pytest_asyncio
 from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,4 +155,3 @@ class TestSessionModel:
         assert session.status == "completed"
         assert session.num_turns == 5
         assert session.total_cost_usd == pytest.approx(0.0123)
-

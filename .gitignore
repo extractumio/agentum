@@ -28,3 +28,5 @@ output.yaml
 design/
 
 .DS_Store
+
+*.db

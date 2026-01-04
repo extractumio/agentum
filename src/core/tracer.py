@@ -138,10 +138,10 @@ class SpinnerState:
 class TracerBase(ABC):
     """
     Abstract base class for execution tracing.
-    
+
     Override these methods to customize tracing behavior.
     """
-    
+
     @abstractmethod
     def on_agent_start(
         self,
@@ -154,7 +154,7 @@ class TracerBase(ABC):
     ) -> None:
         """Called when the agent starts execution."""
         pass
-    
+
     @abstractmethod
     def on_tool_start(
         self,
@@ -164,7 +164,7 @@ class TracerBase(ABC):
     ) -> None:
         """Called before a tool/skill is executed."""
         pass
-    
+
     @abstractmethod
     def on_tool_complete(
         self,
@@ -176,22 +176,22 @@ class TracerBase(ABC):
     ) -> None:
         """Called after a tool/skill completes."""
         pass
-    
+
     @abstractmethod
     def on_thinking(self, thinking_text: str) -> None:
         """Called when the agent is in thinking mode."""
         pass
-    
+
     @abstractmethod
     def on_message(self, text: str, is_partial: bool = False) -> None:
         """Called when the agent generates a message."""
         pass
-    
+
     @abstractmethod
     def on_error(self, error_message: str, error_type: str = "error") -> None:
         """Called when an error occurs."""
         pass
-    
+
     @abstractmethod
     def on_agent_complete(
         self,
@@ -209,7 +209,7 @@ class TracerBase(ABC):
     ) -> None:
         """
         Called when the agent completes execution.
-        
+
         Args:
             status: Final status (COMPLETE, PARTIAL, FAILED, etc.).
             num_turns: Number of turns in this run.
@@ -236,7 +236,7 @@ class TracerBase(ABC):
     ) -> None:
         """
         Called after output.yaml is parsed to display the structured result.
-        
+
         Args:
             output: The output text from output.yaml.
             error: Error message if any.
@@ -258,7 +258,7 @@ class TracerBase(ABC):
     ) -> None:
         """
         Called when permission profile is switched.
-        
+
         Args:
             profile_type: Type of profile ("system" or "user").
             profile_name: Name of the profile.
@@ -283,7 +283,7 @@ class TracerBase(ABC):
     ) -> None:
         """
         Called when a hook is triggered.
-        
+
         Args:
             hook_event: Hook event name (PreToolUse, PostToolUse, etc.).
             tool_name: The tool involved, if any.
@@ -303,7 +303,7 @@ class TracerBase(ABC):
     ) -> None:
         """
         Called when a conversation turn completes (multi-turn sessions).
-        
+
         Args:
             turn_number: The turn number in the conversation.
             prompt_preview: Preview of the user prompt.
@@ -377,7 +377,7 @@ class ExecutionTracer(TracerBase):
         # Track agent start state and stored profile info
         self._agent_started: bool = False
         self._pending_profile: Optional[dict[str, Any]] = None
-    
+
     def _get_short_model_id(self, model: str) -> str:
         """
         Extract a short model identifier for display.
@@ -388,28 +388,28 @@ class ExecutionTracer(TracerBase):
         if len(short) > 20:
             short = short[:17] + "..."
         return short
-    
+
     # ═══════════════════════════════════════════════════════════════
     # Formatting Helpers
     # ═══════════════════════════════════════════════════════════════
-    
+
     def _color(self, text: str, *colors: Color) -> str:
         """Apply color codes to text if colors are enabled."""
         if not self.use_colors:
             return text
         color_codes = "".join(str(c) for c in colors)
         return f"{color_codes}{text}{Color.RESET}"
-    
+
     def _symbol(self, unicode_sym: str, ascii_fallback: str = "") -> str:
         """Return Unicode symbol or ASCII fallback."""
         if self.use_unicode:
             return unicode_sym
         return ascii_fallback or unicode_sym[0] if unicode_sym else ""
-    
+
     def _timestamp(self) -> str:
         """Get formatted timestamp."""
         return datetime.now().strftime("%H:%M:%S")
-    
+
     def _elapsed(self) -> str:
         """Get elapsed time since start."""
         if self._start_time is None:
@@ -420,7 +420,7 @@ class ExecutionTracer(TracerBase):
         minutes = int(elapsed // 60)
         seconds = elapsed % 60
         return f"{minutes}m {seconds:.1f}s"
-    
+
     def _truncate(self, text: str, max_len: Optional[int] = None) -> str:
         """
         Truncate text with ellipsis using shared utility.
@@ -447,7 +447,7 @@ class ExecutionTracer(TracerBase):
             Truncated path string.
         """
         return truncate_path(path, max_len)
-    
+
     def _is_path_like(self, key: str, value: str) -> bool:
         """Check if a key-value pair looks like a file path."""
         path_keys = {"file_path", "path", "filepath", "directory", "dir", "folder", "cwd"}
@@ -457,7 +457,7 @@ class ExecutionTracer(TracerBase):
         if isinstance(value, str) and (value.startswith("/") or value.startswith("~/")):
             return True
         return False
-    
+
     def _char_width(self, char: str) -> int:
         """Get visual width of a single character."""
         code = ord(char)
@@ -525,28 +525,28 @@ class ExecutionTracer(TracerBase):
             (0x1FA00, 0x1FA6F),  # Chess Symbols
             (0x1FA70, 0x1FAFF),  # Symbols and Pictographs Extended-A
         ]
-        
+
         for start, end in wide_ranges:
             if start <= code <= end:
                 return 2
-        
+
         # Variation selectors (invisible, zero width)
         if 0xFE00 <= code <= 0xFE0F:
             return 0
-        
+
         return 1
-    
+
     def _visual_width(self, text: str) -> int:
         """
         Calculate visual width of text, accounting for wide characters (emojis).
         """
         return sum(self._char_width(char) for char in text)
-    
+
     def _truncate_to_visual_width(self, text: str, max_width: int) -> str:
         """Truncate text to fit within a visual width, accounting for wide chars."""
         if self._visual_width(text) <= max_width:
             return text
-        
+
         result = []
         current_width = 0
         for char in text:
@@ -555,9 +555,9 @@ class ExecutionTracer(TracerBase):
                 break
             result.append(char)
             current_width += char_width
-        
+
         return "".join(result) + "..."
-    
+
     def _format_json_preview(
         self,
         value: Any,
@@ -584,22 +584,22 @@ class ExecutionTracer(TracerBase):
                 formatted = str(value)
         except (TypeError, ValueError):
             formatted = str(value)
-        
+
         lines = formatted.split("\n")
         result = []
-        
+
         for i, line in enumerate(lines):
             if i >= max_lines:
                 remaining = len(lines) - max_lines
                 result.append(f"... +{remaining} more lines")
                 break
-            
+
             if len(line) > max_line_length:
                 line = line[:max_line_length - 3] + "..."
             result.append(line)
-        
+
         return result
-    
+
     def _format_todo_plan(
         self,
         todos: list[dict[str, Any]],
@@ -687,10 +687,10 @@ class ExecutionTracer(TracerBase):
             # Truncate long content using constant
             if len(content) > TODO_CONTENT_MAX_LENGTH:
                 content = content[:TODO_CONTENT_MAX_LENGTH - 3] + "..."
-            
+
             # Format based on status
             sym = status_symbols.get(status, self._symbol(Symbol.CIRCLE, "o"))
-            
+
             if status == "completed":
                 # Dimmed for completed
                 line = (
@@ -715,9 +715,9 @@ class ExecutionTracer(TracerBase):
                     f"{self._color(sym, Color.WHITE)} "
                     f"{self._color(content, Color.WHITE)}"
                 )
-            
+
             lines.append(line)
-        
+
         # Add ellipsis if more items exist
         if show_ellipsis:
             remaining = len(todos) - end_idx
@@ -726,9 +726,9 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(last_branch, Color.DIM)} "
                 f"{self._color(f'<... {remaining} more>', Color.DIM)}"
             )
-        
+
         return lines
-    
+
     def _format_duration(self, ms: int) -> str:
         """Format duration using shared utility."""
         return format_duration(ms)
@@ -736,22 +736,22 @@ class ExecutionTracer(TracerBase):
     def _format_cost(self, cost: float) -> str:
         """Format cost using shared utility."""
         return format_cost(cost)
-    
+
     # ═══════════════════════════════════════════════════════════════
     # Output Methods
     # ═══════════════════════════════════════════════════════════════
-    
+
     def _write(self, text: str, end: str = "\n") -> None:
         """Thread-safe write to stdout."""
         with self._lock:
             sys.stdout.write(text + end)
             sys.stdout.flush()
-    
+
     def _clear_line(self) -> None:
         """Clear current line."""
         if self.use_colors:
             self._write(TerminalControl.CLEAR_LINE + TerminalControl.CURSOR_START, end="")
-    
+
     def _print_box(
         self,
         lines: list[str],
@@ -764,7 +764,7 @@ class ExecutionTracer(TracerBase):
     ) -> None:
         """
         Print content inside a box with single-line borders.
-        
+
         Args:
             lines: List of content lines to display inside the box.
             title: Optional title for the box header.
@@ -778,7 +778,7 @@ class ExecutionTracer(TracerBase):
         title_color = title_color or color
         border_color = border_color or color
         inner_width = width - 2  # Subtract 2 for border chars
-        
+
         # Box drawing chars (single line)
         tl = self._symbol(Symbol.BOX_TL, "+")
         tr = self._symbol(Symbol.BOX_TR, "+")
@@ -788,10 +788,10 @@ class ExecutionTracer(TracerBase):
         v = self._symbol(Symbol.BOX_V, "|")
         lt = self._symbol(Symbol.BOX_L, "+")
         rt = self._symbol(Symbol.BOX_R, "+")
-        
+
         # Top border
         self._write(self._color(f"{tl}{h * inner_width}{tr}", border_color))
-        
+
         # Title line (if provided)
         if title:
             title_visual_width = self._visual_width(title)
@@ -804,7 +804,7 @@ class ExecutionTracer(TracerBase):
                 title_content = f" {title}"
                 title_visual = self._visual_width(title_content)
                 title_padded = title_content + " " * (inner_width - title_visual)
-            
+
             self._write(
                 self._color(v, border_color) +
                 self._color(title_padded, title_color, Color.BOLD) +
@@ -812,7 +812,7 @@ class ExecutionTracer(TracerBase):
             )
             # Separator after title
             self._write(self._color(f"{lt}{h * inner_width}{rt}", border_color))
-        
+
         # Content lines
         for line in lines:
             # Truncate if too long (accounting for wide characters)
@@ -820,34 +820,34 @@ class ExecutionTracer(TracerBase):
             if visual_len > inner_width:
                 line = self._truncate_to_visual_width(line, inner_width)
                 visual_len = self._visual_width(line)
-            
+
             # Pad to inner_width (accounting for visual width)
             padding_needed = inner_width - visual_len
             line_padded = line + " " * max(0, padding_needed)
-            
+
             self._write(
                 self._color(v, border_color) +
                 line_padded +
                 self._color(v, border_color)
             )
-        
+
         # Bottom border
         self._write(self._color(f"{bl}{h * inner_width}{br}", border_color))
-    
+
     def print_task(self, task: str) -> None:
         """
         Print the task description in a box (first 5 lines).
-        
+
         Args:
             task: The task description text.
         """
         # Use full console width
         box_width = self._console_width - 2
         inner_width = box_width - 4  # Account for box borders and padding
-        
+
         # Split into lines and wrap long lines
         task_lines: list[str] = []
-        
+
         for line in task.strip().split("\n"):
             if len(line) <= inner_width:
                 task_lines.append(f" {line}")
@@ -855,12 +855,12 @@ class ExecutionTracer(TracerBase):
                 # Wrap long lines
                 wrapped = self._wrap_text(line, inner_width)
                 task_lines.extend(f" {w}" for w in wrapped)
-        
+
         # Limit to 5 lines
         display_lines = task_lines[:5]
         if len(task_lines) > 5:
             display_lines.append(f" ... +{len(task_lines) - 5} more lines")
-        
+
         self._print_box(
             lines=display_lines,
             title="TASK",
@@ -871,24 +871,24 @@ class ExecutionTracer(TracerBase):
             center_title=False
         )
         self._write("")
-    
+
     def _print_header(self, title: str, color: Color = Color.BRIGHT_CYAN) -> None:
         """Print a decorated header with single-line box drawing."""
         width = self._console_width - 2  # Full console width with small margin
         inner_width = width - 2
-        
+
         tl = self._symbol(Symbol.BOX_TL, "+")
         tr = self._symbol(Symbol.BOX_TR, "+")
         bl = self._symbol(Symbol.BOX_BL, "+")
         br = self._symbol(Symbol.BOX_BR, "+")
         h = self._symbol(Symbol.BOX_H, "-")
         v = self._symbol(Symbol.BOX_V, "|")
-        
+
         # Build title content
         star = self._symbol(Symbol.STAR, "*")
         title_content = f" {star} {title}"
         title_padded = title_content.ljust(inner_width)
-        
+
         self._write("")
         self._write(self._color(f"{tl}{h * inner_width}{tr}", color))
         self._write(
@@ -897,14 +897,14 @@ class ExecutionTracer(TracerBase):
             self._color(v, color)
         )
         self._write(self._color(f"{bl}{h * inner_width}{br}", color))
-    
+
     def _print_footer(self, color: Color = Color.BRIGHT_CYAN) -> None:
         """Print a decorated footer."""
         width = 60
         border = self._symbol(Symbol.DBOX_H, "=") * width
         self._write(self._color(border, color))
         self._write("")
-    
+
     def _print_line(
         self,
         prefix: str,
@@ -917,7 +917,7 @@ class ExecutionTracer(TracerBase):
         prefix_color = prefix_color or color
         indent_str = "  " * indent
         bar = self._symbol(Symbol.BOX_V, "|")
-        
+
         formatted = (
             f"{indent_str}"
             f"{self._color(bar, Color.DIM)} "
@@ -925,7 +925,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color(message, color)}"
         )
         self._write(formatted)
-    
+
     def _print_key_value(
         self,
         key: str,
@@ -937,7 +937,7 @@ class ExecutionTracer(TracerBase):
         indent_str = "  " * indent
         bar = self._symbol(Symbol.BOX_V, "|")
         bullet = self._symbol(Symbol.BULLET, "-")
-        
+
         formatted = (
             f"{indent_str}"
             f"{self._color(bar, Color.DIM)} "
@@ -946,11 +946,11 @@ class ExecutionTracer(TracerBase):
             f"{self._color(value, color)}"
         )
         self._write(formatted)
-    
+
     # ═══════════════════════════════════════════════════════════════
     # Spinner Control
     # ═══════════════════════════════════════════════════════════════
-    
+
     def _start_spinner(
         self,
         message: str,
@@ -960,22 +960,23 @@ class ExecutionTracer(TracerBase):
         if not self.use_colors or not sys.stdout.isatty():
             self._write(f"  {self._symbol(Symbol.GEAR, '*')} {message}...")
             return
-        
+
         self._stop_spinner()
-        
+
         self._spinner.active = True
         self._spinner.message = message
         self._spinner.frames = frames or Symbol.SPINNER_DOTS
         self._spinner.frame_index = 0
         self._spinner.stop_event = threading.Event()
-        
+        stop_event = self._spinner.stop_event  # Capture for thread safety
+
         def spin() -> None:
-            while not self._spinner.stop_event.is_set():
+            while not stop_event.is_set():
                 frame = self._spinner.frames[self._spinner.frame_index]
                 self._spinner.frame_index = (
                     (self._spinner.frame_index + 1) % len(self._spinner.frames)
                 )
-                
+
                 with self._lock:
                     sys.stdout.write(TerminalControl.CLEAR_LINE)
                     sys.stdout.write(TerminalControl.CURSOR_START)
@@ -984,29 +985,29 @@ class ExecutionTracer(TracerBase):
                         f"{self._color(self._spinner.message, Color.DIM)}"
                     )
                     sys.stdout.flush()
-                
+
                 time.sleep(0.08)
-        
+
         self._spinner.thread = threading.Thread(target=spin, daemon=True)
         self._spinner.thread.start()
-    
+
     def _stop_spinner(self, final_message: str = "", success: bool = True) -> None:
         """Stop the spinner with optional final message."""
         if not self._spinner.active:
             return
-        
+
         if self._spinner.stop_event:
             self._spinner.stop_event.set()
         if self._spinner.thread:
             self._spinner.thread.join(timeout=0.5)
-        
+
         self._spinner.active = False
-        
+
         if self.use_colors and sys.stdout.isatty():
             with self._lock:
                 sys.stdout.write(TerminalControl.CLEAR_LINE)
                 sys.stdout.write(TerminalControl.CURSOR_START)
-                
+
                 if final_message:
                     symbol = Symbol.CHECK if success else Symbol.CROSS
                     color = Color.GREEN if success else Color.RED
@@ -1015,11 +1016,11 @@ class ExecutionTracer(TracerBase):
                         f"{self._color(final_message, color)}\n"
                     )
                 sys.stdout.flush()
-    
+
     # ═══════════════════════════════════════════════════════════════
     # TracerBase Implementation
     # ═══════════════════════════════════════════════════════════════
-    
+
     def _format_tools_grid(
         self,
         tools: list[str],
@@ -1037,7 +1038,7 @@ class ExecutionTracer(TracerBase):
     def _wrap_text(self, text: str, width: int = 70) -> list[str]:
         """Wrap text using shared utility."""
         return wrap_text(text, width)
-    
+
     def on_agent_start(
         self,
         session_id: str,
@@ -1052,14 +1053,14 @@ class ExecutionTracer(TracerBase):
         self._turn_count = 0
         self._current_model = model
         self._agent_started = True
-        
+
         self._print_header(
             "Agentum | Self-Improving Agent",
             Color.BRIGHT_CYAN
         )
-        
+
         bar = self._symbol(Symbol.BOX_V, "|")
-        
+
         # Session info with consistent indentation
         self._write(
             f"  {self._color(bar, Color.DIM)} "
@@ -1067,30 +1068,30 @@ class ExecutionTracer(TracerBase):
             f"{self._color('SESSION', Color.BRIGHT_CYAN, Color.BOLD)} "
             f"{self._color(session_id, Color.CYAN)}"
         )
-        
+
         self._write(
             f"  {self._color(bar, Color.DIM)} "
             f"{self._color(self._symbol(Symbol.BULLET, '-'), Color.DIM)} "
             f"{self._color('Model:', Color.DIM)} "
             f"{self._color(model, Color.BRIGHT_WHITE)}"
         )
-        
+
         self._write(
             f"  {self._color(bar, Color.DIM)} "
             f"{self._color(self._symbol(Symbol.BULLET, '-'), Color.DIM)} "
             f"{self._color('Working Dir:', Color.DIM)} "
             f"{self._color(self._truncate_path(working_dir, 60), Color.DIM)}"
         )
-        
+
         self._write(
             f"  {self._color(bar, Color.DIM)} "
             f"{self._color(self._symbol(Symbol.BULLET, '-'), Color.DIM)} "
             f"{self._color('Started:', Color.DIM)} "
             f"{self._color(self._timestamp(), Color.DIM)}"
         )
-        
+
         self._write(f"  {self._color(bar, Color.DIM)}")
-        
+
         # Display permission profile info if available (from pending profile switch)
         if self._pending_profile:
             profile_type = self._pending_profile["profile_type"]
@@ -1099,13 +1100,13 @@ class ExecutionTracer(TracerBase):
             allow_count = self._pending_profile["allow_rules_count"]
             deny_count = self._pending_profile["deny_rules_count"]
             profile_path = self._pending_profile.get("profile_path")
-            
+
             # Choose color based on profile type
             if profile_type.lower() == "system":
                 profile_color = Color.BRIGHT_MAGENTA
             else:
                 profile_color = Color.BRIGHT_GREEN
-            
+
             # Profile line
             self._write(
                 f"  {self._color(bar, Color.DIM)} "
@@ -1115,7 +1116,7 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(f'({profile_name})', Color.DIM)} "
                 f"{self._color(f'[allow={allow_count}, deny={deny_count}]', Color.DIM)}"
             )
-            
+
             # Profile path
             if profile_path:
                 # Shorten the path for display
@@ -1128,9 +1129,9 @@ class ExecutionTracer(TracerBase):
                     f"{self._color('Loaded:', Color.DIM)} "
                     f"{self._color(path_display, Color.DIM)}"
                 )
-            
+
             self._write(f"  {self._color(bar, Color.DIM)}")
-            
+
             # Tools section with grid layout - use profile tools
             self._write(
                 f"  {self._color(bar, Color.DIM)} "
@@ -1139,14 +1140,14 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(str(len(profile_tools)), Color.BRIGHT_WHITE)} "
                 f"{self._color('available', Color.DIM)}"
             )
-            
+
             tool_lines = self._format_tools_grid(profile_tools, columns=4, col_width=18)
             for line in tool_lines:
                 self._write(
                     f"  {self._color(bar, Color.DIM)}   "
                     f"{self._color(line, Color.DIM)}"
                 )
-            
+
             # Clear pending profile
             self._pending_profile = None
         else:
@@ -1158,14 +1159,14 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(str(len(tools)), Color.BRIGHT_WHITE)} "
                 f"{self._color('available', Color.DIM)}"
             )
-            
+
             tool_lines = self._format_tools_grid(tools, columns=4, col_width=18)
             for line in tool_lines:
                 self._write(
                     f"  {self._color(bar, Color.DIM)}   "
                     f"{self._color(line, Color.DIM)}"
                 )
-        
+
         # Print loaded skills if any
         if skills:
             self._write(f"  {self._color(bar, Color.DIM)}")
@@ -1182,17 +1183,17 @@ class ExecutionTracer(TracerBase):
                     f"  {self._color(bar, Color.DIM)}   "
                     f"{self._color(line, Color.MAGENTA)}"
                 )
-        
+
         # Bottom border
         bl = self._symbol(Symbol.BOX_BL, "+")
         h = self._symbol(Symbol.BOX_H, "-")
         self._write(self._color(f"  {bl}{h * 57}", Color.DIM))
         self._write("")
-        
+
         # Print task if provided
         if task:
             self.print_task(task)
-    
+
     def on_tool_start(
         self,
         tool_name: str,
@@ -1203,23 +1204,23 @@ class ExecutionTracer(TracerBase):
         # Stop any existing spinner BEFORE writing new output to prevent
         # the old spinner thread from overwriting the new tool header
         self._stop_spinner()
-        
+
         self._turn_count += 1
         self._tool_start_times[tool_id] = time.time()
-        
+
         # Build tool display
         tool_icon = self._symbol(Symbol.TOOL, ">")
         turn_badge = self._color(f"[{self._turn_count}]", Color.DIM)
-        
+
         self._write(
             f"  {self._color(tool_icon, Color.CYAN)} "
             f"{turn_badge} "
             f"{self._color(tool_name, Color.BRIGHT_CYAN, Color.BOLD)}"
         )
-        
+
         if self.verbose and tool_input:
             bar = self._color(Symbol.BOX_V, Color.DIM)
-            
+
             # Special handling for TodoWrite - display as plan tree
             if tool_name == "TodoWrite" and "todos" in tool_input:
                 todos = tool_input.get("todos", [])
@@ -1228,7 +1229,7 @@ class ExecutionTracer(TracerBase):
                         todos = json.loads(todos)
                     except (json.JSONDecodeError, TypeError):
                         todos = []
-                
+
                 if isinstance(todos, list) and todos:
                     plan_lines = self._format_todo_plan(todos, indent=4)
                     for line in plan_lines:
@@ -1239,25 +1240,25 @@ class ExecutionTracer(TracerBase):
                     # Check if value is a complex object (dict/list) or JSON-like string
                     is_complex = isinstance(value, (dict, list))
                     is_json_string = (
-                        isinstance(value, str) and 
-                        len(value) > 50 and 
+                        isinstance(value, str) and
+                        len(value) > 50 and
                         (value.strip().startswith("{") or value.strip().startswith("["))
                     )
-                    
+
                     if is_complex or is_json_string:
                         # Pretty print JSON objects
                         self._write(
                             f"      {bar} {self._color(Symbol.BULLET, Color.DIM)} "
                             f"{self._color(key + ':', Color.DIM)}"
                         )
-                        
+
                         # Parse JSON string if needed
                         if is_json_string:
                             try:
                                 value = json.loads(value)
                             except (json.JSONDecodeError, TypeError):
                                 pass
-                        
+
                         # Format and print each line
                         json_lines = self._format_json_preview(
                             value, max_lines=10, max_line_length=80
@@ -1284,9 +1285,9 @@ class ExecutionTracer(TracerBase):
                             Color.DIM,
                             indent=2
                         )
-        
+
         self._start_spinner(f"Executing {tool_name}...")
-    
+
     def on_tool_complete(
         self,
         tool_name: str,
@@ -1301,64 +1302,64 @@ class ExecutionTracer(TracerBase):
             actual_ms = int((time.time() - self._tool_start_times[tool_id]) * 1000)
             duration_ms = actual_ms
             del self._tool_start_times[tool_id]
-        
+
         duration_str = self._format_duration(duration_ms)
-        
+
         if is_error:
             status_icon = self._symbol(Symbol.CROSS, "X")
             status_text = "FAILED"
         else:
             status_icon = self._symbol(Symbol.CHECK, "V")
             status_text = "OK"
-        
+
         self._stop_spinner(
             f"{tool_name} {status_icon} {status_text} "
             f"{self._color(f'({duration_str})', Color.DIM)}",
             success=not is_error
         )
-        
+
         # Show result preview for verbose mode
         if self.verbose and result:
             result_str = str(result)
             if len(result_str) > 100:
                 result_str = result_str[:97] + "..."
             result_str = result_str.replace("\n", " ")
-            
+
             output_color = Color.RED if is_error else Color.DIM
             self._write(
                 f"      {self._color(Symbol.BOX_L, Color.DIM)}"
                 f"{self._color(Symbol.BOX_H, Color.DIM)} "
                 f"{self._color(result_str, output_color)}"
             )
-        
+
         self._write("")
-    
+
     def on_thinking(self, thinking_text: str) -> None:
         """Called when the agent is in thinking mode."""
         if not self.show_thinking:
             return
-        
+
         brain = self._symbol(Symbol.BRAIN, "*")
         preview = self._truncate(thinking_text, 70)
         length = len(thinking_text)
-        
+
         self._write(
             f"  {self._color(brain, Color.YELLOW)} "
             f"{self._color('Thinking:', Color.YELLOW, Color.BOLD)} "
             f"{self._color(preview, Color.DIM)} "
             f"{self._color(f'({length} chars)', Color.BRIGHT_BLACK)}"
         )
-    
+
     def on_message(self, text: str, is_partial: bool = False) -> None:
         """Called when the agent generates a message."""
         if not text.strip():
             return
-        
+
         preview = self._truncate(text, self.max_preview_length)
         length = len(text)
-        
+
         pointer = self._symbol(Symbol.POINTER, ">")
-        
+
         if is_partial:
             # Partial message - update in place
             self._clear_line()
@@ -1375,17 +1376,17 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(preview, Color.WHITE)} "
                 f"{self._color(f'({length} chars)', Color.DIM)}"
             )
-    
+
     def on_error(self, error_message: str, error_type: str = "error") -> None:
         """Called when an error occurs."""
         self._stop_spinner()
-        
+
         error_icon = self._symbol(Symbol.CROSS, "X")
         warn_icon = self._symbol(Symbol.WARN, "!")
-        
+
         icon = error_icon if error_type == "error" else warn_icon
         color = Color.BRIGHT_RED if error_type == "error" else Color.BRIGHT_YELLOW
-        
+
         self._write("")
         self._write(
             f"  {self._color(icon, color)} "
@@ -1393,7 +1394,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color(error_message, color)}"
         )
         self._write("")
-    
+
     def on_agent_complete(
         self,
         status: str,
@@ -1410,13 +1411,13 @@ class ExecutionTracer(TracerBase):
     ) -> None:
         """Called when the agent completes execution."""
         self._stop_spinner()
-        
+
         status_upper = status.upper()
         is_complete = status_upper in ("COMPLETE", "OK", "COMPLETED")
         is_partial = status_upper == "PARTIAL"
-        
+
         self._write("")
-        
+
         if is_complete:
             header_color = Color.BRIGHT_GREEN
             status_icon = self._symbol(Symbol.CHECK, "OK")
@@ -1429,12 +1430,12 @@ class ExecutionTracer(TracerBase):
             header_color = Color.BRIGHT_RED
             status_icon = self._symbol(Symbol.CROSS, "X")
             header_text = "FAILED"
-        
+
         width = self._console_width - 2  # Use full console width with small margin
-        
+
         # Build content lines
         content_lines: list[str] = []
-        
+
         # Metrics line (current run)
         duration_str = self._format_duration(duration_ms)
         metrics_parts = [f"Duration: {duration_str}", f"Turns: {num_turns}"]
@@ -1442,7 +1443,7 @@ class ExecutionTracer(TracerBase):
             cost_str = self._format_cost(total_cost_usd)
             metrics_parts.append(f"Cost: {cost_str}")
         content_lines.append(" " + " | ".join(metrics_parts))
-        
+
         # Token usage and context load (this run)
         if usage:
             input_tokens = usage.get("input_tokens", 0)
@@ -1451,11 +1452,11 @@ class ExecutionTracer(TracerBase):
             output_tokens = usage.get("output_tokens", 0)
             total_input = input_tokens + cache_creation + cache_read
             total_tokens = total_input + output_tokens
-            
+
             # Build token usage line
             token_parts = [f"Tokens: {total_tokens:,}"]
             token_parts.append(f"(in: {total_input:,}, out: {output_tokens:,})")
-            
+
             # Add context load if model is known
             if model:
                 context_size = get_model_context_size(model)
@@ -1463,9 +1464,9 @@ class ExecutionTracer(TracerBase):
                 token_parts.append(
                     f"Context: {total_input:,}/{context_size:,} ({context_percent:.1f}%)"
                 )
-            
+
             content_lines.append(" " + " | ".join(token_parts))
-            
+
             # Cache info if relevant
             if cache_creation > 0 or cache_read > 0:
                 cache_parts = []
@@ -1476,7 +1477,7 @@ class ExecutionTracer(TracerBase):
                 content_lines.append(
                     f" {self._symbol(Symbol.BULLET, '-')} " + " | ".join(cache_parts)
                 )
-        
+
         # Cumulative stats (if this is a resumed session)
         has_cumulative = (
             cumulative_cost_usd is not None and
@@ -1495,11 +1496,11 @@ class ExecutionTracer(TracerBase):
             content_lines.append(
                 f" {self._symbol(Symbol.STAR, '*')} " + " | ".join(cumul_parts)
             )
-        
+
         # Session ID
         if session_id:
             content_lines.append(f" Session: {session_id}")
-        
+
         # Use _print_box for the completion summary - entire box in status color
         title = f"{status_icon} {header_text}"
         self._print_box(
@@ -1512,7 +1513,7 @@ class ExecutionTracer(TracerBase):
             center_title=True
         )
         self._write("")
-    
+
     def on_output_display(
         self,
         output: Optional[str] = None,
@@ -1536,11 +1537,11 @@ class ExecutionTracer(TracerBase):
             status=status or "COMPLETE",
             terminal_width=self._console_width,
         )
-    
+
     # ═══════════════════════════════════════════════════════════════
     # Additional Utility Methods
     # ═══════════════════════════════════════════════════════════════
-    
+
     def on_system_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Handle system events (init, status changes, etc.)."""
         if event_type == "init":
@@ -1557,7 +1558,7 @@ class ExecutionTracer(TracerBase):
                 f"{self._color(event_type, Color.BLUE)}: "
                 f"{self._color(str(data)[:80], Color.DIM)}"
             )
-    
+
     def on_permission_check(
         self,
         tool_name: str,
@@ -1574,17 +1575,17 @@ class ExecutionTracer(TracerBase):
         else:
             icon = self._symbol(Symbol.WARN, "?")
             color = Color.YELLOW
-        
+
         msg = f"{tool_name} {self._symbol(Symbol.ARROW_RIGHT, '->')} {decision}"
         if reason:
             msg += f" ({reason})"
-        
+
         self._write(
             f"    {self._color(icon, color)} "
             f"{self._color('Permission:', Color.DIM)} "
             f"{self._color(msg, color)}"
         )
-    
+
     def on_profile_switch(
         self,
         profile_type: str,
@@ -1596,11 +1597,11 @@ class ExecutionTracer(TracerBase):
     ) -> None:
         """
         Display profile switch notification with tools info.
-        
+
         If called before on_agent_start, stores the profile info to be
         included in the agent start header. If called after, prints
         a standalone profile switch notification.
-        
+
         Args:
             profile_type: Type of profile ("system" or "user").
             profile_name: Name of the profile.
@@ -1617,19 +1618,19 @@ class ExecutionTracer(TracerBase):
             "deny_rules_count": deny_rules_count,
             "profile_path": profile_path,
         }
-        
+
         # If agent hasn't started yet, store profile info for header
         if not self._agent_started:
             self._pending_profile = profile_info
             return
-        
+
         # Agent has started, print standalone profile switch notification
         self._print_profile_switch(profile_info)
-    
+
     def _print_profile_switch(self, profile_info: dict[str, Any]) -> None:
         """
         Print a standalone profile switch notification.
-        
+
         Args:
             profile_info: Dictionary with profile details.
         """
@@ -1639,9 +1640,9 @@ class ExecutionTracer(TracerBase):
         allow_rules_count = profile_info["allow_rules_count"]
         deny_rules_count = profile_info["deny_rules_count"]
         profile_path = profile_info.get("profile_path")
-        
+
         bar = self._symbol(Symbol.BOX_V, "|")
-        
+
         # Choose color based on profile type
         if profile_type.lower() == "system":
             profile_color = Color.BRIGHT_MAGENTA
@@ -1649,10 +1650,10 @@ class ExecutionTracer(TracerBase):
         else:
             profile_color = Color.BRIGHT_GREEN
             icon = self._symbol(Symbol.STAR, "*")
-        
+
         # Print separator before profile switch
         self._write("")
-        
+
         # Profile header
         self._write(
             f"  {self._color(bar, Color.DIM)} "
@@ -1661,7 +1662,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color(profile_type.upper(), profile_color, Color.BOLD)} "
             f"{self._color(f'({profile_name})', Color.DIM)}"
         )
-        
+
         # Profile path
         if profile_path:
             # Shorten the path for display
@@ -1674,7 +1675,7 @@ class ExecutionTracer(TracerBase):
                 f"{self._color('Loaded:', Color.DIM)} "
                 f"{self._color(path_display, Color.DIM)}"
             )
-        
+
         # Rules count
         rules_info = f"allow={allow_rules_count}, deny={deny_rules_count}"
         self._write(
@@ -1683,7 +1684,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color('Rules:', Color.DIM)} "
             f"{self._color(rules_info, Color.DIM)}"
         )
-        
+
         # Tools section
         self._write(
             f"  {self._color(bar, Color.DIM)} "
@@ -1692,7 +1693,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color(str(len(tools)), Color.BRIGHT_WHITE)} "
             f"{self._color('available', Color.DIM)}"
         )
-        
+
         # Display tools in grid
         tool_lines = self._format_tools_grid(tools, columns=4, col_width=18)
         for line in tool_lines:
@@ -1700,18 +1701,18 @@ class ExecutionTracer(TracerBase):
                 f"  {self._color(bar, Color.DIM)}   "
                 f"{self._color(line, Color.DIM)}"
             )
-        
+
         # Bottom separator
         bl = self._symbol(Symbol.BOX_BL, "+")
         h = self._symbol(Symbol.BOX_H, "-")
         self._write(self._color(f"  {bl}{h * 57}", Color.DIM))
         self._write("")
-    
+
     def print_separator(self, char: str = "─", width: int = 60) -> None:
         """Print a separator line."""
         sep_char = self._symbol(char, "-")
         self._write(self._color(f"  {sep_char * width}", Color.DIM))
-    
+
     def print_status(self, message: str, status: str = "info") -> None:
         """Print a status message."""
         icons = {
@@ -1720,7 +1721,7 @@ class ExecutionTracer(TracerBase):
             "warning": (Symbol.WARN, Color.YELLOW),
             "error": (Symbol.CROSS, Color.RED),
         }
-        
+
         icon, color = icons.get(status, icons["info"])
         self._write(
             f"  {self._color(self._symbol(icon, '*'), color)} "
@@ -1741,9 +1742,9 @@ class ExecutionTracer(TracerBase):
         """Display hook trigger notification."""
         if not self.verbose:
             return
-        
+
         bar = self._symbol(Symbol.BOX_V, "|")
-        
+
         # Color based on decision
         if decision == "allow":
             color = Color.GREEN
@@ -1754,22 +1755,22 @@ class ExecutionTracer(TracerBase):
         else:
             color = Color.CYAN
             icon = self._symbol(Symbol.GEAR, "*")
-        
+
         parts = [hook_event]
         if tool_name:
             parts.append(f"[{tool_name}]")
         if decision:
             parts.append(f"-> {decision}")
-        
+
         hook_text = " ".join(parts)
-        
+
         self._write(
             f"    {self._color(bar, Color.DIM)} "
             f"{self._color(icon, color)} "
             f"{self._color('Hook:', Color.DIM)} "
             f"{self._color(hook_text, color)}"
         )
-        
+
         if message:
             self._write(
                 f"    {self._color(bar, Color.DIM)}   "
@@ -1787,10 +1788,10 @@ class ExecutionTracer(TracerBase):
         """Display conversation turn summary."""
         bar = self._symbol(Symbol.BOX_V, "|")
         arrow = self._symbol(Symbol.ARROW_RIGHT, "->")
-        
+
         duration_str = self._format_duration(duration_ms)
         tools_str = f" [{', '.join(tools_used)}]" if tools_used else ""
-        
+
         self._write("")
         self._write(
             f"  {self._color(bar, Color.DIM)} "
@@ -1798,7 +1799,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color(f'({duration_str})', Color.DIM)}"
             f"{self._color(tools_str, Color.DIM)}"
         )
-        
+
         # Prompt preview
         prompt_truncated = self._truncate(prompt_preview, 50)
         self._write(
@@ -1806,7 +1807,7 @@ class ExecutionTracer(TracerBase):
             f"{self._color('You:', Color.WHITE)} "
             f"{self._color(prompt_truncated, Color.DIM)}"
         )
-        
+
         # Response preview
         response_truncated = self._truncate(response_preview, 50)
         self._write(
@@ -1819,9 +1820,9 @@ class ExecutionTracer(TracerBase):
         """Display session connect notification."""
         bar = self._symbol(Symbol.BOX_V, "|")
         icon = self._symbol(Symbol.LIGHTNING, "*")
-        
+
         session_str = session_id or "connecting..."
-        
+
         self._write(
             f"  {self._color(bar, Color.DIM)} "
             f"{self._color(icon, Color.BRIGHT_GREEN)} "
@@ -1838,9 +1839,9 @@ class ExecutionTracer(TracerBase):
         """Display session disconnect summary."""
         bar = self._symbol(Symbol.BOX_V, "|")
         icon = self._symbol(Symbol.CHECK, "v")
-        
+
         duration_str = self._format_duration(total_duration_ms)
-        
+
         self._write("")
         self._write(
             f"  {self._color(bar, Color.DIM)} "
@@ -1853,10 +1854,10 @@ class ExecutionTracer(TracerBase):
 class QuietTracer(TracerBase):
     """
     Minimal tracer that only logs errors and completion.
-    
+
     Use this when you want minimal console output.
     """
-    
+
     def on_agent_start(
         self,
         session_id: str,
@@ -1868,7 +1869,7 @@ class QuietTracer(TracerBase):
     ) -> None:
         """Silent start."""
         pass
-    
+
     def on_tool_start(
         self,
         tool_name: str,
@@ -1877,7 +1878,7 @@ class QuietTracer(TracerBase):
     ) -> None:
         """Silent tool start."""
         pass
-    
+
     def on_tool_complete(
         self,
         tool_name: str,
@@ -1889,19 +1890,19 @@ class QuietTracer(TracerBase):
         """Only report errors."""
         if is_error:
             print(f"[ERROR] {tool_name}: {result}")
-    
+
     def on_thinking(self, thinking_text: str) -> None:
         """Silent thinking."""
         pass
-    
+
     def on_message(self, text: str, is_partial: bool = False) -> None:
         """Silent message."""
         pass
-    
+
     def on_error(self, error_message: str, error_type: str = "error") -> None:
         """Report errors."""
         print(f"[{error_type.upper()}] {error_message}")
-    
+
     def on_agent_complete(
         self,
         status: str,
@@ -1928,7 +1929,7 @@ class QuietTracer(TracerBase):
             )
             tokens_str = f", {total_tokens:,} tokens"
         print(f"[{status}] Completed in {duration_ms}ms, {num_turns} turns{cost_str}{tokens_str}")
-        
+
         # Show cumulative stats if this was a resumed session
         if cumulative_turns and cumulative_turns > num_turns:
             cumul_cost = f" ${cumulative_cost_usd:.4f}" if cumulative_cost_usd else ""
@@ -2009,10 +2010,10 @@ class QuietTracer(TracerBase):
 class NullTracer(TracerBase):
     """
     No-op tracer that does nothing.
-    
+
     Use this when you want to completely disable tracing.
     """
-    
+
     def on_agent_start(
         self,
         session_id: str,
@@ -2023,7 +2024,7 @@ class NullTracer(TracerBase):
         task: Optional[str] = None
     ) -> None:
         pass
-    
+
     def on_tool_start(
         self,
         tool_name: str,
@@ -2031,7 +2032,7 @@ class NullTracer(TracerBase):
         tool_id: str
     ) -> None:
         pass
-    
+
     def on_tool_complete(
         self,
         tool_name: str,
@@ -2041,16 +2042,16 @@ class NullTracer(TracerBase):
         is_error: bool
     ) -> None:
         pass
-    
+
     def on_thinking(self, thinking_text: str) -> None:
         pass
-    
+
     def on_message(self, text: str, is_partial: bool = False) -> None:
         pass
-    
+
     def on_error(self, error_message: str, error_type: str = "error") -> None:
         pass
-    
+
     def on_agent_complete(
         self,
         status: str,

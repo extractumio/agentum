@@ -1,26 +1,30 @@
 """
 Tests for the session service.
+
+Tests the SessionService layer that handles session CRUD and 
+coordinates between database and file-based storage.
 """
 import pytest
 import pytest_asyncio
+from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import User, Session
+from src.db.models import User
 from src.services.session_service import SessionService
 
 
 @pytest_asyncio.fixture
 async def session_service_with_user(
-    test_session: AsyncSession
+    test_session: AsyncSession,
+    test_session_service: SessionService
 ) -> tuple[SessionService, str]:
-    """Create a session service and a test user."""
+    """Create a session service with temp dir and a test user."""
     # Create a test user
     user = User(id="service-test-user")
     test_session.add(user)
     await test_session.commit()
 
-    service = SessionService()
-    return service, "service-test-user"
+    return test_session_service, "service-test-user"
 
 
 class TestSessionServiceCreate:
@@ -66,6 +70,49 @@ class TestSessionServiceCreate:
         )
 
         assert session.model == "claude-haiku-4-5-20251001"
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_create_session_generates_valid_id(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """Session ID has valid format YYYYMMDD_HHMMSS_uuid8."""
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session,
+            user_id=user_id,
+            task="ID test"
+        )
+
+        parts = session.id.split("_")
+        assert len(parts) == 3
+        assert len(parts[0]) == 8  # Date
+        assert len(parts[1]) == 6  # Time
+        assert len(parts[2]) == 8  # UUID fragment
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_create_session_creates_folder(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str],
+        temp_sessions_dir: Path
+    ) -> None:
+        """Creating a session creates the session folder."""
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session,
+            user_id=user_id,
+            task="Folder test"
+        )
+
+        session_folder = temp_sessions_dir / session.id
+        assert session_folder.exists()
+        assert session_folder.is_dir()
 
 
 class TestSessionServiceQuery:
@@ -195,6 +242,24 @@ class TestSessionServiceQuery:
         assert total == 5
         assert len(sessions) == 2
 
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_list_sessions_empty(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """List returns empty list when no sessions exist."""
+        service, user_id = session_service_with_user
+
+        sessions, total = await service.list_sessions(
+            db=test_session,
+            user_id=user_id
+        )
+
+        assert total == 0
+        assert sessions == []
+
 
 class TestSessionServiceUpdate:
     """Tests for session updates."""
@@ -249,6 +314,32 @@ class TestSessionServiceUpdate:
 
     @pytest.mark.integration
     @pytest.mark.asyncio
+    async def test_update_multiple_fields(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """Can update multiple fields at once."""
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session, user_id=user_id, task="Multi-update test"
+        )
+
+        updated = await service.update_session(
+            db=test_session,
+            session=session,
+            status="completed",
+            num_turns=15,
+            duration_ms=10000
+        )
+
+        assert updated.status == "completed"
+        assert updated.num_turns == 15
+        assert updated.duration_ms == 10000
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
     async def test_request_cancellation(
         self,
         test_session: AsyncSession,
@@ -268,3 +359,74 @@ class TestSessionServiceUpdate:
 
         assert updated.cancel_requested is True
 
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_update_updates_timestamp(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """Updating a session updates the updated_at timestamp."""
+        import time
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session, user_id=user_id, task="Timestamp test"
+        )
+        original_updated_at = session.updated_at
+
+        # Small delay to ensure timestamp difference
+        time.sleep(0.01)
+
+        updated = await service.update_session(
+            db=test_session,
+            session=session,
+            status="running"
+        )
+
+        assert updated.updated_at >= original_updated_at
+
+
+class TestSessionServiceOutput:
+    """Tests for session output retrieval."""
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_get_session_output_empty(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """Get output returns default when no output.yaml exists."""
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session, user_id=user_id, task="Output test"
+        )
+
+        output = service.get_session_output(session.id)
+
+        # Should return default empty output
+        assert isinstance(output, dict)
+        assert "status" in output
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_get_session_info_empty(
+        self,
+        test_session: AsyncSession,
+        session_service_with_user: tuple[SessionService, str]
+    ) -> None:
+        """Get session info returns data for existing session."""
+        service, user_id = session_service_with_user
+
+        session = await service.create_session(
+            db=test_session, user_id=user_id, task="Info test"
+        )
+
+        info = service.get_session_info(session.id)
+
+        # Should return session info dict
+        assert isinstance(info, dict)
+        assert "session_id" in info
+        assert info["session_id"] == session.id

@@ -13,7 +13,7 @@ Usage:
     manager = HooksManager()
     manager.add_pre_tool_hook(create_permission_hook(permission_manager))
     manager.add_post_tool_hook(create_audit_hook(log_file))
-    
+
     options = ClaudeAgentOptions(
         hooks=manager.build_hooks_config()
     )
@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from claude_agent_sdk import HookMatcher
+
+from .tool_utils import build_actionable_denial_message, build_tool_call_string
 
 logger = logging.getLogger(__name__)
 
@@ -42,47 +44,47 @@ HookCallback = Callable[
 class HookResult:
     """
     Result from a hook callback.
-    
+
     Used to communicate decisions and modifications back to the SDK.
     """
     # For PreToolUse: permission decision
     permission_decision: Optional[str] = None  # "allow", "deny", "ask"
     permission_reason: Optional[str] = None
-    
+
     # For input modification
     updated_input: Optional[dict[str, Any]] = None
-    
+
     # For blocking/interrupting
     block: bool = False
     interrupt: bool = False
-    
+
     # For adding system messages
     system_message: Optional[str] = None
-    
+
     # Hook-specific output
     hook_output: Optional[dict[str, Any]] = None
-    
+
     def to_sdk_response(self, hook_event: str) -> dict[str, Any]:
         """
         Convert to SDK hook response format.
-        
+
         Args:
             hook_event: The hook event name (PreToolUse, PostToolUse, etc.)
-        
+
         Returns:
             Dictionary in SDK hook response format.
         """
         response: dict[str, Any] = {}
-        
+
         if self.block:
             response["decision"] = "block"
-        
+
         if self.system_message:
             response["systemMessage"] = self.system_message
-        
+
         if self.hook_output or self.permission_decision:
             hook_specific: dict[str, Any] = {"hookEventName": hook_event}
-            
+
             if self.permission_decision:
                 hook_specific["permissionDecision"] = self.permission_decision
             if self.permission_reason:
@@ -93,9 +95,9 @@ class HookResult:
                 hook_specific["interrupt"] = True
             if self.hook_output:
                 hook_specific.update(self.hook_output)
-            
+
             response["hookSpecificOutput"] = hook_specific
-        
+
         return response
 
 
@@ -117,10 +119,10 @@ class ToolUsageRecord:
 class HooksManager:
     """
     Manages SDK hooks for the agent.
-    
+
     Provides methods to register hook callbacks and build the
     hooks configuration for ClaudeAgentOptions.
-    
+
     Supports:
     - PreToolUse: Permission checking, input validation, blocking
     - PostToolUse: Audit logging, result processing, metrics
@@ -128,7 +130,7 @@ class HooksManager:
     - Stop: Session cleanup, finalization
     - SubagentStop: Subagent result processing
     """
-    
+
     def __init__(self) -> None:
         """Initialize the hooks manager."""
         # Hook callbacks by event type
@@ -137,25 +139,25 @@ class HooksManager:
         self._user_prompt_hooks: list[HookCallback] = []
         self._stop_hooks: list[HookCallback] = []
         self._subagent_stop_hooks: list[HookCallback] = []
-        
+
         # Audit trail
         self._tool_usage_records: list[ToolUsageRecord] = []
-        
+
         # Tracing callback
         self._on_permission_check: Optional[Callable[[str, str], None]] = None
-    
+
     def set_permission_check_callback(
         self,
         callback: Callable[[str, str], None]
     ) -> None:
         """
         Set callback for permission check notifications.
-        
+
         Args:
             callback: Function called with (tool_name, decision).
         """
         self._on_permission_check = callback
-    
+
     def add_pre_tool_hook(
         self,
         callback: HookCallback,
@@ -163,13 +165,13 @@ class HooksManager:
     ) -> None:
         """
         Add a PreToolUse hook callback.
-        
+
         Args:
             callback: Async function (input_data, tool_use_id, context) -> dict
             matcher: Optional tool name pattern (e.g., "Bash", "Write|Edit")
         """
         self._pre_tool_hooks.append((matcher, callback))
-    
+
     def add_post_tool_hook(
         self,
         callback: HookCallback,
@@ -177,58 +179,58 @@ class HooksManager:
     ) -> None:
         """
         Add a PostToolUse hook callback.
-        
+
         Args:
             callback: Async function (input_data, tool_use_id, context) -> dict
             matcher: Optional tool name pattern.
         """
         self._post_tool_hooks.append((matcher, callback))
-    
+
     def add_user_prompt_hook(self, callback: HookCallback) -> None:
         """
         Add a UserPromptSubmit hook callback.
-        
+
         Args:
             callback: Async function (input_data, None, context) -> dict
         """
         self._user_prompt_hooks.append(callback)
-    
+
     def add_stop_hook(self, callback: HookCallback) -> None:
         """
         Add a Stop hook callback.
-        
+
         Args:
             callback: Async function (input_data, None, context) -> dict
         """
         self._stop_hooks.append(callback)
-    
+
     def add_subagent_stop_hook(self, callback: HookCallback) -> None:
         """
         Add a SubagentStop hook callback.
-        
+
         Args:
             callback: Async function (input_data, None, context) -> dict
         """
         self._subagent_stop_hooks.append(callback)
-    
+
     @property
     def tool_usage_records(self) -> list[ToolUsageRecord]:
         """Get all tool usage records."""
         return self._tool_usage_records.copy()
-    
+
     def clear_records(self) -> None:
         """Clear all tool usage records."""
         self._tool_usage_records.clear()
-    
+
     def build_hooks_config(self) -> dict[str, list[HookMatcher]]:
         """
         Build the hooks configuration for ClaudeAgentOptions.
-        
+
         Returns:
             Dictionary mapping hook events to HookMatcher lists.
         """
         config: dict[str, list[HookMatcher]] = {}
-        
+
         # Build PreToolUse hooks
         if self._pre_tool_hooks:
             pre_tool_matchers: list[HookMatcher] = []
@@ -237,7 +239,7 @@ class HooksManager:
                     HookMatcher(matcher=matcher, hooks=[callback])
                 )
             config["PreToolUse"] = pre_tool_matchers
-        
+
         # Build PostToolUse hooks
         if self._post_tool_hooks:
             post_tool_matchers: list[HookMatcher] = []
@@ -246,25 +248,25 @@ class HooksManager:
                     HookMatcher(matcher=matcher, hooks=[callback])
                 )
             config["PostToolUse"] = post_tool_matchers
-        
+
         # Build UserPromptSubmit hooks
         if self._user_prompt_hooks:
             config["UserPromptSubmit"] = [
                 HookMatcher(hooks=self._user_prompt_hooks)
             ]
-        
+
         # Build Stop hooks
         if self._stop_hooks:
             config["Stop"] = [
                 HookMatcher(hooks=self._stop_hooks)
             ]
-        
+
         # Build SubagentStop hooks
         if self._subagent_stop_hooks:
             config["SubagentStop"] = [
                 HookMatcher(hooks=self._subagent_stop_hooks)
             ]
-        
+
         return config
 
 
@@ -277,87 +279,22 @@ def create_permission_hook(
 ) -> HookCallback:
     """
     Create a PreToolUse hook for permission checking.
-    
+
     This replaces the can_use_tool callback with a proper SDK hook.
     Uses smart interrupt logic and provides actionable denial messages.
-    
+
     Args:
         permission_manager: Permission manager with is_allowed() method.
         on_permission_check: Optional callback for tracing decisions.
         denial_tracker: Optional tracker to record denials.
         trace_processor: Optional trace processor for status updates.
         max_denials_before_interrupt: Number of denials before interrupting.
-    
+
     Returns:
         Async hook callback function.
     """
     # Track denial counts for smart interrupt
     denial_counts: dict[str, int] = {}
-    
-    def build_tool_call_string(tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Build a tool call string for permission matching."""
-        if tool_name == "Read":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Read({path})"
-        elif tool_name == "Write":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Write({path})"
-        elif tool_name == "Edit":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Edit({path})"
-        elif tool_name == "MultiEdit":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"MultiEdit({path})"
-        elif tool_name == "Bash":
-            command = tool_input.get("command", "")
-            return f"Bash({command})"
-        elif tool_name == "Glob":
-            path = tool_input.get("path", tool_input.get("cwd", ""))
-            return f"Glob({path})"
-        elif tool_name == "Grep":
-            path = tool_input.get("path", tool_input.get("file", ""))
-            return f"Grep({path})"
-        elif tool_name == "WebFetch":
-            url = tool_input.get("url", "")
-            return f"WebFetch({url})"
-        elif tool_name == "WebSearch":
-            query = tool_input.get("query", "")
-            return f"WebSearch({query})"
-        elif tool_name == "LS":
-            path = tool_input.get("path", tool_input.get("dir", ""))
-            return f"LS({path})"
-        else:
-            return tool_name
-
-    def build_actionable_denial_message(
-        tool_name: str,
-        tool_input: dict[str, Any],
-        is_final_denial: bool
-    ) -> str:
-        """Build an actionable denial message with allowed patterns."""
-        allowed_patterns: list[str] = []
-        if hasattr(permission_manager, 'get_allowed_patterns_for_tool'):
-            allowed_patterns = permission_manager.get_allowed_patterns_for_tool(tool_name)
-
-        if tool_name == "Bash":
-            command = tool_input.get("command", "")
-            base_msg = f"Bash command '{command[:50]}...' is not permitted."
-        else:
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            base_msg = f"{tool_name} for '{path[:50]}' is not permitted."
-
-        if allowed_patterns:
-            patterns_str = ", ".join(f"'{p}'" for p in allowed_patterns[:5])
-            guidance = f" Allowed patterns for {tool_name}: {patterns_str}."
-        else:
-            guidance = f" No {tool_name} operations are allowed in this context."
-
-        if is_final_denial:
-            warning = " FINAL WARNING: Agent will stop on next denial."
-        else:
-            warning = ""
-
-        return base_msg + guidance + warning
 
     async def permission_hook(
         input_data: dict[str, Any],
@@ -367,17 +304,17 @@ def create_permission_hook(
         """PreToolUse hook for permission checking with smart interrupt."""
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {})
-        
+
         logger.debug(f"Permission hook: {tool_name} with input: {tool_input}")
-        
+
         # Security check: block sandbox bypass attempts - immediate interrupt
         if tool_input.get("dangerouslyDisableSandbox"):
             security_msg = "Security violation: sandbox bypass attempted. Agent stopped."
             logger.warning(f"SECURITY: {security_msg}")
-            
+
             if on_permission_check:
                 on_permission_check(tool_name, "deny")
-            
+
             if denial_tracker:
                 denial_tracker.record_denial(
                     tool_name=tool_name,
@@ -385,26 +322,26 @@ def create_permission_hook(
                     message=security_msg,
                     is_security_violation=True,
                 )
-            
+
             if trace_processor and hasattr(trace_processor, "set_permission_denied"):
                 trace_processor.set_permission_denied(True)
-            
+
             return HookResult(
                 permission_decision="deny",
                 permission_reason=security_msg,
                 interrupt=True,
             ).to_sdk_response("PreToolUse")
-        
+
         # Check permission rules
         tool_call = build_tool_call_string(tool_name, tool_input)
         allowed = permission_manager.is_allowed(tool_call)
         decision = "allow" if allowed else "deny"
-        
+
         logger.debug(f"Permission check: {tool_call} -> {decision}")
-        
+
         if on_permission_check:
             on_permission_check(tool_name, decision)
-        
+
         if allowed:
             return HookResult(
                 permission_decision="allow"
@@ -424,7 +361,8 @@ def create_permission_hook(
         denial_msg = build_actionable_denial_message(
             tool_name=tool_name,
             tool_input=tool_input,
-            is_final_denial=is_penultimate
+            is_final_denial=is_penultimate,
+            permission_manager=permission_manager,
         )
 
         logger.info(
@@ -450,7 +388,7 @@ def create_permission_hook(
             permission_reason=denial_msg,
             interrupt=should_interrupt,
         ).to_sdk_response("PreToolUse")
-    
+
     return permission_hook
 
 
@@ -460,15 +398,15 @@ def create_audit_hook(
 ) -> HookCallback:
     """
     Create a PostToolUse hook for audit logging.
-    
+
     Args:
         log_file: Optional file path to write audit logs.
         on_tool_complete: Optional callback for tool completion.
-    
+
     Returns:
         Async hook callback function.
     """
-    
+
     async def audit_hook(
         input_data: dict[str, Any],
         tool_use_id: Optional[str],
@@ -478,7 +416,7 @@ def create_audit_hook(
         tool_name = input_data.get("tool_name", "")
         tool_result = input_data.get("tool_result", {})
         is_error = tool_result.get("is_error", False)
-        
+
         timestamp = datetime.now().isoformat()
         log_entry = {
             "timestamp": timestamp,
@@ -486,9 +424,9 @@ def create_audit_hook(
             "tool_use_id": tool_use_id,
             "is_error": is_error,
         }
-        
+
         logger.debug(f"Audit: {tool_name} completed, error={is_error}")
-        
+
         # Write to log file if specified
         if log_file:
             try:
@@ -496,14 +434,14 @@ def create_audit_hook(
                     f.write(json.dumps(log_entry) + "\n")
             except IOError as e:
                 logger.warning(f"Failed to write audit log: {e}")
-        
+
         # Call completion callback
         if on_tool_complete:
             result_content = tool_result.get("content")
             on_tool_complete(tool_name, tool_use_id or "", result_content, is_error)
-        
+
         return {}  # No modifications
-    
+
     return audit_hook
 
 
@@ -513,15 +451,15 @@ def create_prompt_enhancement_hook(
 ) -> HookCallback:
     """
     Create a UserPromptSubmit hook for prompt enhancement.
-    
+
     Args:
         add_timestamp: Whether to add timestamp to prompts.
         add_context: Optional context string to prepend.
-    
+
     Returns:
         Async hook callback function.
     """
-    
+
     async def enhance_prompt_hook(
         input_data: dict[str, Any],
         tool_use_id: Optional[str],
@@ -529,27 +467,27 @@ def create_prompt_enhancement_hook(
     ) -> dict[str, Any]:
         """UserPromptSubmit hook for prompt enhancement."""
         original_prompt = input_data.get("prompt", "")
-        
+
         parts = []
-        
+
         if add_timestamp:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             parts.append(f"[{timestamp}]")
-        
+
         if add_context:
             parts.append(add_context)
-        
+
         parts.append(original_prompt)
-        
+
         updated_prompt = " ".join(parts)
-        
+
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
                 "updatedPrompt": updated_prompt,
             }
         }
-    
+
     return enhance_prompt_hook
 
 
@@ -559,15 +497,15 @@ def create_stop_hook(
 ) -> HookCallback:
     """
     Create a Stop hook for session cleanup.
-    
+
     Args:
         on_stop: Optional callback with stop data.
         cleanup_fn: Optional async cleanup function.
-    
+
     Returns:
         Async hook callback function.
     """
-    
+
     async def stop_hook(
         input_data: dict[str, Any],
         tool_use_id: Optional[str],
@@ -575,21 +513,21 @@ def create_stop_hook(
     ) -> dict[str, Any]:
         """Stop hook for session cleanup."""
         logger.info("Stop hook triggered")
-        
+
         if on_stop:
             try:
                 await on_stop(input_data)
             except Exception as e:
                 logger.warning(f"Error in on_stop callback: {e}")
-        
+
         if cleanup_fn:
             try:
                 await cleanup_fn()
             except Exception as e:
                 logger.warning(f"Cleanup error in stop hook: {e}")
-        
+
         return {}
-    
+
     return stop_hook
 
 
@@ -598,14 +536,14 @@ def create_subagent_stop_hook(
 ) -> HookCallback:
     """
     Create a SubagentStop hook for subagent result processing.
-    
+
     Args:
         on_subagent_complete: Optional callback with (subagent_type, result).
-    
+
     Returns:
         Async hook callback function.
     """
-    
+
     async def subagent_stop_hook(
         input_data: dict[str, Any],
         tool_use_id: Optional[str],
@@ -614,17 +552,17 @@ def create_subagent_stop_hook(
         """SubagentStop hook for subagent processing."""
         subagent_type = input_data.get("subagent_type", "unknown")
         result = input_data.get("result", {})
-        
+
         logger.debug(f"Subagent stop: {subagent_type}")
-        
+
         if on_subagent_complete:
             try:
                 await on_subagent_complete(subagent_type, result)
             except Exception as e:
                 logger.warning(f"Error in subagent complete callback: {e}")
-        
+
         return {}
-    
+
     return subagent_stop_hook
 
 
@@ -633,11 +571,11 @@ def create_dangerous_command_hook(
 ) -> HookCallback:
     """
     Create a PreToolUse hook that blocks dangerous bash commands.
-    
+
     Args:
         blocked_patterns: List of command patterns to block.
             Defaults to ["rm -rf /", "mkfs", "> /dev/"].
-    
+
     Returns:
         Async hook callback function.
     """
@@ -649,7 +587,7 @@ def create_dangerous_command_hook(
         "dd if=",
         ":(){:|:&};:",  # Fork bomb
     ]
-    
+
     async def dangerous_command_hook(
         input_data: dict[str, Any],
         tool_use_id: Optional[str],
@@ -657,12 +595,12 @@ def create_dangerous_command_hook(
     ) -> dict[str, Any]:
         """PreToolUse hook to block dangerous commands."""
         tool_name = input_data.get("tool_name", "")
-        
+
         if tool_name != "Bash":
             return {}  # Only check Bash commands
-        
+
         command = input_data.get("tool_input", {}).get("command", "")
-        
+
         for pattern in patterns:
             if pattern in command:
                 logger.warning(f"Blocked dangerous command: {command[:50]}...")
@@ -671,7 +609,7 @@ def create_dangerous_command_hook(
                     permission_reason=f"Dangerous command pattern blocked: {pattern}",
                     interrupt=True,
                 ).to_sdk_response("PreToolUse")
-        
+
         return {}  # Allow
-    
+
     return dangerous_command_hook

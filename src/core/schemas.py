@@ -22,7 +22,7 @@ class CheckpointType(StrEnum):
 class Checkpoint(BaseModel):
     """
     Represents a point in the conversation that can be rewound to.
-    
+
     Checkpoints track file system state at specific user message UUIDs,
     enabling rollback of file changes made by the agent.
     """
@@ -53,11 +53,11 @@ class Checkpoint(BaseModel):
         default=None,
         description="File path that was modified (for file-related checkpoints)"
     )
-    
+
     def to_summary(self) -> str:
         """
         Generate a human-readable summary of this checkpoint.
-        
+
         Returns:
             Summary string describing the checkpoint.
         """
@@ -227,10 +227,10 @@ MODEL_CONTEXT_SIZES: dict[str, int] = {
 def get_model_context_size(model: str) -> int:
     """
     Get the context window size for a model.
-    
+
     Args:
         model: The model name/identifier.
-    
+
     Returns:
         The context window size in tokens.
     """
@@ -240,7 +240,7 @@ def get_model_context_size(model: str) -> int:
 class TokenUsage(BaseModel):
     """
     Token usage statistics.
-    
+
     Tracks input and output token counts, including cached tokens.
     """
     input_tokens: int = Field(
@@ -259,7 +259,7 @@ class TokenUsage(BaseModel):
         default=0,
         description="Number of tokens read from cache"
     )
-    
+
     @property
     def total_input_tokens(self) -> int:
         """
@@ -270,21 +270,21 @@ class TokenUsage(BaseModel):
             self.cache_creation_input_tokens +
             self.cache_read_input_tokens
         )
-    
+
     @property
     def total_tokens(self) -> int:
         """
         Total tokens (input + output).
         """
         return self.total_input_tokens + self.output_tokens
-    
+
     def add(self, other: "TokenUsage") -> "TokenUsage":
         """
         Add another TokenUsage to this one (for accumulating stats).
-        
+
         Args:
             other: Another TokenUsage instance to add.
-        
+
         Returns:
             A new TokenUsage with combined values.
         """
@@ -300,21 +300,21 @@ class TokenUsage(BaseModel):
                 other.cache_read_input_tokens
             ),
         )
-    
+
     @classmethod
     def from_sdk_usage(cls, usage: Optional[dict]) -> "TokenUsage":
         """
         Create TokenUsage from SDK usage dictionary.
-        
+
         Args:
             usage: The usage dict from ResultMessage.
-        
+
         Returns:
             TokenUsage instance.
         """
         if not usage:
             return cls()
-        
+
         return cls(
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
@@ -350,7 +350,7 @@ class AgentConfig(BaseModel):
     Defines the model, execution limits, paths, and permissions.
     Required fields are loaded from agent.yaml.
     Tool-related fields come from permission profiles.
-    
+
     Usage:
         from config import AgentConfigLoader
         loader = AgentConfigLoader()
@@ -386,7 +386,7 @@ class AgentConfig(BaseModel):
         ...,
         description="Role template name (file in prompts/roles/<role>.md)"
     )
-    
+
     # Fields from permission profiles (optional, set at runtime)
     allowed_tools: list[str] = Field(
         default_factory=list,
@@ -396,7 +396,7 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Tools that trigger automatic checkpoint creation (from permission profile)"
     )
-    
+
     # Optional fields (runtime or CLI overrides)
     skills_dir: Optional[str] = Field(
         default=None,
@@ -414,7 +414,7 @@ class AgentConfig(BaseModel):
         default=None,
         description="Path to legacy permissions.json configuration file"
     )
-    
+
     # SDK-specific optional fields
     max_buffer_size: Optional[int] = Field(
         default=None,

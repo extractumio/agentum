@@ -1,5 +1,10 @@
 """
 Tests for authentication endpoints and JWT handling.
+
+Comprehensive coverage of:
+- Token generation and validation
+- Response structure validation
+- Authentication protection on endpoints
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +28,30 @@ class TestAuthEndpoint:
         assert data["expires_in"] > 0
 
     @pytest.mark.unit
+    def test_token_response_structure(self, client: TestClient) -> None:
+        """Token response has complete TokenResponse structure."""
+        response = client.post("/api/v1/auth/token")
+
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Validate all TokenResponse fields
+        assert "access_token" in data
+        assert isinstance(data["access_token"], str)
+        assert len(data["access_token"]) > 0
+        
+        assert "token_type" in data
+        assert data["token_type"] == "bearer"
+        
+        assert "user_id" in data
+        assert isinstance(data["user_id"], str)
+        assert len(data["user_id"]) > 0
+        
+        assert "expires_in" in data
+        assert isinstance(data["expires_in"], int)
+        assert data["expires_in"] > 0
+
+    @pytest.mark.unit
     def test_token_is_valid_jwt(self, client: TestClient) -> None:
         """Token returned is a valid JWT format."""
         response = client.post("/api/v1/auth/token")
@@ -31,6 +60,10 @@ class TestAuthEndpoint:
         # JWT has 3 parts separated by dots
         parts = token.split(".")
         assert len(parts) == 3
+        
+        # Each part should be non-empty
+        for part in parts:
+            assert len(part) > 0
 
     @pytest.mark.unit
     def test_each_request_creates_new_user(self, client: TestClient) -> None:
@@ -42,6 +75,14 @@ class TestAuthEndpoint:
         user_id2 = response2.json()["user_id"]
 
         assert user_id1 != user_id2
+
+    @pytest.mark.unit
+    def test_token_returns_json(self, client: TestClient) -> None:
+        """Token endpoint returns JSON content type."""
+        response = client.post("/api/v1/auth/token")
+        
+        assert response.status_code == 200
+        assert "application/json" in response.headers.get("content-type", "")
 
 
 class TestAuthService:
@@ -84,6 +125,18 @@ class TestAuthService:
 
         assert result is None
 
+    @pytest.mark.unit
+    def test_validate_empty_token(self, auth_service: AuthService) -> None:
+        """Empty token returns None."""
+        result = auth_service.validate_token("")
+        assert result is None
+
+    @pytest.mark.unit
+    def test_validate_malformed_token(self, auth_service: AuthService) -> None:
+        """Malformed token (missing parts) returns None."""
+        result = auth_service.validate_token("not.a.valid.token.at.all")
+        assert result is None
+
 
 class TestAuthProtection:
     """Tests for authentication protection on endpoints."""
@@ -94,6 +147,8 @@ class TestAuthProtection:
         response = client.get("/api/v1/sessions")
 
         assert response.status_code == 401  # Unauthorized without token
+        data = response.json()
+        assert "detail" in data
 
     @pytest.mark.unit
     def test_sessions_with_valid_token(
@@ -114,3 +169,33 @@ class TestAuthProtection:
 
         assert response.status_code == 401
 
+    @pytest.mark.unit
+    def test_missing_bearer_prefix_rejected(self, client: TestClient) -> None:
+        """Token without Bearer prefix is rejected."""
+        # Get a valid token first
+        token_response = client.post("/api/v1/auth/token")
+        token = token_response.json()["access_token"]
+        
+        # Try without Bearer prefix
+        headers = {"Authorization": token}
+        response = client.get("/api/v1/sessions", headers=headers)
+
+        assert response.status_code == 401
+
+    @pytest.mark.unit
+    def test_truncated_token_rejected(self, auth_service: AuthService) -> None:
+        """Truncated token (missing signature) returns None on validation."""
+        # Generate a valid token then truncate it
+        token, _ = auth_service.generate_token("test-user")
+        parts = token.split(".")
+        # Remove the signature part
+        truncated = ".".join(parts[:2])
+        
+        result = auth_service.validate_token(truncated)
+        assert result is None
+
+    @pytest.mark.unit
+    def test_health_does_not_require_auth(self, client: TestClient) -> None:
+        """Health endpoint is accessible without auth."""
+        response = client.get("/api/v1/health")
+        assert response.status_code == 200

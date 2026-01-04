@@ -1,6 +1,14 @@
 """
 Tests for session management endpoints.
+
+Comprehensive coverage of all session endpoints including:
+- Response structure validation
+- Edge cases and error scenarios
+- Pagination and filtering
 """
+from datetime import datetime
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,9 +31,20 @@ class TestSessionRun:
 
         assert response.status_code == 201
         data = response.json()
+        
+        # Validate response structure (TaskStartedResponse)
         assert "session_id" in data
         assert data["status"] == "running"
         assert data["message"] == "Task execution started"
+        assert "resumed_from" in data  # Can be None
+        
+        # Validate session_id format: YYYYMMDD_HHMMSS_uuid8
+        session_id = data["session_id"]
+        parts = session_id.split("_")
+        assert len(parts) == 3
+        assert len(parts[0]) == 8  # Date
+        assert len(parts[1]) == 6  # Time
+        assert len(parts[2]) == 8  # UUID fragment
 
     @pytest.mark.unit
     def test_run_task_with_config_overrides(
@@ -87,6 +106,38 @@ class TestSessionRun:
         )
 
         assert response.status_code == 422  # Validation error
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_run_task_with_additional_dirs(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Can specify additional directories."""
+        response = client.post(
+            "/api/v1/sessions/run",
+            headers=auth_headers,
+            json={
+                "task": "Multi-dir task",
+                "working_dir": "/project",
+                "additional_dirs": ["/lib", "/data"]
+            }
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "running"
+
+    @pytest.mark.unit
+    def test_run_task_requires_auth(self, client: TestClient) -> None:
+        """Run endpoint requires authentication."""
+        response = client.post(
+            "/api/v1/sessions/run",
+            json={"task": "Test task"}
+        )
+        assert response.status_code == 401
 
 
 class TestSessionCreate:
@@ -107,9 +158,20 @@ class TestSessionCreate:
 
         assert response.status_code == 201
         data = response.json()
+        
+        # Validate full SessionResponse structure
         assert "id" in data
         assert data["status"] == "pending"
         assert data["task"] == "Test task"
+        assert "model" in data  # Can be None
+        assert data["working_dir"] == "/tmp"
+        assert "created_at" in data
+        assert "updated_at" in data
+        assert "completed_at" in data  # Can be None
+        assert data["num_turns"] == 0
+        assert "duration_ms" in data  # Can be None
+        assert "total_cost_usd" in data  # Can be None
+        assert data["cancel_requested"] is False
 
     @pytest.mark.unit
     def test_create_session_generates_id(
@@ -167,6 +229,39 @@ class TestSessionCreate:
 
         assert response.status_code == 422  # Validation error
 
+    @pytest.mark.unit
+    def test_create_session_timestamps(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Session has valid timestamp fields."""
+        response = client.post(
+            "/api/v1/sessions",
+            headers=auth_headers,
+            json={"task": "Timestamp test"}
+        )
+
+        data = response.json()
+        
+        # Validate created_at is ISO format
+        created_at = data["created_at"]
+        assert "T" in created_at
+        datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        
+        # updated_at should also be valid
+        updated_at = data["updated_at"]
+        datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+
+    @pytest.mark.unit
+    def test_create_session_requires_auth(self, client: TestClient) -> None:
+        """Create endpoint requires authentication."""
+        response = client.post(
+            "/api/v1/sessions",
+            json={"task": "Test task"}
+        )
+        assert response.status_code == 401
+
 
 class TestSessionList:
     """Tests for GET /api/v1/sessions."""
@@ -182,6 +277,11 @@ class TestSessionList:
 
         assert response.status_code == 200
         data = response.json()
+        
+        # Validate SessionListResponse structure
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+        assert "total" in data
         assert data["sessions"] == []
         assert data["total"] == 0
 
@@ -206,6 +306,85 @@ class TestSessionList:
         data = response.json()
         assert len(data["sessions"]) == 1
         assert data["total"] == 1
+        assert data["sessions"][0]["task"] == "Task 1"
+
+    @pytest.mark.unit
+    def test_list_sessions_pagination_limit(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """List respects limit parameter."""
+        # Create 5 sessions
+        for i in range(5):
+            client.post(
+                "/api/v1/sessions",
+                headers=auth_headers,
+                json={"task": f"Task {i}"}
+            )
+
+        # Request only 2
+        response = client.get(
+            "/api/v1/sessions",
+            headers=auth_headers,
+            params={"limit": 2}
+        )
+
+        data = response.json()
+        assert len(data["sessions"]) == 2
+        assert data["total"] == 5  # Total count still accurate
+
+    @pytest.mark.unit
+    def test_list_sessions_pagination_offset(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """List respects offset parameter."""
+        # Create 5 sessions
+        for i in range(5):
+            client.post(
+                "/api/v1/sessions",
+                headers=auth_headers,
+                json={"task": f"Task {i}"}
+            )
+
+        # Skip first 3
+        response = client.get(
+            "/api/v1/sessions",
+            headers=auth_headers,
+            params={"offset": 3}
+        )
+
+        data = response.json()
+        assert len(data["sessions"]) == 2  # 5 - 3 = 2 remaining
+        assert data["total"] == 5
+
+    @pytest.mark.unit
+    def test_list_sessions_pagination_combined(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """List works with limit and offset together."""
+        # Create 10 sessions
+        for i in range(10):
+            client.post(
+                "/api/v1/sessions",
+                headers=auth_headers,
+                json={"task": f"Task {i}"}
+            )
+
+        # Get page 2 (items 3-4) with limit 2, offset 2
+        response = client.get(
+            "/api/v1/sessions",
+            headers=auth_headers,
+            params={"limit": 2, "offset": 2}
+        )
+
+        data = response.json()
+        assert len(data["sessions"]) == 2
+        assert data["total"] == 10
 
     @pytest.mark.unit
     def test_sessions_isolated_by_user(self, client: TestClient) -> None:
@@ -238,6 +417,35 @@ class TestSessionList:
         assert list2.json()["total"] == 1
         assert list2.json()["sessions"][0]["task"] == "User 2 task"
 
+    @pytest.mark.unit
+    def test_list_sessions_requires_auth(self, client: TestClient) -> None:
+        """List endpoint requires authentication."""
+        response = client.get("/api/v1/sessions")
+        assert response.status_code == 401
+
+    @pytest.mark.unit
+    def test_list_sessions_ordered_by_created_at(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Sessions are ordered by creation date (newest first)."""
+        # Create sessions
+        for i in range(3):
+            client.post(
+                "/api/v1/sessions",
+                headers=auth_headers,
+                json={"task": f"Task {i}"}
+            )
+
+        response = client.get("/api/v1/sessions", headers=auth_headers)
+        data = response.json()
+        
+        # Newest first
+        assert data["sessions"][0]["task"] == "Task 2"
+        assert data["sessions"][1]["task"] == "Task 1"
+        assert data["sessions"][2]["task"] == "Task 0"
+
 
 class TestSessionGet:
     """Tests for GET /api/v1/sessions/{id}."""
@@ -246,18 +454,12 @@ class TestSessionGet:
     def test_get_session(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can get a specific session by ID."""
-        # Create a session
-        create_response = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Test task"}
-        )
-        session_id = create_response.json()["id"]
+        session_id = created_session["id"]
 
-        # Get the session
         response = client.get(
             f"/api/v1/sessions/{session_id}",
             headers=auth_headers
@@ -265,8 +467,20 @@ class TestSessionGet:
 
         assert response.status_code == 200
         data = response.json()
+        
+        # Validate full SessionResponse structure
         assert data["id"] == session_id
-        assert data["task"] == "Test task"
+        assert "status" in data
+        assert "task" in data
+        assert "model" in data
+        assert "working_dir" in data
+        assert "created_at" in data
+        assert "updated_at" in data
+        assert "completed_at" in data
+        assert "num_turns" in data
+        assert "duration_ms" in data
+        assert "total_cost_usd" in data
+        assert "cancel_requested" in data
 
     @pytest.mark.unit
     def test_get_session_not_found(
@@ -281,6 +495,9 @@ class TestSessionGet:
         )
 
         assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+        assert "nonexistent-session-id" in data["detail"]
 
     @pytest.mark.unit
     def test_get_session_wrong_user(self, client: TestClient) -> None:
@@ -305,6 +522,12 @@ class TestSessionGet:
 
         assert response.status_code == 404
 
+    @pytest.mark.unit
+    def test_get_session_requires_auth(self, client: TestClient) -> None:
+        """Get endpoint requires authentication."""
+        response = client.get("/api/v1/sessions/any-session-id")
+        assert response.status_code == 401
+
 
 class TestSessionTask:
     """Tests for POST /api/v1/sessions/{id}/task."""
@@ -313,18 +536,12 @@ class TestSessionTask:
     def test_start_task(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can start a task for a session."""
-        # Create a session
-        create = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Initial task"}
-        )
-        session_id = create.json()["id"]
+        session_id = created_session["id"]
 
-        # Start the task
         response = client.post(
             f"/api/v1/sessions/{session_id}/task",
             headers=auth_headers,
@@ -333,25 +550,23 @@ class TestSessionTask:
 
         assert response.status_code == 200
         data = response.json()
+        
+        # Validate TaskStartedResponse structure
         assert data["status"] == "running"
         assert data["session_id"] == session_id
+        assert "message" in data
+        assert "resumed_from" in data
 
     @pytest.mark.unit
     def test_start_task_with_empty_body(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can start task with empty body, uses session's task."""
-        # Create a session with task
-        create = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Session task"}
-        )
-        session_id = create.json()["id"]
+        session_id = created_session["id"]
 
-        # Start with empty body - should use session's task
         response = client.post(
             f"/api/v1/sessions/{session_id}/task",
             headers=auth_headers,
@@ -366,18 +581,12 @@ class TestSessionTask:
     def test_start_task_with_config_overrides(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can pass config overrides when starting task."""
-        # Create a session
-        create = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Test task"}
-        )
-        session_id = create.json()["id"]
+        session_id = created_session["id"]
 
-        # Start with config overrides
         response = client.post(
             f"/api/v1/sessions/{session_id}/task",
             headers=auth_headers,
@@ -407,6 +616,42 @@ class TestSessionTask:
         )
 
         assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_start_task_conflict_already_running(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict,
+        mock_agent_runner
+    ) -> None:
+        """Returns 409 when task is already running."""
+        session_id = created_session["id"]
+        
+        # Mock the agent runner to say task is already running
+        mock_agent_runner.is_running.return_value = True
+
+        with patch("src.api.routes.sessions.agent_runner", mock_agent_runner):
+            response = client.post(
+                f"/api/v1/sessions/{session_id}/task",
+                headers=auth_headers,
+                json={}
+            )
+
+        assert response.status_code == 409
+        data = response.json()
+        assert "already running" in data["detail"].lower()
+
+    @pytest.mark.unit
+    def test_start_task_requires_auth(self, client: TestClient) -> None:
+        """Start task endpoint requires authentication."""
+        response = client.post(
+            "/api/v1/sessions/any-id/task",
+            json={"task": "Test"}
+        )
+        assert response.status_code == 401
 
 
 class TestSessionCancel:
@@ -416,18 +661,12 @@ class TestSessionCancel:
     def test_cancel_session(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can request cancellation of a session."""
-        # Create a session
-        create = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Long task"}
-        )
-        session_id = create.json()["id"]
+        session_id = created_session["id"]
 
-        # Cancel it
         response = client.post(
             f"/api/v1/sessions/{session_id}/cancel",
             headers=auth_headers
@@ -435,7 +674,30 @@ class TestSessionCancel:
 
         assert response.status_code == 200
         data = response.json()
+        
+        # Validate CancelResponse structure
         assert data["session_id"] == session_id
+        assert "status" in data
+        assert "message" in data
+
+    @pytest.mark.unit
+    def test_cancel_not_running_session(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """Cancelling a not-running session returns appropriate message."""
+        session_id = created_session["id"]
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/cancel",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "not running" in data["message"].lower()
 
     @pytest.mark.unit
     def test_cancel_not_found(
@@ -450,6 +712,14 @@ class TestSessionCancel:
         )
 
         assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_cancel_requires_auth(self, client: TestClient) -> None:
+        """Cancel endpoint requires authentication."""
+        response = client.post("/api/v1/sessions/any-id/cancel")
+        assert response.status_code == 401
 
 
 class TestSessionResult:
@@ -459,18 +729,12 @@ class TestSessionResult:
     def test_get_result(
         self,
         client: TestClient,
-        auth_headers: dict
+        auth_headers: dict,
+        created_session: dict
     ) -> None:
         """Can get result for a session."""
-        # Create a session
-        create = client.post(
-            "/api/v1/sessions",
-            headers=auth_headers,
-            json={"task": "Test task"}
-        )
-        session_id = create.json()["id"]
+        session_id = created_session["id"]
 
-        # Get result
         response = client.get(
             f"/api/v1/sessions/{session_id}/result",
             headers=auth_headers
@@ -478,8 +742,41 @@ class TestSessionResult:
 
         assert response.status_code == 200
         data = response.json()
+        
+        # Validate ResultResponse structure
         assert data["session_id"] == session_id
         assert "status" in data
+        assert "error" in data
+        assert "comments" in data
+        assert "output" in data
+        assert "result_files" in data
+        assert isinstance(data["result_files"], list)
+        assert "metrics" in data
+
+    @pytest.mark.unit
+    def test_get_result_metrics_structure(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """Result metrics have correct structure."""
+        session_id = created_session["id"]
+
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/result",
+            headers=auth_headers
+        )
+
+        data = response.json()
+        metrics = data["metrics"]
+        
+        # Validate ResultMetrics structure
+        assert "duration_ms" in metrics
+        assert "num_turns" in metrics
+        assert "total_cost_usd" in metrics
+        assert "model" in metrics
+        assert "usage" in metrics
 
     @pytest.mark.unit
     def test_get_result_not_found(
@@ -494,4 +791,34 @@ class TestSessionResult:
         )
 
         assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
 
+    @pytest.mark.unit
+    def test_get_result_requires_auth(self, client: TestClient) -> None:
+        """Result endpoint requires authentication."""
+        response = client.get("/api/v1/sessions/any-id/result")
+        assert response.status_code == 401
+
+    @pytest.mark.unit
+    def test_get_result_wrong_user(self, client: TestClient) -> None:
+        """Cannot get result for another user's session."""
+        # Create session with user 1
+        response1 = client.post("/api/v1/auth/token")
+        headers1 = {"Authorization": f"Bearer {response1.json()['access_token']}"}
+        create = client.post(
+            "/api/v1/sessions",
+            headers=headers1,
+            json={"task": "Private task"}
+        )
+        session_id = create.json()["id"]
+
+        # Try to get result with user 2
+        response2 = client.post("/api/v1/auth/token")
+        headers2 = {"Authorization": f"Bearer {response2.json()['access_token']}"}
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/result",
+            headers=headers2
+        )
+
+        assert response.status_code == 404

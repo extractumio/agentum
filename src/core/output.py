@@ -219,7 +219,7 @@ def format_cost(cost: float) -> str:
 def print_status(message: str, status: str = "info") -> None:
     """
     Print a status message with color.
-    
+
     Args:
         message: Message to print.
         status: Status type (info, success, warning, error, dim).
@@ -242,14 +242,14 @@ def print_status(message: str, status: str = "info") -> None:
 def _get_result_attr(result: Any, attr: str, default: Any = None) -> Any:
     """
     Get attribute from result object or dict.
-    
+
     Supports both AgentResult objects and dict responses from API.
-    
+
     Args:
         result: AgentResult object or dict.
         attr: Attribute name to retrieve.
         default: Default value if attribute not found.
-    
+
     Returns:
         Attribute value or default.
     """
@@ -265,11 +265,11 @@ def _get_result_attr(result: Any, attr: str, default: Any = None) -> Any:
 def format_result(result: Any, session_id: Optional[str] = None) -> str:
     """
     Format agent result for human-readable output.
-    
+
     Args:
         result: AgentResult object or dict.
         session_id: Optional session ID override.
-    
+
     Returns:
         Formatted string suitable for file output or display.
     """
@@ -289,26 +289,26 @@ def format_result(result: Any, session_id: Optional[str] = None) -> str:
         sid = session_id
         if result.session_info:
             sid = result.session_info.session_id
-    
+
     lines = [f"Status: {status}"]
-    
+
     if error:
         lines.append(f"Error: {error}")
-    
+
     if comments:
         lines.append(f"Comments: {comments}")
-    
+
     if output:
         lines.append(f"Output: {output}")
-    
+
     if result_files:
         lines.append("Files:")
         for filepath in result_files:
             lines.append(f"  - {filepath}")
-    
+
     if sid:
         lines.append(f"Session: {sid}")
-    
+
     return "\n".join(lines)
 
 
@@ -435,27 +435,27 @@ def print_output_box(
 def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
     """
     Print a detailed result summary box to stdout.
-    
+
     Displays status, metrics, token usage, session, and output in styled boxes
     matching the CLI tracer output format.
-    
+
     Args:
         result: AgentResult object or dict with status, output, error, metrics, etc.
         session_id: Optional session ID override (for API responses).
     """
     C = AnsiColors
     B = BoxChars
-    
+
     terminal_width = get_terminal_width()
     width = terminal_width - 2
     inner_width = width - 2
-    
+
     # Determine status and styling
     status_raw = _get_result_attr(result, "status", "FAILED")
     status_upper = str(status_raw).upper()
     is_complete = status_upper in ("COMPLETE", "TASKSTATUS.COMPLETE")
     is_partial = status_upper in ("PARTIAL", "TASKSTATUS.PARTIAL")
-    
+
     if is_complete:
         status_color = C.SUCCESS
         status_icon = StatusIcons.SUCCESS
@@ -468,16 +468,16 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
         status_color = C.ERROR
         status_icon = StatusIcons.FAILURE
         status_text = "FAILED"
-    
+
     print()
-    
+
     # =========================================================================
     # Status Box
     # =========================================================================
-    
+
     # Top border
     print(f"{status_color}{B.TOP_LEFT}{B.HORIZONTAL * inner_width}{B.TOP_RIGHT}{C.RESET}")
-    
+
     # Status line (centered)
     status_content = f"{status_icon} {status_text}"
     status_padding = (inner_width - len(status_content)) // 2
@@ -488,10 +488,10 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
         f"{' ' * (inner_width - status_padding - len(status_content))}"
         f"{status_color}{B.VERTICAL}{C.RESET}"
     )
-    
+
     # Separator
     print(f"{status_color}{B.LEFT_T}{B.HORIZONTAL * inner_width}{B.RIGHT_T}{C.RESET}")
-    
+
     # Metrics
     metrics = _get_result_attr(result, "metrics")
     if metrics:
@@ -507,13 +507,13 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
             cost = getattr(metrics, "total_cost_usd", 0) or 0
             model = getattr(metrics, "model", None)
             usage = getattr(metrics, "usage", None)
-        
+
         # Line 1: Duration | Turns | Cost
         duration_str = format_duration(duration_ms)
         cost_str = format_cost(cost)
         metrics_line = f" Duration: {duration_str} | Turns: {turns} | Cost: {cost_str}"
         _print_box_line(metrics_line, inner_width, status_color, C.WHITE)
-        
+
         # Line 2: Token usage (if available)
         if usage:
             if isinstance(usage, dict):
@@ -526,14 +526,14 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
                 output_tokens = getattr(usage, "output_tokens", 0)
                 cache_creation = getattr(usage, "cache_creation_input_tokens", 0)
                 cache_read = getattr(usage, "cache_read_input_tokens", 0)
-            
+
             total_input = input_tokens + cache_creation + cache_read
             total_tokens = total_input + output_tokens
-            
+
             # Token line with context percentage
             token_parts = [f"Tokens: {total_tokens:,}"]
             token_parts.append(f"(in: {total_input:,}, out: {output_tokens:,})")
-            
+
             # Add context load if model is known
             if model:
                 # Import here to avoid circular import
@@ -543,10 +543,10 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
                 token_parts.append(
                     f"Context: {total_input:,}/{context_size:,} ({context_percent:.1f}%)"
                 )
-            
+
             tokens_line = " " + " | ".join(token_parts)
             _print_box_line(tokens_line, inner_width, status_color, C.WHITE)
-            
+
             # Cache info (if relevant)
             if cache_creation > 0 or cache_read > 0:
                 cache_parts = []
@@ -556,7 +556,7 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
                     cache_parts.append(f"cache_read: {cache_read:,}")
                 cache_line = " • " + " | ".join(cache_parts)
                 _print_box_line(cache_line, inner_width, status_color, C.GRAY)
-    
+
     # Session ID
     session_info = _get_result_attr(result, "session_info")
     if session_info:
@@ -567,15 +567,15 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
         )
     else:
         sid = session_id or _get_result_attr(result, "session_id")
-    
+
     if sid:
         session_line = f" Session: {sid}"
         _print_box_line(session_line, inner_width, status_color, C.GRAY)
-    
+
     # Bottom border
     print(f"{status_color}{B.BOTTOM_LEFT}{B.HORIZONTAL * inner_width}{B.BOTTOM_RIGHT}{C.RESET}")
     print()
-    
+
     # =========================================================================
     # Output Box (if there's output, error, comments, or files)
     # =========================================================================
@@ -603,16 +603,16 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
 def print_sessions_table(sessions: list[Any]) -> None:
     """
     Print a formatted table of sessions.
-    
+
     Handles both SessionInfo objects and dictionaries from API responses.
-    
+
     Args:
         sessions: List of session objects or dicts with id, status, created_at, working_dir.
     """
     if not sessions:
         print("No sessions found.")
         return
-    
+
     header = (
         f"\n{'Session ID':<{SESSION_ID_WIDTH}} "
         f"{'Status':<{SESSION_STATUS_WIDTH}} "
@@ -621,7 +621,7 @@ def print_sessions_table(sessions: list[Any]) -> None:
     )
     print(header)
     print("-" * 100)
-    
+
     for session in sessions:
         # Handle both SessionInfo objects and dicts
         if isinstance(session, dict):
@@ -636,11 +636,11 @@ def print_sessions_table(sessions: list[Any]) -> None:
             status = str(session.status)
             created = session.created_at.strftime("%Y-%m-%d %H:%M:%S")
             working_dir = session.working_dir
-        
+
         # Truncate long working directory paths
         if len(working_dir) > WORKING_DIR_TRUNCATE_LENGTH:
             working_dir = "..." + working_dir[-(WORKING_DIR_TRUNCATE_LENGTH - 3):]
-        
+
         print(
             f"{session_id:<{SESSION_ID_WIDTH}} "
             f"{status:<{SESSION_STATUS_WIDTH}} "

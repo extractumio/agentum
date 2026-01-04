@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 # Import paths from central config
 from ..config import AGENT_DIR, CONFIG_DIR
+from .tool_utils import extract_patterns_for_tool
 
 logger = logging.getLogger(__name__)
 
@@ -552,10 +553,10 @@ class PermissionConfigManager:
     def set_working_directory(self, working_dir: Path) -> None:
         """
         Set the working directory for path resolution.
-        
+
         When set, relative paths in tool calls (e.g., ./skills/meow/meow.py)
         are resolved against this directory instead of AGENT_DIR.
-        
+
         Args:
             working_dir: Absolute path to the working directory.
         """
@@ -960,30 +961,30 @@ class PermissionConfigManager:
         # Check if pattern ends with a file glob (e.g., *.py, *.txt)
         # Look for patterns like **/*.py or *.py at the end
         parts = pattern.split("/")
-        
+
         # Check the last part for file glob
         last_part = parts[-1] if parts else ""
-        
+
         # If last part is a file glob (starts with * and has extension)
         # Examples: *.py, *.txt, *.json
         if last_part.startswith("*") and "." in last_part and last_part != "**":
             file_glob = last_part
             # Remove the file glob from the path
             remaining_parts = parts[:-1]
-            
+
             # Also remove trailing ** if present
             if remaining_parts and remaining_parts[-1] == "**":
                 remaining_parts = remaining_parts[:-1]
-            
+
             dir_pattern = "/".join(remaining_parts) if remaining_parts else "."
             return dir_pattern, file_glob
-        
+
         # If last part is just **, it matches everything under the directory
         if last_part == "**":
             remaining_parts = parts[:-1]
             dir_pattern = "/".join(remaining_parts) if remaining_parts else "."
             return dir_pattern, None
-        
+
         # No glob pattern - the whole thing is a directory path
         # Strip any trailing * that might be there
         clean_pattern = pattern.rstrip("*").rstrip("/")
@@ -1031,19 +1032,7 @@ class PermissionConfigManager:
             List of allowed patterns for the tool (e.g., ["python ./skills/**/*.py"]).
         """
         config = self.load()
-        patterns = []
-        prefix = f"{tool_name}("
-
-        for pattern in config.permissions.allow:
-            if pattern.startswith(prefix):
-                # Extract the pattern inside parentheses
-                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
-                patterns.append(inner)
-            elif pattern == tool_name:
-                # Tool name without parentheses means all uses are allowed
-                patterns.append("*")
-
-        return patterns
+        return extract_patterns_for_tool(tool_name, config.permissions.allow)
 
     def get_denied_patterns_for_tool(self, tool_name: str) -> list[str]:
         """
@@ -1056,17 +1045,7 @@ class PermissionConfigManager:
             List of denied patterns for the tool.
         """
         config = self.load()
-        patterns = []
-        prefix = f"{tool_name}("
-
-        for pattern in config.permissions.deny:
-            if pattern.startswith(prefix):
-                inner = pattern[len(prefix):-1] if pattern.endswith(")") else pattern[len(prefix):]
-                patterns.append(inner)
-            elif pattern == tool_name:
-                patterns.append("*")
-
-        return patterns
+        return extract_patterns_for_tool(tool_name, config.permissions.deny)
 
 
 def create_default_permissions_file(

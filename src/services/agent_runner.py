@@ -39,7 +39,7 @@ class TaskParams:
 
     # Working directory (CLI: --dir, --add-dir)
     working_dir: Optional[str] = None
-    additional_dirs: list[str] = None
+    additional_dirs: Optional[list[str]] = None
 
     # Agent config overrides (CLI: --model, --max-turns, --timeout, etc.)
     model: Optional[str] = None

@@ -6,10 +6,10 @@ Bridges the SDK's streaming messages and hooks to the ExecutionTracer.
 Usage:
     from tracer import ExecutionTracer
     from trace_processor import TraceProcessor
-    
+
     tracer = ExecutionTracer(verbose=True)
     processor = TraceProcessor(tracer)
-    
+
     # Use in agent execution
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
@@ -18,7 +18,6 @@ Usage:
 """
 import json
 import re
-from dataclasses import asdict
 from typing import Any, Optional, Union
 
 import yaml
@@ -42,7 +41,7 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
-from .tracer import ExecutionTracer, TracerBase
+from .tracer import TracerBase
 
 
 # Type alias for SDK messages
@@ -58,15 +57,15 @@ SDKMessage = Union[
 class TraceProcessor:
     """
     Processes Claude Agent SDK messages and dispatches to tracer.
-    
+
     This class bridges the SDK's streaming message types to the
     TracerBase interface, handling message parsing and event dispatching.
-    
+
     Args:
         tracer: The tracer instance to dispatch events to.
         include_user_messages: Whether to trace user messages.
     """
-    
+
     def __init__(
         self,
         tracer: TracerBase,
@@ -84,20 +83,20 @@ class TraceProcessor:
         self._cumulative_cost_usd: Optional[float] = None
         self._cumulative_turns: Optional[int] = None
         self._cumulative_tokens: Optional[int] = None
-    
+
     def set_task(self, task: str) -> None:
         """
         Set the task text to be displayed when agent starts.
-        
+
         Args:
             task: The task description text.
         """
         self._task = task
-    
+
     def set_model(self, model: str) -> None:
         """
         Set the model name for context size calculations.
-        
+
         Args:
             model: The model identifier.
         """
@@ -106,14 +105,14 @@ class TraceProcessor:
     def set_permission_denied(self, denied: bool = True) -> None:
         """
         Mark that the agent was interrupted due to permission denial.
-        
+
         This affects the status displayed in the completion box.
-        
+
         Args:
             denied: Whether permission was denied.
         """
         self._permission_denied = denied
-    
+
     def set_cumulative_stats(
         self,
         cost_usd: Optional[float] = None,
@@ -122,10 +121,10 @@ class TraceProcessor:
     ) -> None:
         """
         Set cumulative statistics from previous runs (for resumed sessions).
-        
+
         These values will be added to the current run's stats to show
         the total across all runs.
-        
+
         Args:
             cost_usd: Previous cumulative cost in USD.
             turns: Previous cumulative turn count.
@@ -134,11 +133,11 @@ class TraceProcessor:
         self._cumulative_cost_usd = cost_usd
         self._cumulative_turns = turns
         self._cumulative_tokens = tokens
-    
+
     def process_message(self, message: SDKMessage) -> None:
         """
         Process a single SDK message and dispatch to tracer.
-        
+
         Args:
             message: The SDK message to process.
         """
@@ -155,12 +154,12 @@ class TraceProcessor:
         else:
             # Unknown message type - try to handle generically
             self._handle_unknown_message(message)
-    
+
     def _handle_system_message(self, msg: SystemMessage) -> None:
         """Handle system lifecycle messages."""
         subtype = msg.subtype
         data = msg.data
-        
+
         if subtype == "init":
             self._initialized = True
             # Extract skills from init data if available
@@ -168,10 +167,10 @@ class TraceProcessor:
             if not skills:
                 # Skills might be empty list or not present
                 skills = None
-            
+
             # Extract task if available
             task = data.get("task")
-            
+
             self.tracer.on_agent_start(
                 session_id=data.get("session_id", "unknown"),
                 model=data.get("model", "unknown"),
@@ -187,7 +186,7 @@ class TraceProcessor:
             # Other system events (status changes, etc.)
             self.tracer.on_system_event(subtype, data) \
                 if hasattr(self.tracer, 'on_system_event') else None
-    
+
     def _handle_assistant_message(self, msg: AssistantMessage) -> None:
         """Handle assistant responses with content blocks."""
         if msg.error:
@@ -196,18 +195,18 @@ class TraceProcessor:
                 error_type="assistant_error"
             )
             return
-        
+
         for block in msg.content:
             self._process_content_block(block)
-    
+
     def _process_content_block(self, block: ContentBlock) -> None:
         """Process a single content block."""
         if isinstance(block, TextBlock):
             self.tracer.on_message(block.text)
-        
+
         elif isinstance(block, ThinkingBlock):
             self.tracer.on_thinking(block.thinking)
-        
+
         elif isinstance(block, ToolUseBlock):
             # Store pending tool call info
             self._pending_tool_calls[block.id] = {
@@ -216,18 +215,18 @@ class TraceProcessor:
             }
             # Track status from Write tool calls to output.yaml
             self._track_output_status(block.name, block.input)
-            
+
             self.tracer.on_tool_start(
                 tool_name=block.name,
                 tool_input=block.input,
                 tool_id=block.id
             )
-        
+
         elif isinstance(block, ToolResultBlock):
             tool_id = block.tool_use_id
             tool_info = self._pending_tool_calls.pop(tool_id, {})
             tool_name = tool_info.get("name", "unknown")
-            
+
             self.tracer.on_tool_complete(
                 tool_name=tool_name,
                 tool_id=tool_id,
@@ -235,11 +234,11 @@ class TraceProcessor:
                 duration_ms=0,  # Will be calculated by tracer
                 is_error=block.is_error or False
             )
-        
+
         elif isinstance(block, dict):
             # Handle dict-style blocks (from JSON parsing)
             self._process_dict_block(block)
-    
+
     def _process_dict_block(self, block: dict[str, Any]) -> None:
         """Process a dictionary-style content block."""
         if "text" in block:
@@ -255,7 +254,7 @@ class TraceProcessor:
             }
             # Track status from Write tool calls to output.yaml
             self._track_output_status(block["name"], block["input"])
-            
+
             self.tracer.on_tool_start(
                 tool_name=block["name"],
                 tool_input=block["input"],
@@ -272,12 +271,12 @@ class TraceProcessor:
                 duration_ms=0,
                 is_error=block.get("is_error", False)
             )
-    
+
     def _handle_user_message(self, msg: UserMessage) -> None:
         """Handle user input messages."""
         if not self.include_user_messages:
             return
-        
+
         content = msg.content
         if isinstance(content, str):
             self.tracer.on_message(f"[USER] {content}")
@@ -285,25 +284,25 @@ class TraceProcessor:
             for block in content:
                 if isinstance(block, TextBlock):
                     self.tracer.on_message(f"[USER] {block.text}")
-    
+
     def _handle_result_message(self, msg: ResultMessage) -> None:
         """Handle final result with metrics and usage."""
         status = self._determine_status(msg)
-        
+
         # Get usage data from result message
         usage = msg.usage if hasattr(msg, 'usage') else None
-        
+
         # Calculate cumulative totals if we have previous stats
         cumulative_cost = None
         cumulative_turns = None
         cumulative_tokens = None
-        
+
         if self._cumulative_cost_usd is not None:
             cumulative_cost = self._cumulative_cost_usd + (msg.total_cost_usd or 0)
-        
+
         if self._cumulative_turns is not None:
             cumulative_turns = self._cumulative_turns + msg.num_turns
-        
+
         if self._cumulative_tokens is not None and usage:
             current_tokens = (
                 usage.get("input_tokens", 0) +
@@ -312,7 +311,7 @@ class TraceProcessor:
                 usage.get("output_tokens", 0)
             )
             cumulative_tokens = self._cumulative_tokens + current_tokens
-        
+
         self.tracer.on_agent_complete(
             status=status,
             num_turns=msg.num_turns,
@@ -326,37 +325,37 @@ class TraceProcessor:
             cumulative_turns=cumulative_turns,
             cumulative_tokens=cumulative_tokens,
         )
-    
+
     def _determine_status(self, msg: ResultMessage) -> str:
         """
         Determine the final status from the result message.
-        
+
         Checks in order:
         1. Permission denial (agent interrupted by permission callback)
         2. SDK-level errors (msg.is_error)
         3. Status tracked from Write tool calls to output.yaml
         4. Status patterns in the result text
-        
+
         Args:
             msg: The ResultMessage from the SDK.
-        
+
         Returns:
             Status string: "COMPLETE", "PARTIAL", or "FAILED".
         """
         # If permission was denied, report failed
         if self._permission_denied:
             return "FAILED"
-        
+
         # If there's an SDK-level error, report it
         if msg.is_error:
             return msg.subtype.upper() if msg.subtype else "FAILED"
-        
+
         # Check if we tracked a status from output.yaml Write
         if self._output_status:
             status_upper = self._output_status.upper()
             if status_upper in ("FAILED", "PARTIAL"):
                 return status_upper
-        
+
         # Fallback: check if the result text contains a non-COMPLETE status
         if msg.result:
             status = self._extract_status_from_result(msg.result)
@@ -364,32 +363,32 @@ class TraceProcessor:
                 status_upper = status.upper()
                 if status_upper in ("FAILED", "PARTIAL"):
                     return status_upper
-        
+
         return "COMPLETE"
-    
+
     def _extract_status_from_result(self, result: str) -> Optional[str]:
         """
         Extract status field from result if it contains JSON.
-        
+
         Looks for patterns like status: FAILED in the result text,
         which may appear when the agent writes output.yaml.
-        
+
         Args:
             result: The result text from the agent.
-        
+
         Returns:
             The status value if found, None otherwise.
         """
         if not result:
             return None
-        
+
         # Try to find JSON with status field in the result
         # Pattern: "status": "VALUE" (case insensitive)
         status_pattern = r'"status"\s*:\s*"([^"]+)"'
         match = re.search(status_pattern, result, re.IGNORECASE)
         if match:
             return match.group(1)
-        
+
         # Try parsing as JSON if it looks like JSON
         result_stripped = result.strip()
         if result_stripped.startswith('{') and result_stripped.endswith('}'):
@@ -399,36 +398,36 @@ class TraceProcessor:
                     return str(data["status"])
             except json.JSONDecodeError:
                 pass
-        
+
         return None
-    
+
     def _track_output_status(self, tool_name: str, tool_input: Any) -> None:
         """
         Track status from Write tool calls to output.yaml.
-        
+
         When the agent writes to output.yaml, extract the status
         from the content to determine final success/failure.
-        
+
         Args:
             tool_name: Name of the tool being called.
             tool_input: Input parameters for the tool.
         """
         if tool_name != "Write":
             return
-        
+
         if not isinstance(tool_input, dict):
             return
-        
+
         # Check if writing to output.yaml
         file_path = tool_input.get("file_path", "")
         if not file_path.endswith("output.yaml"):
             return
-        
+
         # Extract status from content
         content = tool_input.get("content", "")
         if not content:
             return
-        
+
         # Try to parse the content as YAML
         try:
             data = yaml.safe_load(content)
@@ -440,17 +439,14 @@ class TraceProcessor:
             match = re.search(status_pattern, content, re.IGNORECASE)
             if match:
                 self._output_status = match.group(1).strip()
-    
+
     def _handle_stream_event(self, event: StreamEvent) -> None:
         """Handle low-level stream events."""
         # Stream events are typically progress updates
-        event_data = event.event
-        event_type = event_data.get("type", "unknown")
-        
-        # Could be extended to handle specific streaming events
         # For now, we ignore most stream events as they're low-level
-        pass
-    
+        # Future: could be extended to handle specific streaming events
+        _ = event  # Acknowledge the parameter is intentionally unused
+
     def _handle_unknown_message(self, message: Any) -> None:
         """Handle unknown message types."""
         if hasattr(message, '__dict__'):
@@ -463,18 +459,18 @@ def create_trace_hooks(
 ) -> dict[str, list[HookMatcher]]:
     """
     Create SDK hook configuration for tracing.
-    
+
     This creates hook matchers that integrate with the SDK's
     native hook system for PreToolUse and PostToolUse events.
-    
+
     Args:
         tracer: The tracer to dispatch events to.
         trace_permissions: Also trace permission decisions.
-    
+
     Returns:
         Hook configuration dict for ClaudeAgentOptions.
     """
-    
+
     async def pre_tool_hook(
         hook_input: PreToolUseHookInput,
         transcript_path: Optional[str],
@@ -487,7 +483,7 @@ def create_trace_hooks(
             tool_id=hook_input.get("session_id", "hook")
         )
         return {}  # Allow execution to continue
-    
+
     async def post_tool_hook(
         hook_input: PostToolUseHookInput,
         transcript_path: Optional[str],
@@ -502,7 +498,7 @@ def create_trace_hooks(
             is_error="error" in str(hook_input.get("tool_response", "")).lower()
         )
         return {}
-    
+
     async def stop_hook(
         hook_input: StopHookInput,
         transcript_path: Optional[str],
@@ -513,7 +509,7 @@ def create_trace_hooks(
         if hasattr(tracer, 'on_system_event'):
             tracer.on_system_event("stop", {"active": hook_input["stop_hook_active"]})
         return {}
-    
+
     hooks: dict[str, list[HookMatcher]] = {
         "PreToolUse": [
             HookMatcher(
@@ -537,23 +533,23 @@ def create_trace_hooks(
             )
         ],
     }
-    
+
     return hooks
 
 
 def create_stderr_callback(tracer: TracerBase):
     """
     Create a stderr callback that traces CLI errors.
-    
+
     Args:
         tracer: The tracer to dispatch events to.
-    
+
     Returns:
         Callback for ClaudeAgentOptions.stderr.
     """
     def stderr_callback(text: str) -> None:
         if text.strip():
             tracer.on_error(text.strip(), error_type="stderr")
-    
+
     return stderr_callback
 

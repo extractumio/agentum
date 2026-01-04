@@ -19,6 +19,7 @@ from claude_agent_sdk import (
 )
 
 from .hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
+from .tool_utils import build_actionable_denial_message, build_tool_call_string
 from .permission_config import (
     AVAILABLE_TOOLS,
     DEFAULT_PERMISSION_CONFIG,
@@ -78,7 +79,7 @@ class PermissionDenialTracker:
     ) -> None:
         """
         Record a permission denial.
-        
+
         Args:
             tool_name: Name of the denied tool.
             tool_call: Full tool call string.
@@ -114,14 +115,14 @@ class PermissionDenialTracker:
         Returns:
             Dictionary suitable for writing to output.yaml.
         """
-        if not self.denials:
+        denial = self.last_denial
+        if denial is None:
             return {
                 "status": "FAILED",
                 "error": "Unknown error - agent interrupted",
                 "output": None,
             }
 
-        denial = self.last_denial
         if denial.is_security_violation:
             status = "FAILED"
             error = f"Security violation: {denial.message}"
@@ -412,95 +413,6 @@ def create_permission_callback(
     # Track denial counts per tool to enable smart interrupt
     denial_counts: dict[str, int] = {}
 
-    def build_tool_call_string(tool_name: str, tool_input: dict[str, Any]) -> str:
-        """
-        Build a tool call string for permission matching.
-
-        Examples:
-            Read(./input/task.md)
-            Write(./output.yaml)
-            Bash(ls -la)
-        """
-        if tool_name == "Read":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Read({path})"
-        elif tool_name == "Write":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Write({path})"
-        elif tool_name == "Edit":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"Edit({path})"
-        elif tool_name == "MultiEdit":
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-            return f"MultiEdit({path})"
-        elif tool_name == "Bash":
-            command = tool_input.get("command", "")
-            return f"Bash({command})"
-        elif tool_name == "Glob":
-            path = tool_input.get("path", tool_input.get("cwd", ""))
-            return f"Glob({path})"
-        elif tool_name == "Grep":
-            path = tool_input.get("path", tool_input.get("file", ""))
-            return f"Grep({path})"
-        elif tool_name == "WebFetch":
-            url = tool_input.get("url", "")
-            return f"WebFetch({url})"
-        elif tool_name == "WebSearch":
-            query = tool_input.get("query", "")
-            return f"WebSearch({query})"
-        elif tool_name == "LS":
-            path = tool_input.get("path", tool_input.get("dir", ""))
-            return f"LS({path})"
-        else:
-            return tool_name
-
-    def build_actionable_denial_message(
-        tool_name: str,
-        attempted_input: dict[str, Any],
-        is_final_denial: bool
-    ) -> str:
-        """
-        Build an actionable denial message that tells Claude what IS allowed.
-
-        Instead of just saying "denied", provides concrete guidance on
-        what patterns the agent CAN use for this tool.
-
-        Args:
-            tool_name: The tool that was denied.
-            attempted_input: The input that was attempted.
-            is_final_denial: If True, this is the last chance before interrupt.
-
-        Returns:
-            Actionable message with allowed patterns.
-        """
-        # Get allowed patterns for this tool from the permission manager
-        allowed_patterns: list[str] = []
-        if hasattr(permission_manager, 'get_allowed_patterns_for_tool'):
-            allowed_patterns = permission_manager.get_allowed_patterns_for_tool(tool_name)
-
-        # Build the base denial message
-        if tool_name == "Bash":
-            command = attempted_input.get("command", "")
-            base_msg = f"Bash command '{command[:50]}...' is not permitted."
-        else:
-            path = attempted_input.get("file_path", attempted_input.get("path", ""))
-            base_msg = f"{tool_name} for '{path[:50]}' is not permitted."
-
-        # Add guidance about what IS allowed
-        if allowed_patterns:
-            patterns_str = ", ".join(f"'{p}'" for p in allowed_patterns[:5])
-            guidance = f" Allowed patterns for {tool_name}: {patterns_str}."
-        else:
-            guidance = f" No {tool_name} operations are allowed in this security context."
-
-        # Add interrupt warning if this is final denial
-        if is_final_denial:
-            warning = " FINAL WARNING: Agent will be stopped if this tool is denied again."
-        else:
-            warning = ""
-
-        return base_msg + guidance + warning
-
     async def can_use_tool(
         tool_name: str,
         tool_input: dict[str, Any],
@@ -577,8 +489,9 @@ def create_permission_callback(
         # Build actionable denial message
         denial_msg = build_actionable_denial_message(
             tool_name=tool_name,
-            attempted_input=tool_input,
-            is_final_denial=is_penultimate
+            tool_input=tool_input,
+            is_final_denial=is_penultimate,
+            permission_manager=permission_manager,
         )
 
         logger.info(
@@ -619,21 +532,21 @@ def create_permission_hooks(
 ) -> dict:
     """
     Create SDK hooks configuration for permission management.
-    
+
     This is the preferred way to integrate permissions with the new hooks system.
     Returns a hooks config dict that can be passed to ClaudeAgentOptions.
-    
+
     Args:
         permission_manager: Permission manager instance with is_allowed() method.
         on_permission_check: Optional callback for tracing permission decisions.
         denial_tracker: Optional tracker to record denials.
         trace_processor: Optional trace processor for status updates.
-    
+
     Returns:
         Dictionary for ClaudeAgentOptions.hooks parameter.
     """
     manager = HooksManager()
-    
+
     # Add permission checking hook
     permission_hook = create_permission_hook(
         permission_manager=permission_manager,
@@ -642,11 +555,11 @@ def create_permission_hooks(
         trace_processor=trace_processor,
     )
     manager.add_pre_tool_hook(permission_hook)
-    
+
     # Add dangerous command blocking hook for Bash
     dangerous_hook = create_dangerous_command_hook()
     manager.add_pre_tool_hook(dangerous_hook, matcher="Bash")
-    
+
     return manager.build_hooks_config()
 
 

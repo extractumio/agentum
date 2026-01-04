@@ -6,7 +6,7 @@ CLI (agent_cli.py) and HTTP client (agent_http.py) entry points.
 
 Usage:
     from .cli_common import add_common_arguments, add_task_arguments
-    
+
     parser = argparse.ArgumentParser()
     add_task_arguments(parser)
     add_common_arguments(parser)
@@ -24,9 +24,9 @@ from .constants import DEFAULT_POLL_INTERVAL
 def add_task_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add task specification arguments to parser.
-    
+
     These are mutually exclusive: --task or --task-file.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -46,7 +46,7 @@ def add_task_arguments(parser: argparse.ArgumentParser) -> None:
 def add_directory_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add working directory arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -66,7 +66,7 @@ def add_directory_arguments(parser: argparse.ArgumentParser) -> None:
 def add_session_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add session management arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -91,9 +91,9 @@ def add_session_arguments(parser: argparse.ArgumentParser) -> None:
 def add_config_override_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add agent configuration override arguments to parser.
-    
+
     These allow overriding values from agent.yaml via CLI.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -125,7 +125,7 @@ def add_config_override_arguments(parser: argparse.ArgumentParser) -> None:
 def add_permission_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add permission configuration arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -147,7 +147,7 @@ def add_permission_arguments(parser: argparse.ArgumentParser) -> None:
 def add_output_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add output-related arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -166,7 +166,7 @@ def add_output_arguments(parser: argparse.ArgumentParser) -> None:
 def add_logging_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add logging configuration arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -182,7 +182,7 @@ def add_logging_arguments(parser: argparse.ArgumentParser) -> None:
 def add_role_argument(parser: argparse.ArgumentParser) -> None:
     """
     Add role selection argument to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -201,7 +201,7 @@ def add_role_argument(parser: argparse.ArgumentParser) -> None:
 def add_http_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add HTTP client-specific arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -231,7 +231,7 @@ def add_http_arguments(parser: argparse.ArgumentParser) -> None:
 def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     """
     Add CLI-specific arguments to parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to.
     """
@@ -248,7 +248,7 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Path to secrets.yaml file (default: config/secrets.yaml)"
     )
-    
+
     # Universal configuration overrides
     parser.add_argument(
         "--set",
@@ -262,7 +262,7 @@ Can be repeated. Examples:
   --set agent.max_turns=50
   --set agent.permission_mode=acceptEdits"""
     )
-    
+
     # Legacy permissions config
     parser.add_argument(
         "--permissions-config", "-p",
@@ -270,7 +270,7 @@ Can be repeated. Examples:
         metavar="PATH",
         help="Path to legacy permissions.json configuration file"
     )
-    
+
     # Special commands
     parser.add_argument(
         "--show-tools",
@@ -312,11 +312,11 @@ def create_common_parser(
 ) -> argparse.ArgumentParser:
     """
     Create a parser with common formatting settings.
-    
+
     Args:
         description: Parser description.
         epilog: Parser epilog (examples).
-    
+
     Returns:
         Configured ArgumentParser.
     """
@@ -334,37 +334,37 @@ def create_common_parser(
 def parse_set_overrides(set_args: list[str]) -> dict[str, Any]:
     """
     Parse --set KEY=VALUE arguments into a dictionary of overrides.
-    
+
     Args:
         set_args: List of "key=value" strings from --set arguments.
-    
+
     Returns:
         Dictionary mapping keys to values. Nested keys use dot notation
         (e.g., "agent.model" becomes {"model": value}).
-    
+
     Raises:
         ValueError: If a --set argument is malformed.
     """
     overrides: dict[str, Any] = {}
-    
+
     for arg in set_args:
         if "=" not in arg:
             raise ValueError(
                 f"Invalid --set argument: '{arg}'\n"
                 f"Expected format: KEY=VALUE (e.g., agent.model=claude-sonnet-4-5)"
             )
-        
+
         key, value = arg.split("=", 1)
         key = key.strip()
         value_str = value.strip()
-        
+
         # Remove "agent." prefix if present (for consistency)
         if key.startswith("agent."):
             key = key[6:]
-        
+
         # Type conversion for known fields
         typed_value: Any = value_str
-        
+
         if key in ("max_turns", "timeout_seconds", "max_buffer_size"):
             try:
                 typed_value = int(value_str)

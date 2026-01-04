@@ -6,10 +6,10 @@ All modules should use these functions instead of configuring logging directly.
 
 Usage:
     from .logging_config import setup_file_logging, setup_dual_logging
-    
+
     # For CLI (file-only logging)
     setup_file_logging(log_level="INFO")
-    
+
     # For API (console + file logging)
     setup_dual_logging(log_level="DEBUG", loggers=["src.api", "uvicorn"])
 """
@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 def _get_log_level(log_level: str) -> int:
     """
     Convert log level string to logging constant.
-    
+
     Args:
         log_level: Log level name (DEBUG, INFO, WARNING, ERROR).
-    
+
     Returns:
         Logging level constant.
     """
@@ -55,18 +55,18 @@ def _create_rotating_file_handler(
 ) -> RotatingFileHandler:
     """
     Create a rotating file handler with standard configuration.
-    
+
     Args:
         log_file: Path to the log file.
         level: Logging level.
         max_bytes: Maximum file size before rotation.
         backup_count: Number of backup files to keep.
-    
+
     Returns:
         Configured RotatingFileHandler.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
     handler = RotatingFileHandler(
         filename=str(log_file),
         maxBytes=max_bytes,
@@ -81,11 +81,11 @@ def _create_rotating_file_handler(
 def _create_console_handler(level: int, colored: bool = False) -> logging.Handler:
     """
     Create a console (stdout) handler.
-    
+
     Args:
         level: Logging level.
         colored: Whether to use colored output (requires colorlog).
-    
+
     Returns:
         Configured StreamHandler.
     """
@@ -108,7 +108,7 @@ def _create_console_handler(level: int, colored: bool = False) -> logging.Handle
     else:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE))
-    
+
     handler.setLevel(level)
     return handler
 
@@ -122,10 +122,10 @@ def setup_file_logging(
 ) -> None:
     """
     Configure file-only logging (for CLI and HTTP client).
-    
+
     Replaces all handlers on the root logger with a single rotating file handler.
     This ensures clean log separation between different entry points.
-    
+
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR).
         log_file: Path to log file. If None, uses LOGS_DIR / log_name.
@@ -134,17 +134,17 @@ def setup_file_logging(
         backup_count: Number of backup files to keep.
     """
     level = _get_log_level(log_level)
-    
+
     if log_file is None:
         log_file = LOGS_DIR / log_name
-    
+
     file_handler = _create_rotating_file_handler(
         log_file=log_file,
         level=level,
         max_bytes=max_bytes,
         backup_count=backup_count,
     )
-    
+
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(level)
@@ -161,11 +161,11 @@ def setup_dual_logging(
 ) -> None:
     """
     Configure dual logging: colored console + rotating file.
-    
+
     For API/backend use where you want both console output for development
     and file logging for production. Configures specific loggers to prevent
     log bleeding from other components.
-    
+
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR).
         log_file: Path to log file. If None, uses LOGS_DIR / log_name.
@@ -175,10 +175,10 @@ def setup_dual_logging(
         backup_count: Number of backup files to keep.
     """
     level = _get_log_level(log_level)
-    
+
     if log_file is None:
         log_file = LOGS_DIR / log_name
-    
+
     file_handler = _create_rotating_file_handler(
         log_file=log_file,
         level=level,
@@ -186,7 +186,7 @@ def setup_dual_logging(
         backup_count=backup_count,
     )
     console_handler = _create_console_handler(level=level, colored=True)
-    
+
     if loggers is None:
         # Configure root logger
         root_logger = logging.getLogger()
@@ -208,9 +208,9 @@ def setup_dual_logging(
 def setup_cli_logging(log_level: str = "INFO") -> None:
     """
     Configure logging for CLI entry point (agent_cli.py).
-    
+
     Shorthand for setup_file_logging with CLI defaults.
-    
+
     Args:
         log_level: Logging level.
     """
@@ -220,9 +220,9 @@ def setup_cli_logging(log_level: str = "INFO") -> None:
 def setup_http_logging(log_level: str = "INFO") -> None:
     """
     Configure logging for HTTP client entry point (agent_http.py).
-    
+
     Shorthand for setup_file_logging with HTTP client defaults.
-    
+
     Args:
         log_level: Logging level.
     """
@@ -232,9 +232,9 @@ def setup_http_logging(log_level: str = "INFO") -> None:
 def setup_backend_logging(log_level: str = "INFO") -> None:
     """
     Configure logging for API backend (src/api/main.py).
-    
+
     Uses dual logging (console + file) for specific backend loggers.
-    
+
     Args:
         log_level: Logging level.
     """
@@ -247,7 +247,7 @@ def setup_backend_logging(log_level: str = "INFO") -> None:
         "uvicorn.access",
         "fastapi",
     ]
-    
+
     setup_dual_logging(
         log_level=log_level,
         log_name=LOG_FILE_BACKEND,

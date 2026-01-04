@@ -228,6 +228,32 @@ class SessionService:
         """
         return self._session_manager.parse_output(session_id)
 
+    def get_session_file(self, session_id: str, file_path: str) -> Path:
+        """
+        Resolve a workspace file path for a session.
+
+        Args:
+            session_id: The session ID.
+            file_path: Relative file path within the workspace.
+
+        Returns:
+            Path to the file within the session workspace.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If the path escapes the workspace.
+        """
+        workspace = self._session_manager.get_workspace_dir(session_id).resolve()
+        normalized = file_path.strip().lstrip('/')
+        if normalized.startswith('./'):
+            normalized = normalized[2:]
+        candidate = (workspace / normalized).resolve()
+        if not str(candidate).startswith(str(workspace)):
+            raise ValueError("Invalid file path")
+        if not candidate.exists():
+            raise FileNotFoundError("File not found")
+        return candidate
+
     def get_session_info(self, session_id: str) -> dict:
         """
         Get the file-based session info (session_info.json).

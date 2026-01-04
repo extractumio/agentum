@@ -52,6 +52,7 @@ type AgentTaskView = {
   outputTime?: string;
   toolCalls: ToolCallView[];
   outputParts: string[];
+  commentParts: string[];
   error?: string;
   files: string[];
 };
@@ -446,12 +447,18 @@ function AgentResponse({
   onToggle,
   toolExpanded,
   onToggleTool,
+  commentsExpanded,
+  onToggleComments,
+  onFileAction,
 }: {
   task: AgentTaskView;
   expanded: boolean;
   onToggle: () => void;
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
+  commentsExpanded: boolean;
+  onToggleComments: () => void;
+  onFileAction: (filePath: string, mode: 'view' | 'download') => void;
 }): JSX.Element {
   const status = STATUS_ICON[task.status];
 
@@ -496,20 +503,6 @@ function AgentResponse({
                 ))
               )}
             </div>
-            {task.files.length > 0 && (
-              <div className="agent-files">
-                <div className="agent-files-title">╭─ Files Created ─────────────────────</div>
-                {task.files.map((file) => (
-                  <div key={file} className="agent-file-row">
-                    <span className="agent-file-marker">│</span>
-                    <span className="agent-file-icon">📄</span>
-                    <span className="agent-file-name">{file}</span>
-                    <span className="agent-file-copy">[copy]</span>
-                  </div>
-                ))}
-                <div className="agent-files-title">╰─────────────────────────────────────</div>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -528,6 +521,38 @@ function AgentResponse({
               ))
             : 'No output yet.'}
         </div>
+        {task.commentParts.length > 0 && (
+          <div className="output-comments">
+            <button className="comment-toggle" type="button" onClick={onToggleComments}>
+              {commentsExpanded ? '▼' : '▶'} comments
+            </button>
+            {commentsExpanded && (
+              <div className="comment-body md-container">
+                {task.commentParts.map((part, index) => (
+                  <div key={`${task.id}-comment-${index}`} className="output-part">
+                    {renderMarkdown(part)}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {task.files.length > 0 && (
+          <div className="output-files">
+            <div className="output-files-title">Result Files</div>
+            {task.files.map((file) => (
+              <div key={file} className="output-file-row">
+                <span className="output-file-name">{file}</span>
+                <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'view')}>
+                  view
+                </button>
+                <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'download')}>
+                  download
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {task.error && <div className="output-error">{task.error}</div>}
       </div>
     </div>
@@ -648,6 +673,7 @@ export default function App(): JSX.Element {
   const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -879,17 +905,17 @@ export default function App(): JSX.Element {
     setError(null);
     setStatus('running');
     activeTurnRef.current = 0;
-
-    appendEvent({
+    const userEvent: TerminalEvent = {
       type: 'user_message',
       data: { text: taskText },
       timestamp: new Date().toISOString(),
       sequence: Date.now(),
-    });
+    };
 
     const shouldContinue = currentSession && currentSession.status !== 'running';
 
     if (shouldContinue) {
+      appendEvent(userEvent);
       try {
         const response = await continueTask(
           config.api.base_url,
@@ -912,9 +938,10 @@ export default function App(): JSX.Element {
         setError(`Failed to continue task: ${(err as Error).message}`);
       }
     } else {
-      setEvents([]);
+      setEvents([userEvent]);
       setExpandedTasks(new Set());
       setExpandedTools(new Set());
+      setExpandedComments(new Set());
       setStats({
         turns: 0,
         cost: 0,
@@ -1011,6 +1038,7 @@ export default function App(): JSX.Element {
     setStatus('idle');
     setExpandedTasks(new Set());
     setExpandedTools(new Set());
+    setExpandedComments(new Set());
     setStats({
       turns: 0,
       cost: 0,
@@ -1056,7 +1084,7 @@ export default function App(): JSX.Element {
           const model = String(event.data.model ?? 'unknown');
           currentTask = {
             id: `task-${event.sequence}`,
-            title: String(event.data.task ?? lastUserMessage ?? 'New task'),
+            title: 'Agent task',
             summary: 'Processing task and executing tools.',
             status: 'running',
             durationMs: 0,
@@ -1066,6 +1094,7 @@ export default function App(): JSX.Element {
             time: formatTimestamp(event.timestamp),
             toolCalls: [],
             outputParts: [],
+            commentParts: [],
             files: [],
           };
           items.push({ type: 'agent', id: currentTask.id, task: currentTask });
@@ -1144,7 +1173,7 @@ export default function App(): JSX.Element {
             currentTask.outputParts.push(output);
           }
           if (comments) {
-            currentTask.outputParts.push(comments);
+            currentTask.commentParts.push(comments);
           }
           if (errorText) {
             currentTask.error = errorText;
@@ -1225,16 +1254,30 @@ export default function App(): JSX.Element {
     });
   };
 
+  const toggleComments = (id: string) => {
+    setExpandedComments((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   const expandAllSections = () => {
     const allTaskIds = tasks.map((item) => item.id);
     const allToolIds = tasks.flatMap((item) => item.task.toolCalls.map((tool) => tool.id));
     setExpandedTasks(new Set(allTaskIds));
     setExpandedTools(new Set(allToolIds));
+    setExpandedComments(new Set(allTaskIds));
   };
 
   const collapseAllSections = () => {
     setExpandedTasks(new Set());
     setExpandedTools(new Set());
+    setExpandedComments(new Set());
   };
 
   const toggleAllSections = () => {
@@ -1306,6 +1349,44 @@ export default function App(): JSX.Element {
       </button>
     ));
   }, [sessions]);
+
+  const handleFileAction = async (filePath: string, mode: 'view' | 'download') => {
+    if (!config || !token || !currentSession) {
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${config.api.base_url}/api/v1/sessions/${currentSession.id}/files?path=${encodeURIComponent(filePath)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const filename = filePath.split('/').pop() || 'result-file';
+
+      if (mode === 'view') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+      }
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setError(`Failed to load file: ${(err as Error).message}`);
+    }
+  };
 
   return (
     <div className="terminal-app">
@@ -1389,6 +1470,9 @@ export default function App(): JSX.Element {
                   onToggle={() => toggleTask(item.id)}
                   toolExpanded={expandedTools}
                   onToggleTool={toggleTool}
+                  commentsExpanded={expandedComments.has(item.id)}
+                  onToggleComments={() => toggleComments(item.id)}
+                  onFileAction={handleFileAction}
                 />
               );
             })

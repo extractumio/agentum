@@ -500,6 +500,59 @@ body,
   color: var(--color-green);
 }
 
+.output-comments {
+  padding: 0 12px 12px;
+}
+
+.comment-toggle {
+  background: none;
+  border: none;
+  color: var(--color-dim);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.comment-body {
+  margin-top: 8px;
+  padding-left: 12px;
+  border-left: 2px solid var(--color-border);
+}
+
+.output-files {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.output-files-title {
+  font-size: 11px;
+  color: var(--color-green);
+}
+
+.output-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.output-file-name {
+  color: var(--color-text);
+}
+
+.output-file-action {
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
 .output-error {
   color: var(--color-red);
   padding: 0 12px 12px;

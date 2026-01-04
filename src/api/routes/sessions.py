@@ -15,6 +15,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -520,3 +521,45 @@ async def get_result(
         result_files=output.get("result_files", []),
         metrics=metrics,
     )
+
+
+# =============================================================================
+# GET /sessions/{id}/files - Download/view a session result file
+# =============================================================================
+
+@router.get("/{session_id}/files")
+async def get_session_file(
+    session_id: str,
+    path: str = Query(..., description="Relative path to a result file"),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    """
+    Fetch a file from a session workspace.
+    """
+    session = await session_service.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    try:
+        file_path = session_service.get_session_file(session_id, path)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File not found: {path}",
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file path",
+        )
+
+    return FileResponse(file_path, filename=file_path.name)

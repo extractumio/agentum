@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   cancelSession,
+  continueTask,
   fetchToken,
   getResult,
   getSession,
@@ -80,6 +81,118 @@ function formatCost(cost?: number | null): string {
   return `$${cost.toFixed(4)}`;
 }
 
+function renderMarkdown(text: string): JSX.Element[] {
+  const lines = text.split('\n');
+  const elements: JSX.Element[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let element: JSX.Element;
+
+    // Headers
+    if (line.startsWith('### ')) {
+      element = (
+        <div key={i} className="md-h3">
+          {renderInlineMarkdown(line.slice(4))}
+        </div>
+      );
+    } else if (line.startsWith('## ')) {
+      element = (
+        <div key={i} className="md-h2">
+          {renderInlineMarkdown(line.slice(3))}
+        </div>
+      );
+    } else if (line.startsWith('# ')) {
+      element = (
+        <div key={i} className="md-h1">
+          {renderInlineMarkdown(line.slice(2))}
+        </div>
+      );
+    }
+    // Horizontal rule
+    else if (/^[-—─]{3,}$/.test(line.trim())) {
+      element = <hr key={i} className="md-hr" />;
+    }
+    // List items
+    else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
+      const indent = line.length - line.trimStart().length;
+      element = (
+        <div key={i} className="md-li" style={{ marginLeft: indent * 4 }}>
+          • {renderInlineMarkdown(line.trimStart().slice(2))}
+        </div>
+      );
+    }
+    // Numbered list
+    else if (/^\s*\d+\.\s/.test(line)) {
+      const match = line.match(/^(\s*)(\d+)\.\s(.*)$/);
+      if (match) {
+        const [, spaces, num, content] = match;
+        element = (
+          <div key={i} className="md-li" style={{ marginLeft: (spaces?.length ?? 0) * 4 }}>
+            {num}. {renderInlineMarkdown(content)}
+          </div>
+        );
+      } else {
+        element = <div key={i}>{renderInlineMarkdown(line)}</div>;
+      }
+    }
+    // Empty line
+    else if (line.trim() === '') {
+      element = <div key={i} className="md-spacer" />;
+    }
+    // Regular paragraph
+    else {
+      element = <div key={i}>{renderInlineMarkdown(line)}</div>;
+    }
+
+    elements.push(element);
+  }
+
+  return elements;
+}
+
+function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
+  const result: (string | JSX.Element)[] = [];
+  let key = 0;
+
+  // Process inline markdown: bold, italic, code, links
+  const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Add text before match
+    if (match.index > lastIndex) {
+      result.push(text.slice(lastIndex, match.index));
+    }
+
+    const [fullMatch, , bold, italic, code, linkText, linkUrl] = match;
+
+    if (bold) {
+      result.push(<strong key={key++} className="md-bold">{bold}</strong>);
+    } else if (italic) {
+      result.push(<em key={key++} className="md-italic">{italic}</em>);
+    } else if (code) {
+      result.push(<code key={key++} className="md-code">{code}</code>);
+    } else if (linkText && linkUrl) {
+      result.push(
+        <a key={key++} href={linkUrl} className="md-link" target="_blank" rel="noopener noreferrer">
+          {linkText}
+        </a>
+      );
+    }
+
+    lastIndex = match.index + fullMatch.length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    result.push(text.slice(lastIndex));
+  }
+
+  return result.length > 0 ? result : [text];
+}
+
 function formatTokens(result?: ResultResponse | null): { input: number; output: number; total: number } {
   const usage = result?.metrics?.usage;
   if (!usage) {
@@ -148,6 +261,7 @@ export default function App(): JSX.Element {
   const [inputValue, setInputValue] = useState('');
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -160,6 +274,9 @@ export default function App(): JSX.Element {
   const outputRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const activeTurnRef = useRef(0);
+  const isFirstTaskRef = useRef(true);
+  const lastProfileRef = useRef<string | null>(null);
+  const [sessionHeaderShown, setSessionHeaderShown] = useState(false);
 
   const isRunning = status === 'running';
 
@@ -234,12 +351,10 @@ export default function App(): JSX.Element {
       let enriched = event;
 
       if (event.type === 'conversation_turn') {
+        // Track current turn within the task for tool association
         const turnNumber = Number(event.data.turn_number ?? 0);
         activeTurnRef.current = turnNumber;
-        setStats((prev) => ({
-          ...prev,
-          turns: turnNumber,
-        }));
+        // Turns are accumulated in agent_complete handler, not here
       }
 
       if (event.type === 'tool_start') {
@@ -252,14 +367,24 @@ export default function App(): JSX.Element {
         };
       }
 
+      // Skip duplicate profile_switch events
+      if (event.type === 'profile_switch') {
+        const profileName = String(event.data.profile_name ?? '');
+        if (profileName === lastProfileRef.current) {
+          return;
+        }
+        lastProfileRef.current = profileName;
+      }
+
       appendEvent(enriched);
 
       if (event.type === 'agent_start') {
         setStatus('running');
         setError(null);
-        const sessionId = String(event.data.session_id ?? '');
+        const eventSessionId = String(event.data.session_id ?? '');
         setCurrentSession((prev) => ({
-          id: sessionId || prev?.id || 'unknown',
+          // Preserve database session ID - don't overwrite with file-based session ID from event
+          id: prev?.id || eventSessionId || 'unknown',
           status: 'running',
           task: (event.data.task as string | undefined) ?? prev?.task,
           model: (event.data.model as string | undefined) ?? prev?.model,
@@ -276,6 +401,9 @@ export default function App(): JSX.Element {
           ...prev,
           model: String(event.data.model ?? prev.model ?? ''),
         }));
+        // Mark that we've seen the first task and shown the header
+        isFirstTaskRef.current = false;
+        setSessionHeaderShown(true);
       }
 
       if (event.type === 'agent_complete') {
@@ -286,23 +414,48 @@ export default function App(): JSX.Element {
           cache_creation_input_tokens?: number;
           cache_read_input_tokens?: number;
         } | undefined;
-        const tokensIn = usage
+        const newTokensIn = usage
           ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
-          : undefined;
+          : 0;
+        const newTokensOut = usage?.output_tokens ?? 0;
+
+        // Accumulate stats across tasks in the same session
         setStats((prev) => ({
           ...prev,
-          turns: Number(event.data.num_turns ?? prev.turns),
-          durationMs: Number(event.data.duration_ms ?? prev.durationMs),
-          cost: Number(event.data.total_cost_usd ?? prev.cost),
-          tokensIn: tokensIn ?? prev.tokensIn,
-          tokensOut: usage?.output_tokens ?? prev.tokensOut,
+          turns: prev.turns + Number(event.data.num_turns ?? 0),
+          durationMs: prev.durationMs + Number(event.data.duration_ms ?? 0),
+          cost: prev.cost + Number(event.data.total_cost_usd ?? 0),
+          tokensIn: prev.tokensIn + newTokensIn,
+          tokensOut: prev.tokensOut + newTokensOut,
         }));
         setStatus(normalizedStatus);
+
+        // Update currentSession status so continuation logic works correctly
+        setCurrentSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: normalizedStatus,
+                completed_at: new Date().toISOString(),
+                num_turns: prev.num_turns + Number(event.data.num_turns ?? 0),
+              }
+            : null
+        );
+
         refreshSessions();
       }
 
       if (event.type === 'cancelled') {
         setStatus('cancelled');
+        setCurrentSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: 'cancelled',
+                completed_at: new Date().toISOString(),
+              }
+            : null
+        );
         refreshSessions();
       }
 
@@ -335,8 +488,18 @@ export default function App(): JSX.Element {
         config.api.base_url,
         sessionId,
         token,
-        (event) => handleEvent(event),
-        (err) => setError(err.message)
+        (event) => {
+          setReconnecting(false);
+          handleEvent(event);
+        },
+        (err) => {
+          setReconnecting(false);
+          setError(err.message);
+        },
+        (attempt) => {
+          setReconnecting(true);
+          setError(`Connection lost. Reconnecting (attempt ${attempt})...`);
+        }
       );
     },
     [config, token, handleEvent]
@@ -347,42 +510,84 @@ export default function App(): JSX.Element {
       return;
     }
 
+    const taskText = inputValue.trim();
     setError(null);
     setStatus('running');
-    setEvents([]);
     activeTurnRef.current = 0;
-    setStats((prev) => ({
-      ...prev,
-      turns: 0,
-      cost: 0,
-      durationMs: 0,
-      tokensIn: 0,
-      tokensOut: 0,
-    }));
 
-    try {
-      const response = await runTask(config.api.base_url, token, inputValue.trim());
-      const sessionId = response.session_id;
-      setCurrentSession({
-        id: sessionId,
-        status: response.status,
-        task: inputValue.trim(),
-        model: null,
-        working_dir: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        completed_at: null,
-        num_turns: 0,
-        duration_ms: null,
-        total_cost_usd: null,
-        cancel_requested: false,
+    // Check if we should continue an existing session or create a new one
+    const shouldContinue = currentSession && currentSession.status !== 'running';
+
+    if (shouldContinue) {
+      // Continue existing session: keep events, accumulate stats
+      // Add a visual separator for the new task
+      appendEvent({
+        type: 'message',
+        data: { text: `━━━ Follow-up: ${taskText.slice(0, 60)}${taskText.length > 60 ? '...' : ''} ━━━` },
+        timestamp: new Date().toISOString(),
+        sequence: Date.now(),
       });
-      setInputValue('');
-      startSSE(sessionId);
-      refreshSessions();
-    } catch (err) {
-      setStatus('failed');
-      setError(`Failed to start task: ${(err as Error).message}`);
+
+      try {
+        const response = await continueTask(
+          config.api.base_url,
+          token,
+          currentSession.id,
+          taskText
+        );
+
+        setCurrentSession((prev) => ({
+          ...prev!,
+          status: response.status,
+          updated_at: new Date().toISOString(),
+        }));
+
+        setInputValue('');
+        startSSE(currentSession.id);
+        refreshSessions();
+      } catch (err) {
+        setStatus('failed');
+        setError(`Failed to continue task: ${(err as Error).message}`);
+      }
+    } else {
+      // New session: clear events and reset stats
+      setEvents([]);
+      isFirstTaskRef.current = true;
+      lastProfileRef.current = null;
+      setSessionHeaderShown(false);
+      setStats({
+        turns: 0,
+        cost: 0,
+        durationMs: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        model: '',
+      });
+
+      try {
+        const response = await runTask(config.api.base_url, token, taskText);
+        const sessionId = response.session_id;
+        setCurrentSession({
+          id: sessionId,
+          status: response.status,
+          task: taskText,
+          model: null,
+          working_dir: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          completed_at: null,
+          num_turns: 0,
+          duration_ms: null,
+          total_cost_usd: null,
+          cancel_requested: false,
+        });
+        setInputValue('');
+        startSSE(sessionId);
+        refreshSessions();
+      } catch (err) {
+        setStatus('failed');
+        setError(`Failed to start task: ${(err as Error).message}`);
+      }
     }
   };
 
@@ -413,7 +618,13 @@ export default function App(): JSX.Element {
         result = await getResult(config.api.base_url, token, sessionId);
       }
 
+      // Reset state for loaded session
+      setSessionHeaderShown(false);
+      lastProfileRef.current = null;
       setEvents(buildSyntheticEvents(session, result));
+      // Mark header as shown after building synthetic events
+      setSessionHeaderShown(true);
+
       if (result?.metrics) {
         const tokens = formatTokens(result);
         setStats({
@@ -443,6 +654,9 @@ export default function App(): JSX.Element {
     setCurrentSession(null);
     setEvents([]);
     setStatus('idle');
+    isFirstTaskRef.current = true;
+    lastProfileRef.current = null;
+    setSessionHeaderShown(false);
     setStats({
       turns: 0,
       cost: 0,
@@ -462,15 +676,28 @@ export default function App(): JSX.Element {
       case 'agent_start': {
         const sessionId = String(event.data.session_id ?? 'unknown');
         const model = String(event.data.model ?? 'unknown');
-        const lines = buildBox([
-          '★ AGENTUM | Self-Improving Agent',
-          `⚡ SESSION ${sessionId}`,
-          `• Model: ${model}`,
-        ]);
+
+        // For the first task, show full session box
+        // For follow-up tasks, show a minimal indicator
+        if (index === 0 || !sessionHeaderShown) {
+          const lines = buildBox([
+            '★ AGENTUM | Self-Improving Agent',
+            `⚡ SESSION ${sessionId}`,
+            `• Model: ${model}`,
+          ]);
+          return (
+            <pre key={`${event.sequence}-${index}`} className="terminal-box">
+              {lines.join('\n')}
+            </pre>
+          );
+        }
+
+        // Follow-up task: minimal indicator
         return (
-          <pre key={`${event.sequence}-${index}`} className="terminal-box">
-            {lines.join('\n')}
-          </pre>
+          <div key={`${event.sequence}-${index}`} className="terminal-line event-dim">
+            <span className="event-icon">▶</span>
+            <span>Task started (model: {model})</span>
+          </div>
         );
       }
       case 'tool_start': {
@@ -523,10 +750,21 @@ export default function App(): JSX.Element {
         );
       }
       case 'message': {
-        return (
+        const text = String(event.data.text ?? '');
+        const hasMarkdown = /[#*`\-\[]/.test(text) && text.includes('\n');
+        return hasMarkdown ? (
+          <div key={`${event.sequence}-${index}`} className="terminal-block event-message">
+            <div className="terminal-line">
+              <span className="event-icon">✦</span>
+            </div>
+            <div className="terminal-message-content md-container">
+              {renderMarkdown(text)}
+            </div>
+          </div>
+        ) : (
           <div key={`${event.sequence}-${index}`} className="terminal-line event-message">
             <span className="event-icon">✦</span>
-            <span>{String(event.data.text ?? '')}</span>
+            <span>{text}</span>
           </div>
         );
       }
@@ -548,7 +786,9 @@ export default function App(): JSX.Element {
         return (
           <div key={`${event.sequence}-${index}`} className="terminal-block">
             {output && (
-              <pre className="terminal-output-block">{output}</pre>
+              <div className="terminal-output-block md-container">
+                {renderMarkdown(output)}
+              </div>
             )}
             {comments && (
               <div className="terminal-line event-comment">{comments}</div>
@@ -596,7 +836,7 @@ export default function App(): JSX.Element {
         );
       }
     }
-  }, []);
+  }, [sessionHeaderShown]);
 
   const sessionItems = useMemo(() => {
     return sessions.map((session) => (
@@ -677,7 +917,7 @@ export default function App(): JSX.Element {
               )}
             </div>
           </div>
-          {error && <div className="terminal-error">{error}</div>}
+          {error && <div className={reconnecting ? "terminal-warning" : "terminal-error"}>{error}</div>}
         </div>
       </main>
 

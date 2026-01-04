@@ -89,3 +89,23 @@ export async function getResult(
 ): Promise<ResultResponse> {
   return apiRequest<ResultResponse>(baseUrl, `/api/v1/sessions/${sessionId}/result`, {}, token);
 }
+
+export async function continueTask(
+  baseUrl: string,
+  token: string,
+  sessionId: string,
+  task: string
+): Promise<TaskStartedResponse> {
+  return apiRequest<TaskStartedResponse>(
+    baseUrl,
+    `/api/v1/sessions/${sessionId}/task`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        task,
+        config: {},
+      }),
+    },
+    token
+  );
+}

@@ -256,4 +256,5 @@ if __name__ == "__main__":
         host=api_config["host"],
         port=api_config["port"],
         reload=True,
+        reload_excludes=["sessions/*", "logs/*", "data/*"],
     )

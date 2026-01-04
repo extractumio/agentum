@@ -325,6 +325,11 @@ body,
   color: var(--color-red);
 }
 
+.terminal-warning {
+  margin-top: 8px;
+  color: var(--color-yellow);
+}
+
 .terminal-status {
   display: flex;
   justify-content: space-between;
@@ -366,4 +371,79 @@ body,
 
 .status-metric {
   color: var(--color-text);
+}
+
+/* Markdown rendering styles */
+.md-container {
+  line-height: 1.6;
+}
+
+.md-h1 {
+  font-size: 1.3em;
+  font-weight: bold;
+  color: var(--color-cyan);
+  margin: 12px 0 8px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 4px;
+}
+
+.md-h2 {
+  font-size: 1.15em;
+  font-weight: bold;
+  color: var(--color-cyan);
+  margin: 10px 0 6px;
+}
+
+.md-h3 {
+  font-size: 1.05em;
+  font-weight: bold;
+  color: var(--color-text);
+  margin: 8px 0 4px;
+}
+
+.md-hr {
+  border: none;
+  border-top: 1px solid #444;
+  margin: 12px 0;
+}
+
+.md-li {
+  padding-left: 8px;
+}
+
+.md-spacer {
+  height: 8px;
+}
+
+.md-bold {
+  font-weight: bold;
+  color: var(--color-yellow);
+}
+
+.md-italic {
+  font-style: italic;
+  color: var(--color-dim);
+}
+
+.md-code {
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 0.9em;
+  color: var(--color-magenta);
+}
+
+.md-link {
+  color: var(--color-cyan);
+  text-decoration: underline;
+}
+
+.md-link:hover {
+  color: var(--color-green);
+}
+
+.terminal-message-content {
+  margin-left: 24px;
+  margin-top: 4px;
 }

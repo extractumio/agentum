@@ -34,14 +34,12 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import (
-    LOGS_DIR,
     SESSIONS_DIR,
     AgentConfigLoader,
     ConfigNotFoundError,
     ConfigValidationError,
     get_config_loader,
 )
-from .agent_core import ClaudeAgent
 from .cli_common import (
     add_cli_arguments,
     add_config_override_arguments,
@@ -64,7 +62,6 @@ from .permission_config import (
     create_default_permissions_file,
 )
 from .permission_profiles import (
-    PermissionManager,
     ProfileNotFoundError,
     validate_profile_file,
 )
@@ -72,9 +69,11 @@ from .permissions import (
     create_default_settings,
     load_permissions_from_config,
 )
-from .schemas import AgentConfig, TaskStatus
+from .schemas import TaskExecutionParams, TaskStatus
 from .sessions import SessionManager
+from .task_runner import execute_agent_task
 from .tasks import load_task
+from .tracer import ExecutionTracer
 
 # Configure basic logging (will be reconfigured by setup_cli_logging)
 logging.basicConfig(level=logging.INFO)
@@ -248,7 +247,7 @@ def show_permissions(permissions_config: Optional[str] = None) -> None:
 
 async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoader) -> int:
     """
-    Execute the agent task.
+    Execute the agent task using the unified task runner.
 
     Args:
         args: Parsed command-line arguments.
@@ -272,73 +271,32 @@ async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoade
         return 1
 
     logger.info(f"Task: {task[:LOG_PREVIEW_LENGTH]}{'...' if len(task) > LOG_PREVIEW_LENGTH else ''}")
-    logger.info(f"Working directory: {working_dir}")
 
-    # Load permission profile (required)
-    profile_path = Path(args.profile) if args.profile else None
-    permission_manager = PermissionManager(profile_path=profile_path)
+    # Handle --no-skills flag
+    enable_skills = False if args.no_skills else None  # None = use config default
 
-    if args.profile:
-        logger.info(f"Using profile: {args.profile}")
-
-    # Get allowed tools from profile
-    profile = permission_manager.profile
-    profile_tools = profile.tools
-    allowed_tools = list(set(profile_tools.enabled) - set(profile_tools.disabled))
-
-    # Get auto_checkpoint_tools from profile (with fallback)
-    if profile.checkpointing:
-        auto_checkpoint_tools = profile.checkpointing.auto_checkpoint_tools
-    else:
-        auto_checkpoint_tools = ["Write", "Edit"]  # Reasonable default
-
-    logger.info(f"Allowed tools: {', '.join(allowed_tools)}")
-    logger.info(f"Auto checkpoint tools: {', '.join(auto_checkpoint_tools)}")
-
-    # Get configuration from loader (already has CLI overrides applied)
-    yaml_config = config_loader.get_config()
-
-    # Determine enable_skills: CLI --no-skills takes precedence
-    enable_skills = yaml_config["enable_skills"]
-    if args.no_skills:
-        enable_skills = False
-
-    # Build configuration from loaded YAML + permission profiles
-    config = AgentConfig(
-        model=yaml_config["model"],
-        max_turns=yaml_config["max_turns"],
-        timeout_seconds=yaml_config["timeout_seconds"],
-        enable_skills=enable_skills,
-        enable_file_checkpointing=yaml_config["enable_file_checkpointing"],
-        permission_mode=yaml_config["permission_mode"],
-        role=yaml_config["role"],
-        auto_checkpoint_tools=auto_checkpoint_tools,
-        working_dir=str(working_dir),
+    # Build TaskExecutionParams from CLI args
+    params = TaskExecutionParams(
+        task=task,
+        working_dir=working_dir,
+        resume_session_id=args.resume,
+        fork_session=args.fork_session,
+        # Config overrides (already applied to config_loader, but pass explicitly for clarity)
+        model=args.model,
+        max_turns=args.max_turns,
+        timeout_seconds=args.timeout,
+        profile_path=Path(args.profile) if args.profile else None,
         additional_dirs=args.add_dir,
-        allowed_tools=allowed_tools,
-        permissions_config=args.permissions_config,
-        max_buffer_size=yaml_config.get("max_buffer_size"),
-        output_format=yaml_config.get("output_format"),
-        include_partial_messages=yaml_config.get("include_partial_messages", False),
-    )
-
-    # Create and run agent with permission enforcement
-    agent = ClaudeAgent(
-        config=config,
-        sessions_dir=SESSIONS_DIR,
-        logs_dir=LOGS_DIR,
-        permission_manager=permission_manager,
+        enable_skills=enable_skills,
+        # CLI uses ExecutionTracer for rich interactive output
+        tracer=ExecutionTracer(verbose=True),
     )
 
     try:
-        # Execute task and exit
-        result = await agent.run_with_timeout(
-            task=task,
-            resume_session_id=args.resume,
-            fork_session=args.fork_session,
-        )
+        # Execute task using unified task runner
+        result = await execute_agent_task(params, config_loader=config_loader)
 
-        # Output results
+        # Output results (CLI-specific formatting)
         if args.json:
             output = result.model_dump_json(indent=2)
         else:

@@ -239,53 +239,37 @@ class TestAgentRunnerIntegration:
         """Test full execution flow with mocked agent."""
         runner = AgentRunner()
 
-        # Mock the ClaudeAgent to avoid real API calls
-        with patch("src.services.agent_runner.ClaudeAgent") as MockAgent:
-            # Setup mock agent
-            mock_instance = MagicMock()
-            mock_result = MagicMock()
-            mock_result.status.value = "COMPLETE"
-            mock_result.output = "Test output"
-            mock_result.error = None
-            mock_result.comments = None
-            mock_result.result_files = []
-            mock_result.metrics = MagicMock()
-            mock_result.metrics.model_dump.return_value = {"num_turns": 2}
-            mock_result.metrics.model = "claude-haiku-4-5-20251001"
-            mock_result.metrics.num_turns = 2
-            mock_result.metrics.duration_ms = 1000
-            mock_result.metrics.total_cost_usd = 0.01
+        # Mock execute_agent_task (the unified task runner)
+        mock_result = MagicMock()
+        mock_result.status.value = "COMPLETE"
+        mock_result.output = "Test output"
+        mock_result.error = None
+        mock_result.comments = None
+        mock_result.result_files = []
+        mock_result.metrics = MagicMock()
+        mock_result.metrics.model_dump.return_value = {"num_turns": 2}
+        mock_result.metrics.model = "claude-haiku-4-5-20251001"
+        mock_result.metrics.num_turns = 2
+        mock_result.metrics.duration_ms = 1000
+        mock_result.metrics.total_cost_usd = 0.01
 
-            mock_instance.run = AsyncMock(return_value=mock_result)
-            MockAgent.return_value = mock_instance
+        with patch(
+            "src.services.agent_runner.execute_agent_task",
+            new_callable=AsyncMock,
+            return_value=mock_result
+        ):
+            with patch.object(runner, '_update_session_status', new_callable=AsyncMock):
+                # Start the task using TaskParams
+                params = make_task_params(
+                    session_id="integration-test",
+                    task="Test task"
+                )
+                await runner.start_task(params)
 
-            # Also mock the config loader and permission manager
-            with patch("src.services.agent_runner.AgentConfigLoader") as MockConfig:
-                mock_config = MagicMock()
-                mock_config.get_config.return_value = {
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_turns": 10,
-                    "timeout_seconds": 60,
-                    "enable_skills": False,
-                    "enable_file_checkpointing": False,
-                    "permission_mode": "default",
-                    "role": "default",
-                }
-                MockConfig.return_value = mock_config
+                # Wait for completion
+                await asyncio.sleep(0.5)
 
-                with patch("src.services.agent_runner.PermissionManager"):
-                    with patch.object(runner, '_update_session_status', new_callable=AsyncMock):
-                        # Start the task using TaskParams
-                        params = make_task_params(
-                            session_id="integration-test",
-                            task="Test task"
-                        )
-                        await runner.start_task(params)
-
-                        # Wait for completion
-                        await asyncio.sleep(0.5)
-
-                        # Check result was stored
-                        result = runner.get_result("integration-test")
-                        if result:
-                            assert result["status"] == "COMPLETE"
+                # Check result was stored
+                result = runner.get_result("integration-test")
+                if result:
+                    assert result["status"] == "COMPLETE"

@@ -3,13 +3,18 @@ Data models for Agentum.
 
 Contains Pydantic models for agent configuration, results, metrics, and checkpoints.
 """
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import json
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+if TYPE_CHECKING:
+    from .tracer import TracerBase
 
 
 class CheckpointType(StrEnum):
@@ -510,3 +515,47 @@ class AgentResult(BaseModel):
     result_files: list[str] = Field(default_factory=list)
     metrics: Optional[LLMMetrics] = None
     session_info: Optional[SessionInfo] = None
+
+
+@dataclass
+class TaskExecutionParams:
+    """
+    Unified parameters for agent task execution.
+
+    Used by both CLI and HTTP entry points to invoke execute_agent_task().
+    This provides a single interface for running agent tasks regardless of
+    the entry point, ensuring consistent behavior across CLI and API.
+
+    Attributes:
+        task: The task description/prompt for the agent.
+        working_dir: Working directory for the agent (defaults to cwd).
+        session_id: Pre-generated session ID (for HTTP, allows client to know ID upfront).
+        resume_session_id: Session ID to resume from.
+        fork_session: Whether to fork the resumed session instead of continuing it.
+        model: Model override (from agent.yaml if not specified).
+        max_turns: Max turns override.
+        timeout_seconds: Timeout override.
+        permission_mode: Permission mode override.
+        profile_path: Path to permission profile YAML.
+        additional_dirs: Additional directories the agent can access.
+        tracer: Tracer instance for execution output (CLI: ExecutionTracer, HTTP: BackendConsoleTracer).
+    """
+    task: str
+    working_dir: Optional[Path] = None
+    session_id: Optional[str] = None
+    resume_session_id: Optional[str] = None
+    fork_session: bool = False
+
+    # Config overrides (from agent.yaml if not specified)
+    model: Optional[str] = None
+    max_turns: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+    permission_mode: Optional[str] = None
+    profile_path: Optional[Path] = None
+    role: Optional[str] = None
+    additional_dirs: list[str] = field(default_factory=list)
+    enable_skills: Optional[bool] = None
+    enable_file_checkpointing: Optional[bool] = None
+
+    # Tracer (CLI: ExecutionTracer, HTTP: BackendConsoleTracer)
+    tracer: Optional[Any] = None  # Type: TracerBase (Any to avoid circular import)

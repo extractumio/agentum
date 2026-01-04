@@ -2,7 +2,7 @@
 Agent runner service for Agentum API.
 
 Manages background agent execution tasks with cancellation support.
-Follows the same execution flow as CLI (src/core/agent.py).
+Uses the unified task_runner for execution (shared with CLI).
 """
 import asyncio
 import logging
@@ -11,11 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from ..config import AgentConfigLoader, SESSIONS_DIR, LOGS_DIR
-from ..core.agent_core import ClaudeAgent
-from ..core.permission_profiles import PermissionManager
-from ..core.schemas import AgentConfig
-from ..core.tracer import NullTracer
+from ..config import AGENT_DIR
+from ..core.schemas import TaskExecutionParams
+from ..core.task_runner import execute_agent_task
+from ..core.tracer import BackendConsoleTracer
 from ..db.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -145,132 +144,45 @@ class AgentRunner:
 
     async def _run_agent(self, params: TaskParams) -> None:
         """
-        Run the agent in background.
+        Run the agent in background using the unified task runner.
 
-        Follows the same execution flow as CLI execute_task() in src/core/agent.py.
+        Uses execute_agent_task() for consistent behavior with CLI.
         """
         session_id = params.session_id
 
         try:
-            # Determine working directory (matching CLI: resolve to absolute)
-            # Unlike CLI which defaults to cwd, API defaults to AGENT_DIR for server context
+            # Determine working directory
             if params.working_dir:
-                resolved_working_dir = Path(params.working_dir).resolve()
+                working_dir = Path(params.working_dir).resolve()
             else:
                 # Use AGENT_DIR as sensible default for API (not server's cwd)
-                from ..config import AGENT_DIR
-                resolved_working_dir = AGENT_DIR
+                working_dir = AGENT_DIR
 
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
-            logger.info(f"Working directory: {resolved_working_dir}")
 
-            # Load configuration from agent.yaml
-            config_loader = AgentConfigLoader()
-            config_data = config_loader.get_config()
-
-            # Apply parameter overrides (matching CLI pattern)
-            # Use explicit None checks to allow falsy values (0, False) to be valid overrides
-            model = params.model or config_data["model"]
-            max_turns = (
-                params.max_turns if params.max_turns is not None
-                else config_data["max_turns"]
-            )
-            timeout_seconds = (
-                params.timeout_seconds if params.timeout_seconds is not None
-                else config_data["timeout_seconds"]
-            )
-            enable_skills = (
-                params.enable_skills if params.enable_skills is not None
-                else config_data["enable_skills"]
-            )
-            enable_file_checkpointing = (
-                params.enable_file_checkpointing if params.enable_file_checkpointing is not None
-                else config_data["enable_file_checkpointing"]
-            )
-            permission_mode = params.permission_mode or config_data["permission_mode"]
-            role = params.role or config_data["role"]
-            max_buffer_size = (
-                params.max_buffer_size if params.max_buffer_size is not None
-                else config_data.get("max_buffer_size")
-            )
-            output_format = params.output_format or config_data.get("output_format")
-            include_partial_messages = (
-                params.include_partial_messages if params.include_partial_messages is not None
-                else config_data.get("include_partial_messages", False)
-            )
-
-            logger.info(f"Config: model={model}, max_turns={max_turns}, timeout={timeout_seconds}s")
-
-            # Load permission manager from profile (matching CLI pattern)
-            profile_path = Path(params.profile) if params.profile else None
-            permission_manager = PermissionManager(profile_path=profile_path)
-
-            if params.profile:
-                logger.info(f"Using profile: {params.profile}")
-
-            # Get allowed tools from permission profile (matching CLI)
-            perm_profile = permission_manager.profile
-            profile_tools = perm_profile.tools
-            allowed_tools = list(set(profile_tools.enabled) - set(profile_tools.disabled))
-
-            # Get auto_checkpoint_tools from profile (with fallback)
-            if perm_profile.checkpointing:
-                auto_checkpoint_tools = perm_profile.checkpointing.auto_checkpoint_tools
-            else:
-                auto_checkpoint_tools = ["Write", "Edit"]  # Reasonable default
-
-            logger.info(f"Allowed tools: {', '.join(allowed_tools)}")
-            logger.info(f"Auto checkpoint tools: {', '.join(auto_checkpoint_tools)}")
-
-            # Build AgentConfig with explicit fields (matching CLI pattern exactly)
-            agent_config = AgentConfig(
-                model=model,
-                max_turns=max_turns,
-                timeout_seconds=timeout_seconds,
-                enable_skills=enable_skills,
-                enable_file_checkpointing=enable_file_checkpointing,
-                permission_mode=permission_mode,
-                role=role,
-                auto_checkpoint_tools=auto_checkpoint_tools,
-                working_dir=str(resolved_working_dir),
-                additional_dirs=params.additional_dirs,
-                allowed_tools=allowed_tools,
-                permissions_config=None,  # Not used in API mode
-                max_buffer_size=max_buffer_size,
-                output_format=output_format,
-                include_partial_messages=include_partial_messages,
-            )
-
-            # Use NullTracer for API execution (SSE will be added in Stage 2)
-            tracer = NullTracer()
-
-            logger.info(
-                f"Starting agent for session {session_id}: "
-                f"model={agent_config.model}, max_turns={agent_config.max_turns}"
-            )
-            if params.resume_session_id:
-                logger.info(
-                    f"Resuming from session: {params.resume_session_id} "
-                    f"(fork={params.fork_session})"
-                )
-
-            # Create and run agent (matching CLI pattern)
-            agent = ClaudeAgent(
-                config=agent_config,
-                sessions_dir=SESSIONS_DIR,
-                logs_dir=LOGS_DIR,
-                tracer=tracer,
-                permission_manager=permission_manager,
-            )
-
-            # Execute the agent
-            # Pass session_id to ensure the agent uses the same ID as the database
-            result = await agent.run(
+            # Build TaskExecutionParams from TaskParams
+            exec_params = TaskExecutionParams(
                 task=params.task,
+                working_dir=working_dir,
+                session_id=session_id,
                 resume_session_id=params.resume_session_id,
                 fork_session=params.fork_session,
-                session_id=session_id,  # Use the API's session ID
+                # Config overrides
+                model=params.model,
+                max_turns=params.max_turns,
+                timeout_seconds=params.timeout_seconds,
+                permission_mode=params.permission_mode,
+                role=params.role,
+                profile_path=Path(params.profile) if params.profile else None,
+                additional_dirs=params.additional_dirs or [],
+                enable_skills=params.enable_skills,
+                enable_file_checkpointing=params.enable_file_checkpointing,
+                # Backend uses BackendConsoleTracer for linear logging
+                tracer=BackendConsoleTracer(session_id=session_id),
             )
+
+            # Execute using unified task runner
+            result = await execute_agent_task(exec_params)
 
             # Store result
             self._results[session_id] = {
@@ -287,7 +199,7 @@ class AgentRunner:
             await self._update_session_status(
                 session_id=session_id,
                 status="completed",
-                model=metrics.model if metrics else model,
+                model=metrics.model if metrics else params.model,
                 num_turns=metrics.num_turns if metrics else None,
                 duration_ms=metrics.duration_ms if metrics else None,
                 total_cost_usd=metrics.total_cost_usd if metrics else None,

@@ -251,9 +251,17 @@ body,
 }
 
 .message-block {
-  border-left: 2px solid var(--color-cyan);
+  border-left: 2px solid var(--color-border);
   background: var(--color-user-bg);
   margin-bottom: 12px;
+}
+
+.user-message {
+  border-left-color: var(--color-cyan);
+}
+
+.agent-message {
+  border-left-color: var(--color-border);
 }
 
 .message-header {
@@ -267,13 +275,23 @@ body,
 }
 
 .message-icon {
-  color: var(--color-cyan);
+  color: var(--color-dim);
 }
 
 .message-sender {
-  color: var(--color-cyan);
+  color: var(--color-text-bright);
   font-weight: 700;
   letter-spacing: 0.3px;
+}
+
+.user-message .message-icon,
+.user-message .message-sender {
+  color: var(--color-cyan);
+}
+
+.output-block .message-icon,
+.output-block .message-sender {
+  color: var(--color-text-bright);
 }
 
 .message-time {
@@ -299,55 +317,8 @@ body,
   white-space: pre-wrap;
 }
 
-.agent-response {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 12px;
-}
-
-.agent-processing {
-  border-left-color: var(--color-green);
-  background: var(--color-agent-bg);
-}
-
-.agent-processing .message-icon,
-.agent-processing .message-sender {
-  color: var(--color-green);
-}
-
-.agent-task {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: var(--color-bg-light);
-  cursor: pointer;
-}
-
-.task-toggle {
+.agent-placeholder {
   color: var(--color-dim);
-  font-size: 12px;
-}
-
-.task-status {
-  font-weight: 700;
-}
-
-.task-title {
-  color: var(--color-text-bright);
-}
-
-.agent-details {
-  padding: 10px 12px 10px 20px;
-}
-
-.agent-summary {
-  color: var(--color-dim);
-  font-size: 12px;
-  margin-bottom: 10px;
-  padding-left: 8px;
-  border-left: 2px solid var(--color-border);
 }
 
 .tool-call-section {
@@ -357,7 +328,7 @@ body,
 .tool-call-title {
   color: var(--color-dim);
   font-size: 10px;
-  margin-bottom: 6px;
+  margin: 8px 0 6px;
 }
 
 .tool-call {
@@ -491,13 +462,24 @@ body,
 }
 
 .output-block {
-  border-left-color: var(--color-green);
+  border-left-color: var(--color-border);
   background: var(--color-user-bg);
 }
 
-.output-block .message-icon,
-.output-block .message-sender {
-  color: var(--color-green);
+.output-status-complete {
+  border-left-color: var(--color-green);
+}
+
+.output-status-partial {
+  border-left-color: var(--color-yellow);
+}
+
+.output-status-failed {
+  border-left-color: var(--color-red);
+}
+
+.output-status-running {
+  border-left-color: var(--color-cyan);
 }
 
 .output-comments {

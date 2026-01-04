@@ -21,9 +21,21 @@ type ConversationItem =
       content: string;
     }
   | {
-      type: 'agent';
+      type: 'agent_message';
       id: string;
-      task: AgentTaskView;
+      time: string;
+      content: string;
+      toolCalls: ToolCallView[];
+    }
+  | {
+      type: 'output';
+      id: string;
+      time: string;
+      outputParts: string[];
+      commentParts: string[];
+      files: string[];
+      status: 'complete' | 'partial' | 'failed' | 'running';
+      error?: string;
     };
 
 type ToolCallView = {
@@ -37,24 +49,6 @@ type ToolCallView = {
   thinking?: string;
   error?: string;
   suggestion?: string;
-};
-
-type AgentTaskView = {
-  id: string;
-  title: string;
-  summary: string;
-  status: 'running' | 'complete' | 'failed' | 'partial';
-  durationMs?: number;
-  turns?: number;
-  cost?: number;
-  model?: string;
-  time: string;
-  outputTime?: string;
-  toolCalls: ToolCallView[];
-  outputParts: string[];
-  commentParts: string[];
-  error?: string;
-  files: string[];
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -93,11 +87,11 @@ const TOOL_SYMBOL: Record<string, string> = {
   Think: '◇',
 };
 
-const STATUS_ICON: Record<AgentTaskView['status'], { symbol: string; className: string }> = {
-  complete: { symbol: '✓', className: 'status-complete' },
-  partial: { symbol: '◐', className: 'status-partial' },
-  failed: { symbol: '✗', className: 'status-failed' },
-  running: { symbol: '◌', className: 'status-running' },
+const OUTPUT_STATUS_CLASS: Record<string, string> = {
+  complete: 'output-status-complete',
+  partial: 'output-status-partial',
+  failed: 'output-status-failed',
+  running: 'output-status-running',
 };
 
 function normalizeStatus(value: string): string {
@@ -113,6 +107,9 @@ function normalizeStatus(value: string): string {
   }
   if (statusValue === 'running') {
     return 'running';
+  }
+  if (statusValue === 'partial') {
+    return 'partial';
   }
   return statusValue || 'idle';
 }
@@ -441,120 +438,120 @@ function ToolCallBlock({
   );
 }
 
-function AgentResponse({
-  task,
-  expanded,
-  onToggle,
+function AgentMessageBlock({
+  time,
+  content,
+  toolCalls,
   toolExpanded,
   onToggleTool,
-  commentsExpanded,
-  onToggleComments,
-  onFileAction,
 }: {
-  task: AgentTaskView;
-  expanded: boolean;
-  onToggle: () => void;
+  time: string;
+  content: string;
+  toolCalls: ToolCallView[];
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
+}): JSX.Element {
+  return (
+    <div className="message-block agent-message">
+      <div className="message-header">
+        <span className="message-icon">◆</span>
+        <span className="message-sender">AGENT</span>
+        <span className="message-time">@ {time}</span>
+      </div>
+      <div className="message-content md-container">
+        {content ? renderMarkdown(content) : <span className="agent-placeholder">…</span>}
+      </div>
+      <div className="tool-call-section">
+        <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+        {toolCalls.length === 0 ? (
+          <div className="tool-call-empty">No tool calls recorded.</div>
+        ) : (
+          toolCalls.map((tool, index) => (
+            <ToolCallBlock
+              key={tool.id}
+              tool={tool}
+              expanded={toolExpanded.has(tool.id)}
+              onToggle={() => onToggleTool(tool.id)}
+              isLast={index === toolCalls.length - 1}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OutputBlock({
+  time,
+  outputParts,
+  commentParts,
+  commentsExpanded,
+  onToggleComments,
+  files,
+  status,
+  error,
+  onFileAction,
+}: {
+  time: string;
+  outputParts: string[];
+  commentParts: string[];
   commentsExpanded: boolean;
   onToggleComments: () => void;
+  files: string[];
+  status: 'complete' | 'partial' | 'failed' | 'running';
+  error?: string;
   onFileAction: (filePath: string, mode: 'view' | 'download') => void;
 }): JSX.Element {
-  const status = STATUS_ICON[task.status];
+  const statusClass = OUTPUT_STATUS_CLASS[status] ?? '';
 
   return (
-    <div className="agent-response">
-      <div className="message-block agent-processing">
-        <div className="message-header">
-          <span className="message-icon">◆</span>
-          <span className="message-sender">AGENT</span>
-          <span className="message-divider">│</span>
-          <span className="message-meta">{task.model ?? 'unknown'}</span>
-          <span className="message-divider">│</span>
-          <span className="message-meta">⏱ {formatDuration(task.durationMs)}</span>
-          <span className="message-divider">│</span>
-          <span className="message-meta">↻ {task.turns ?? 0}</span>
-          <span className="message-divider">│</span>
-          <span className="message-meta">◈ {task.toolCalls.length}</span>
-          <span className="message-divider">│</span>
-          <span className="message-meta cost">{formatCost(task.cost)}</span>
-        </div>
-        <div className="agent-task" onClick={onToggle} role="button">
-          <span className="task-toggle">{expanded ? '▼' : '▶'}</span>
-          <span className={`task-status ${status.className}`}>[{status.symbol}]</span>
-          <span className="task-title">{task.title}</span>
-        </div>
-        {expanded && (
-          <div className="agent-details">
-            <div className="agent-summary">{task.summary}</div>
-            <div className="tool-call-section">
-              <div className="tool-call-title">─── Tool Calls ({task.toolCalls.length}) ───</div>
-              {task.toolCalls.length === 0 ? (
-                <div className="tool-call-empty">No tool calls recorded.</div>
-              ) : (
-                task.toolCalls.map((tool, index) => (
-                  <ToolCallBlock
-                    key={tool.id}
-                    tool={tool}
-                    expanded={toolExpanded.has(tool.id)}
-                    onToggle={() => onToggleTool(tool.id)}
-                    isLast={index === task.toolCalls.length - 1}
-                  />
-                ))
-              )}
-            </div>
-          </div>
-        )}
+    <div className={`message-block output-block ${statusClass}`}>
+      <div className="message-header">
+        <span className="message-icon">◆</span>
+        <span className="message-sender">OUTPUT</span>
+        <span className="message-time">@ {time}</span>
       </div>
-      <div className="message-block output-block">
-        <div className="message-header">
-          <span className="message-icon">◆</span>
-          <span className="message-sender">OUTPUT</span>
-          <span className="message-time">@ {task.outputTime ?? task.time}</span>
-        </div>
-        <div className="message-content md-container">
-          {task.outputParts.length > 0
-            ? task.outputParts.map((part, index) => (
-                <div key={`${task.id}-${index}`} className="output-part">
+      <div className="message-content md-container">
+        {outputParts.length > 0
+          ? outputParts.map((part, index) => (
+              <div key={`output-${index}`} className="output-part">
+                {renderMarkdown(part)}
+              </div>
+            ))
+          : 'No output yet.'}
+      </div>
+      {commentParts.length > 0 && (
+        <div className="output-comments">
+          <button className="comment-toggle" type="button" onClick={onToggleComments}>
+            {commentsExpanded ? '▼' : '▶'} comments
+          </button>
+          {commentsExpanded && (
+            <div className="comment-body md-container">
+              {commentParts.map((part, index) => (
+                <div key={`comment-${index}`} className="output-part">
                   {renderMarkdown(part)}
                 </div>
-              ))
-            : 'No output yet.'}
+              ))}
+            </div>
+          )}
         </div>
-        {task.commentParts.length > 0 && (
-          <div className="output-comments">
-            <button className="comment-toggle" type="button" onClick={onToggleComments}>
-              {commentsExpanded ? '▼' : '▶'} comments
-            </button>
-            {commentsExpanded && (
-              <div className="comment-body md-container">
-                {task.commentParts.map((part, index) => (
-                  <div key={`${task.id}-comment-${index}`} className="output-part">
-                    {renderMarkdown(part)}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        {task.files.length > 0 && (
-          <div className="output-files">
-            <div className="output-files-title">Result Files</div>
-            {task.files.map((file) => (
-              <div key={file} className="output-file-row">
-                <span className="output-file-name">{file}</span>
-                <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'view')}>
-                  view
-                </button>
-                <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'download')}>
-                  download
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        {task.error && <div className="output-error">{task.error}</div>}
-      </div>
+      )}
+      {files.length > 0 && (
+        <div className="output-files">
+          {files.map((file) => (
+            <div key={file} className="output-file-row">
+              <span className="output-file-name">{file}</span>
+              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'view')}>
+                view
+              </button>
+              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'download')}>
+                download
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <div className="output-error">{error}</div>}
     </div>
   );
 }
@@ -671,7 +668,6 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
-  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
@@ -939,7 +935,6 @@ export default function App(): JSX.Element {
       }
     } else {
       setEvents([userEvent]);
-      setExpandedTasks(new Set());
       setExpandedTools(new Set());
       setExpandedComments(new Set());
       setStats({
@@ -1036,7 +1031,6 @@ export default function App(): JSX.Element {
     setCurrentSession(null);
     setEvents([]);
     setStatus('idle');
-    setExpandedTasks(new Set());
     setExpandedTools(new Set());
     setExpandedComments(new Set());
     setStats({
@@ -1051,15 +1045,11 @@ export default function App(): JSX.Element {
 
   const conversation = useMemo<ConversationItem[]>(() => {
     const items: ConversationItem[] = [];
-    let currentTask: AgentTaskView | null = null;
-    let lastUserMessage = 'New task';
+    let pendingTools: ToolCallView[] = [];
 
     const findOpenTool = (toolName: string): ToolCallView | undefined => {
-      if (!currentTask) {
-        return undefined;
-      }
-      for (let i = currentTask.toolCalls.length - 1; i >= 0; i -= 1) {
-        const tool = currentTask.toolCalls[i];
+      for (let i = pendingTools.length - 1; i >= 0; i -= 1) {
+        const tool = pendingTools[i];
         if (tool.tool === toolName && tool.status === 'running') {
           return tool;
         }
@@ -1067,11 +1057,23 @@ export default function App(): JSX.Element {
       return undefined;
     };
 
+    const flushPendingTools = (timestamp?: string) => {
+      if (pendingTools.length > 0) {
+        items.push({
+          type: 'agent_message',
+          id: `agent-auto-${items.length}`,
+          time: formatTimestamp(timestamp),
+          content: '…',
+          toolCalls: pendingTools,
+        });
+        pendingTools = [];
+      }
+    };
+
     events.forEach((event) => {
       switch (event.type) {
         case 'user_message': {
           const content = String(event.data.text ?? '');
-          lastUserMessage = content || lastUserMessage;
           items.push({
             type: 'user',
             id: `user-${event.sequence}`,
@@ -1080,31 +1082,8 @@ export default function App(): JSX.Element {
           });
           break;
         }
-        case 'agent_start': {
-          const model = String(event.data.model ?? 'unknown');
-          currentTask = {
-            id: `task-${event.sequence}`,
-            title: 'Agent task',
-            summary: 'Processing task and executing tools.',
-            status: 'running',
-            durationMs: 0,
-            turns: 0,
-            cost: 0,
-            model,
-            time: formatTimestamp(event.timestamp),
-            toolCalls: [],
-            outputParts: [],
-            commentParts: [],
-            files: [],
-          };
-          items.push({ type: 'agent', id: currentTask.id, task: currentTask });
-          break;
-        }
         case 'thinking': {
-          if (!currentTask) {
-            break;
-          }
-          currentTask.toolCalls.push({
+          pendingTools.push({
             id: `think-${event.sequence}`,
             tool: 'Think',
             time: formatTimestamp(event.timestamp),
@@ -1114,11 +1093,8 @@ export default function App(): JSX.Element {
           break;
         }
         case 'tool_start': {
-          if (!currentTask) {
-            break;
-          }
           const toolName = String(event.data.tool_name ?? 'Tool');
-          currentTask.toolCalls.push({
+          pendingTools.push({
             id: `tool-${event.sequence}`,
             tool: toolName,
             time: formatTimestamp(event.timestamp),
@@ -1128,9 +1104,6 @@ export default function App(): JSX.Element {
           break;
         }
         case 'tool_complete': {
-          if (!currentTask) {
-            break;
-          }
           const toolName = String(event.data.tool_name ?? 'Tool');
           const durationMs = Number(event.data.duration_ms ?? 0);
           const isError = Boolean(event.data.is_error);
@@ -1149,18 +1122,20 @@ export default function App(): JSX.Element {
           break;
         }
         case 'message': {
-          if (!currentTask) {
-            break;
-          }
           const text = String(event.data.text ?? '').trim();
-          if (text) {
-            currentTask.outputParts.push(text);
-          }
+          items.push({
+            type: 'agent_message',
+            id: `agent-${event.sequence}`,
+            time: formatTimestamp(event.timestamp),
+            content: text,
+            toolCalls: pendingTools,
+          });
+          pendingTools = [];
           break;
         }
         case 'output_display': {
-          if (!currentTask) {
-            break;
+          if (pendingTools.length > 0) {
+            flushPendingTools(event.timestamp);
           }
           const output = String(event.data.output ?? '').trim();
           const comments = String(event.data.comments ?? '').trim();
@@ -1168,42 +1143,22 @@ export default function App(): JSX.Element {
           const files = Array.isArray(event.data.result_files)
             ? (event.data.result_files as string[])
             : [];
+          const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as
+            | 'complete'
+            | 'partial'
+            | 'failed'
+            | 'running';
 
-          if (output) {
-            currentTask.outputParts.push(output);
-          }
-          if (comments) {
-            currentTask.commentParts.push(comments);
-          }
-          if (errorText) {
-            currentTask.error = errorText;
-          }
-          currentTask.files = files;
-          currentTask.outputTime = formatTimestamp(event.timestamp);
-          break;
-        }
-        case 'agent_complete': {
-          if (!currentTask) {
-            break;
-          }
-          const statusValue = normalizeStatus(String(event.data.status ?? 'complete'));
-          currentTask.status = statusValue === 'cancelled' ? 'partial' : (statusValue as AgentTaskView['status']);
-          currentTask.durationMs = Number(event.data.duration_ms ?? 0);
-          currentTask.turns = Number(event.data.num_turns ?? 0);
-          currentTask.cost = Number(event.data.total_cost_usd ?? 0);
-          break;
-        }
-        case 'cancelled': {
-          if (currentTask) {
-            currentTask.status = 'partial';
-          }
-          break;
-        }
-        case 'error': {
-          if (currentTask) {
-            currentTask.status = 'failed';
-            currentTask.error = String(event.data.message ?? 'Unknown error');
-          }
+          items.push({
+            type: 'output',
+            id: `output-${event.sequence}`,
+            time: formatTimestamp(event.timestamp),
+            outputParts: output ? [output] : [],
+            commentParts: comments ? [comments] : [],
+            files,
+            status: statusValue,
+            error: errorText || undefined,
+          });
           break;
         }
         default:
@@ -1211,124 +1166,45 @@ export default function App(): JSX.Element {
       }
     });
 
+    if (pendingTools.length > 0) {
+      flushPendingTools();
+    }
+
     return items;
   }, [events]);
 
-  const tasks = useMemo(() => conversation.filter((item) => item.type === 'agent'), [conversation]);
-
-  useEffect(() => {
-    if (tasks.length === 0) {
-      return;
-    }
-    setExpandedTasks((prev) => {
-      if (prev.size > 0) {
-        return prev;
-      }
-      const next = new Set(prev);
-      next.add(tasks[0].id);
-      return next;
-    });
-  }, [tasks]);
-
-  const toggleTask = (id: string) => {
-    setExpandedTasks((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const toggleTool = (id: string) => {
-    setExpandedTools((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const toggleComments = (id: string) => {
-    setExpandedComments((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const expandAllSections = () => {
-    const allTaskIds = tasks.map((item) => item.id);
-    const allToolIds = tasks.flatMap((item) => item.task.toolCalls.map((tool) => tool.id));
-    setExpandedTasks(new Set(allTaskIds));
-    setExpandedTools(new Set(allToolIds));
-    setExpandedComments(new Set(allTaskIds));
-  };
-
-  const collapseAllSections = () => {
-    setExpandedTasks(new Set());
-    setExpandedTools(new Set());
-    setExpandedComments(new Set());
-  };
-
-  const toggleAllSections = () => {
-    const allTaskIds = tasks.map((item) => item.id);
-    if (expandedTasks.size === allTaskIds.length && allTaskIds.length > 0) {
-      collapseAllSections();
-    } else {
-      expandAllSections();
-    }
-  };
-
-  useEffect(() => {
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && isRunning) {
-        handleCancel();
-      }
-      if (event.key === '/' && event.ctrlKey) {
-        event.preventDefault();
-        toggleAllSections();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [handleCancel, isRunning, toggleAllSections]);
-
   const toolStats = useMemo(() => {
     const statsMap: Record<string, number> = {};
-    tasks.forEach((item) => {
-      item.task.toolCalls.forEach((tool) => {
-        const toolName = tool.tool;
-        statsMap[toolName] = (statsMap[toolName] ?? 0) + 1;
-      });
+    conversation.forEach((item) => {
+      if (item.type === 'agent_message') {
+        item.toolCalls.forEach((tool) => {
+          const toolName = tool.tool;
+          statsMap[toolName] = (statsMap[toolName] ?? 0) + 1;
+        });
+      }
     });
     return statsMap;
-  }, [tasks]);
+  }, [conversation]);
 
   const totalToolCalls = Object.values(toolStats).reduce((sum, count) => sum + count, 0);
 
   const headerStats = useMemo(() => {
     const counts = { complete: 0, partial: 0, failed: 0 };
-    tasks.forEach((item) => {
-      if (item.task.status === 'complete') {
-        counts.complete += 1;
-      } else if (item.task.status === 'partial') {
-        counts.partial += 1;
-      } else if (item.task.status === 'failed') {
-        counts.failed += 1;
+    conversation.forEach((item) => {
+      if (item.type === 'output') {
+        if (item.status === 'complete') {
+          counts.complete += 1;
+        } else if (item.status === 'partial') {
+          counts.partial += 1;
+        } else if (item.status === 'failed') {
+          counts.failed += 1;
+        }
       }
     });
     return counts;
-  }, [tasks]);
+  }, [conversation]);
+
+  const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
 
   const sessionDuration = formatDuration(stats.durationMs);
   const sessionIdLabel = currentSession?.id ?? 'new';
@@ -1388,6 +1264,66 @@ export default function App(): JSX.Element {
     }
   };
 
+  const toggleTool = (id: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleComments = (id: string) => {
+    setExpandedComments((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const expandAllSections = () => {
+    const allToolIds = conversation.flatMap((item) =>
+      item.type === 'agent_message' ? item.toolCalls.map((tool) => tool.id) : []
+    );
+    const allOutputIds = outputItems.map((item) => item.id);
+    setExpandedTools(new Set(allToolIds));
+    setExpandedComments(new Set(allOutputIds));
+  };
+
+  const collapseAllSections = () => {
+    setExpandedTools(new Set());
+    setExpandedComments(new Set());
+  };
+
+  const toggleAllSections = () => {
+    if (expandedTools.size > 0 || expandedComments.size > 0) {
+      collapseAllSections();
+    } else {
+      expandAllSections();
+    }
+  };
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && isRunning) {
+        handleCancel();
+      }
+      if (event.key === '/' && event.ctrlKey) {
+        event.preventDefault();
+        toggleAllSections();
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [handleCancel, isRunning, toggleAllSections]);
+
   return (
     <div className="terminal-app">
       <header className="terminal-header">
@@ -1411,7 +1347,7 @@ export default function App(): JSX.Element {
           </div>
         </div>
         <div className="header-stats">
-          <span>Tasks: <strong>{tasks.length}</strong></span>
+          <span>Messages: <strong>{conversation.length}</strong></span>
           <span>Duration: <strong>{sessionDuration}</strong></span>
           <span>Tools: <strong>{totalToolCalls}</strong></span>
           <span className="header-status">
@@ -1459,22 +1395,38 @@ export default function App(): JSX.Element {
                   />
                 );
               }
-              if (filter !== 'all' && item.task.status !== filter) {
-                return null;
+              if (item.type === 'agent_message') {
+                return (
+                  <AgentMessageBlock
+                    key={item.id}
+                    time={item.time}
+                    content={item.content}
+                    toolCalls={item.toolCalls}
+                    toolExpanded={expandedTools}
+                    onToggleTool={toggleTool}
+                  />
+                );
               }
-              return (
-                <AgentResponse
-                  key={item.id}
-                  task={item.task}
-                  expanded={expandedTasks.has(item.id)}
-                  onToggle={() => toggleTask(item.id)}
-                  toolExpanded={expandedTools}
-                  onToggleTool={toggleTool}
-                  commentsExpanded={expandedComments.has(item.id)}
-                  onToggleComments={() => toggleComments(item.id)}
-                  onFileAction={handleFileAction}
-                />
-              );
+              if (item.type === 'output') {
+                if (filter !== 'all' && item.status !== filter) {
+                  return null;
+                }
+                return (
+                  <OutputBlock
+                    key={item.id}
+                    time={item.time}
+                    outputParts={item.outputParts}
+                    commentParts={item.commentParts}
+                    commentsExpanded={expandedComments.has(item.id)}
+                    onToggleComments={() => toggleComments(item.id)}
+                    files={item.files}
+                    status={item.status}
+                    error={item.error}
+                    onFileAction={handleFileAction}
+                  />
+                );
+              }
+              return null;
             })
           )}
         </div>

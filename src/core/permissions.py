@@ -387,7 +387,8 @@ def create_permission_callback(
     on_permission_check: Optional[Any] = None,
     denial_tracker: Optional[PermissionDenialTracker] = None,
     trace_processor: Optional[Any] = None,
-    max_denials_before_interrupt: int = 3
+    max_denials_before_interrupt: int = 3,
+    system_message_builder: Optional[Any] = None,
 ):
     """
     Create a permission callback that enforces permission rules.
@@ -472,7 +473,12 @@ def create_permission_callback(
             on_permission_check(tool_name, decision)
 
         if allowed:
-            return PermissionResultAllow(behavior="allow")
+            allow_result = PermissionResultAllow(behavior="allow")
+            if system_message_builder is not None:
+                message = system_message_builder(tool_name, tool_input)
+                if message and hasattr(allow_result, "system_message"):
+                    allow_result.system_message = message
+            return allow_result
 
         # Denied - track denial count for smart interrupt
         denial_counts[tool_name] = denial_counts.get(tool_name, 0) + 1
@@ -515,11 +521,16 @@ def create_permission_callback(
             if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
                 trace_processor.set_permission_denied(True)
 
-        return PermissionResultDeny(
+        deny_result = PermissionResultDeny(
             behavior="deny",
             message=denial_msg,
             interrupt=should_interrupt
         )
+        if system_message_builder is not None:
+            message = system_message_builder(tool_name, tool_input)
+            if message and hasattr(deny_result, "system_message"):
+                deny_result.system_message = message
+        return deny_result
 
     return can_use_tool
 
@@ -528,7 +539,8 @@ def create_permission_hooks(
     permission_manager: Any,
     on_permission_check: Optional[Any] = None,
     denial_tracker: Optional[PermissionDenialTracker] = None,
-    trace_processor: Optional[Any] = None
+    trace_processor: Optional[Any] = None,
+    system_message_builder: Optional[Any] = None,
 ) -> dict:
     """
     Create SDK hooks configuration for permission management.
@@ -553,6 +565,7 @@ def create_permission_hooks(
         on_permission_check=on_permission_check,
         denial_tracker=denial_tracker,
         trace_processor=trace_processor,
+        system_message_builder=system_message_builder,
     )
     manager.add_pre_tool_hook(permission_hook)
 

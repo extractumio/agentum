@@ -74,6 +74,57 @@ session_workspace:
     - "{workspace}"
     - "{workspace}/skills"
 
+# Sandbox configuration (bubblewrap). Toggle for non-docker runs as needed.
+sandbox:
+  enabled: true
+  file_sandboxing: true
+  network_sandboxing: true
+  bwrap_path: "bwrap"
+  use_tmpfs_root: true
+  static_mounts:
+    skills:
+      source: "{agent_dir}/skills"
+      target: "/skills"
+      mode: ro
+    system_usr:
+      source: "/usr"
+      target: "/usr"
+      mode: ro
+    system_lib:
+      source: "/lib"
+      target: "/lib"
+      mode: ro
+    system_lib64:
+      source: "/lib64"
+      target: "/lib64"
+      mode: ro
+    system_bin:
+      source: "/bin"
+      target: "/bin"
+      mode: ro
+  session_mounts:
+    workspace:
+      source: "{workspace_dir}"
+      target: "/workspace"
+      mode: rw
+  dynamic_mounts: []
+  network:
+    enabled: false
+    allowed_domains: []
+    allow_localhost: false
+  environment:
+    home: "/workspace"
+    path: "/usr/bin:/bin"
+    clear_env: true
+  writable_paths:
+    - "/workspace"
+  readonly_paths:
+    - "/skills"
+    - "/usr"
+    - "/lib"
+    - "/lib64"
+    - "/bin"
+
 # File checkpointing configuration
 checkpointing:
   # Tools that trigger automatic checkpoint creation after execution

@@ -1,0 +1,42 @@
+services:
+  agentum-api:
+    image: agentum:${AGENTUM_IMAGE_TAG:-latest}
+    build: .
+    command: ["python", "-m", "src.api.main"]
+    environment:
+      AGENTUM_ROOT: "/"
+      PYTHONPATH: "/"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+      - ./logs:/logs
+      - ./src:/src
+      - ./sessions:/sessions
+      - ./prompts:/prompts:ro
+      - ./skills:/skills:ro
+      - ./tools:/tools:ro
+      - /var/run/agentum/mounts:/mounts:rshared
+    ports:
+      - "${AGENTUM_API_PORT:-40080}:40080"
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+
+  agentum-web:
+    image: agentum:${AGENTUM_IMAGE_TAG:-latest}
+    build: .
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
+    working_dir: /src/web_terminal_client
+    environment:
+      AGENTUM_ROOT: "/"
+      PYTHONPATH: "/"
+      AGENTUM_WEB_PORT: "50080"
+    volumes:
+      - ./config:/config
+      - ./logs:/logs
+      - ./src:/src
+    ports:
+      - "${AGENTUM_WEB_PORT:-50080}:50080"
+    depends_on:
+      - agentum-api

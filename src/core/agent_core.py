@@ -54,6 +54,7 @@ from .permissions import (
     PermissionDenialTracker,
 )
 from .permission_profiles import PermissionManager
+from .sandbox import SandboxConfig
 
 # Ensure tools directory is in sys.path for agentum imports
 import sys
@@ -284,6 +285,7 @@ class ClaudeAgent:
 
         # Track permission denials for proper output generation on interruption
         self._denial_tracker = PermissionDenialTracker()
+        self._sandbox_system_message: Optional[str] = None
 
         # Wire tracer to permission manager for profile notifications
         if self._permission_manager is not None:
@@ -478,26 +480,6 @@ class ClaudeAgent:
         logger.info(f"SANDBOX: allowed_tools (pre-approved)={allowed_tools}")
         logger.info(f"SANDBOX: disallowed_tools (blocked)={disallowed_tools}")
 
-        # Create permission callback using the permission manager
-        # Pass tracer's on_permission_check for tracing (if available)
-        # Pass denial tracker to record denials for output generation
-        # Pass trace_processor so permission denial shows FAILED status
-        on_permission_check = (
-            self._tracer.on_permission_check
-            if hasattr(self._tracer, 'on_permission_check')
-            else None
-        )
-        # Clear any previous denials before starting new run
-        self._denial_tracker.clear()
-        can_use_tool = create_permission_callback(
-            permission_manager=self._permission_manager,
-            on_permission_check=on_permission_check,
-            denial_tracker=self._denial_tracker,
-            trace_processor=trace_processor,
-        )
-
-        all_tools = available_tools
-
         # Build list of accessible directories from the active profile
         working_dir = Path(self._config.working_dir) if self._config.working_dir else AGENT_DIR
         profile_dirs = self._permission_manager.get_allowed_dirs()
@@ -517,6 +499,33 @@ class ClaudeAgent:
         workspace_dir = self._session_manager.get_workspace_dir(
             session_info.session_id
         )
+
+        sandbox_config = self._permission_manager.get_sandbox_config()
+        self._sandbox_system_message = self._format_sandbox_system_message(
+            sandbox_config=sandbox_config,
+            workspace_dir=workspace_dir,
+        )
+
+        # Create permission callback using the permission manager
+        # Pass tracer's on_permission_check for tracing (if available)
+        # Pass denial tracker to record denials for output generation
+        # Pass trace_processor so permission denial shows FAILED status
+        on_permission_check = (
+            self._tracer.on_permission_check
+            if hasattr(self._tracer, 'on_permission_check')
+            else None
+        )
+        # Clear any previous denials before starting new run
+        self._denial_tracker.clear()
+        can_use_tool = create_permission_callback(
+            permission_manager=self._permission_manager,
+            on_permission_check=on_permission_check,
+            denial_tracker=self._denial_tracker,
+            trace_processor=trace_processor,
+            system_message_builder=self._sandbox_system_message_builder,
+        )
+
+        all_tools = available_tools
 
         # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
         session_dir = self._session_manager.get_session_dir(session_info.session_id)
@@ -625,6 +634,49 @@ class ClaudeAgent:
             raise AgentError("User prompt is empty after rendering")
 
         return user_prompt
+
+    def _sandbox_system_message_builder(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> Optional[str]:
+        if not self._sandbox_system_message:
+            return None
+        if tool_name in {
+            "Bash",
+            "Read",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "Glob",
+            "Grep",
+            "LS",
+            "WebFetch",
+            "WebSearch",
+        }:
+            return self._sandbox_system_message
+        return None
+
+    def _format_sandbox_system_message(
+        self,
+        sandbox_config: Optional[SandboxConfig],
+        workspace_dir: Path,
+    ) -> Optional[str]:
+        if sandbox_config is None:
+            return None
+
+        writable_paths = sandbox_config.writable_paths or [str(workspace_dir)]
+        readonly_paths = sandbox_config.readonly_paths or []
+        network_mode = "enabled" if sandbox_config.network_sandboxing and sandbox_config.enabled else "disabled"
+        file_mode = "enabled" if sandbox_config.file_sandboxing and sandbox_config.enabled else "disabled"
+
+        return (
+            "Sandbox policy: "
+            f"file sandboxing {file_mode}, network sandboxing {network_mode}. "
+            f"Writable: {', '.join(writable_paths) or 'none'}. "
+            f"Read-only: {', '.join(readonly_paths) or 'none'}. "
+            "Do not access paths outside the allowed list or attempt to bypass sandboxing."
+        )
 
     def _validate_response(self, response: Optional[ResultMessage]) -> None:
         """
@@ -802,6 +854,20 @@ class ClaudeAgent:
                     "disabled_tools": active_profile.tools.disabled,
                     "allowed_dirs": allowed_dirs,
                 }
+                sandbox_config = self._permission_manager.get_sandbox_config()
+                if sandbox_config is not None:
+                    permissions_data["sandbox"] = {
+                        "enabled": sandbox_config.enabled,
+                        "file_sandboxing": sandbox_config.file_sandboxing,
+                        "network_sandboxing": sandbox_config.network_sandboxing,
+                        "writable_paths": sandbox_config.writable_paths,
+                        "readonly_paths": sandbox_config.readonly_paths,
+                        "network": {
+                            "enabled": sandbox_config.network.enabled,
+                            "allowed_domains": sandbox_config.network.allowed_domains,
+                            "allow_localhost": sandbox_config.network.allow_localhost,
+                        },
+                    }
 
             # Get workspace directory for template
             workspace_dir = self._session_manager.get_workspace_dir(

@@ -276,6 +276,7 @@ def create_permission_hook(
     denial_tracker: Optional[Any] = None,
     trace_processor: Optional[Any] = None,
     max_denials_before_interrupt: int = 3,
+    system_message_builder: Optional[Callable[[str, dict[str, Any]], Optional[str]]] = None,
 ) -> HookCallback:
     """
     Create a PreToolUse hook for permission checking.
@@ -343,9 +344,12 @@ def create_permission_hook(
             on_permission_check(tool_name, decision)
 
         if allowed:
-            return HookResult(
-                permission_decision="allow"
-            ).to_sdk_response("PreToolUse")
+            result = HookResult(permission_decision="allow")
+            if system_message_builder is not None:
+                message = system_message_builder(tool_name, tool_input)
+                if message:
+                    result.system_message = message
+            return result.to_sdk_response("PreToolUse")
 
         # Denied - track denial count for smart interrupt
         denial_counts[tool_name] = denial_counts.get(tool_name, 0) + 1
@@ -383,11 +387,16 @@ def create_permission_hook(
             if trace_processor and hasattr(trace_processor, "set_permission_denied"):
                 trace_processor.set_permission_denied(True)
 
-        return HookResult(
+        result = HookResult(
             permission_decision="deny",
             permission_reason=denial_msg,
             interrupt=should_interrupt,
-        ).to_sdk_response("PreToolUse")
+        )
+        if system_message_builder is not None:
+            message = system_message_builder(tool_name, tool_input)
+            if message:
+                result.system_message = message
+        return result.to_sdk_response("PreToolUse")
 
     return permission_hook
 

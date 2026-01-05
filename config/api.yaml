@@ -6,6 +6,7 @@ api:
   host: "0.0.0.0"
   port: 40080
   external_port: 40080
+  reload: false
 
   # CORS allowed origins
   # Add your frontend URL here

@@ -104,8 +104,11 @@ Example:
             for path in validated.result_files:
                 if not path.startswith("./"):
                     return {
-                        "success": False,
-                        "error": f"Invalid path in result_files: '{path}'. All paths must start with './'",
+                        "content": [{
+                            "type": "text",
+                            "text": f"Error: Invalid path in result_files: '{path}'. All paths must start with './'"
+                        }],
+                        "is_error": True
                     }
 
             # Write to output.yaml using OutputSchema's to_yaml method
@@ -124,21 +127,35 @@ Example:
                 f"(status={validated.status}, files={len(validated.result_files)})"
             )
 
+            # Return MCP-compatible content format
             return {
-                "success": True,
-                "message": f"Output written to output.yaml (status: {validated.status})",
-                "file_path": str(output_file),
+                "content": [{
+                    "type": "text",
+                    "text": f"Output written to output.yaml (status: {validated.status})"
+                }]
             }
 
         except ValidationError as e:
             error_msg = f"Validation error: {e}"
             logger.error(f"SystemWriteOutput: {error_msg}")
-            return {"success": False, "error": error_msg}
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: {error_msg}"
+                }],
+                "is_error": True
+            }
 
         except Exception as e:
             error_msg = f"Failed to write output: {e}"
             logger.error(f"SystemWriteOutput: {error_msg}")
-            return {"success": False, "error": error_msg}
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: {error_msg}"
+                }],
+                "is_error": True
+            }
 
     return write_output
 

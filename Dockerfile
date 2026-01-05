@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir -r /requirements.txt
 
 COPY . /
 
-RUN npm --prefix /src/web_terminal_client ci --no-fund --no-audit
+# Copy and make entrypoint executable
+COPY entrypoint-web.sh /entrypoint-web.sh
+RUN chmod +x /entrypoint-web.sh
 
 ENV AGENTUM_ROOT=/
 ENV PYTHONPATH=/

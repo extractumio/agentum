@@ -54,7 +54,7 @@ from .permissions import (
     PermissionDenialTracker,
 )
 from .permission_profiles import PermissionManager
-from .sandbox import SandboxConfig
+from .sandbox import SandboxConfig, SandboxExecutor
 
 # Ensure tools directory is in sys.path for agentum imports
 import sys
@@ -63,8 +63,9 @@ if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
 # Import system tools (path now guaranteed by above)
+# Note: agentum module is in tools/ directory, added to sys.path at runtime
 try:
-    from agentum.system_write_output import (
+    from agentum.system_write_output import (  # type: ignore[import-not-found]
         SYSTEM_TOOLS,
         create_agentum_mcp_server,
     )
@@ -306,32 +307,42 @@ class ClaudeAgent:
         """Get the execution tracer."""
         return self._tracer
 
-    def _copy_skills_to_workspace(self, session_id: str) -> None:
+    def _setup_workspace_skills(self, session_id: str) -> None:
         """
-        Copy all available skills to the session's workspace.
-
-        This enables skills to read/write files within their own folder
-        with full isolation between concurrent sessions.
-
+        Setup skills access in the session's workspace.
+        
+        Creates a relative symlink from ./skills in the workspace to the
+        agent's skills directory. This works for both:
+        1. Local execution: resolves to {agent_dir}/skills
+        2. Sandboxed execution: resolves to /skills (mounted as RO)
+        
         Args:
             session_id: The session ID for workspace access.
         """
         if not self._config.enable_skills:
             return
 
-        skill_names = self._skill_manager.list_skills()
-        if not skill_names:
-            logger.debug("No skills to copy to workspace")
-            return
-
-        for skill_name in skill_names:
+        workspace_dir = self._session_manager.get_workspace_dir(session_id)
+        skills_link = workspace_dir / "skills"
+        
+        # Remove existing if it's a symlink or empty directory
+        if skills_link.is_symlink() or (skills_link.exists() and not any(skills_link.iterdir())):
             try:
-                source_dir = self._skill_manager.get_skill_source_dir(skill_name)
-                self._session_manager.copy_skill_to_workspace(
-                    session_id, skill_name, source_dir
-                )
+                if skills_link.is_symlink():
+                    skills_link.unlink()
+                elif skills_link.is_dir():
+                    skills_link.rmdir()
             except Exception as e:
-                logger.warning(f"Failed to copy skill '{skill_name}' to workspace: {e}")
+                logger.warning(f"Failed to remove existing skills link/dir: {e}")
+                
+        # Create relative symlink: ../../../skills
+        # workspace is at sessions/<id>/workspace
+        if not skills_link.exists():
+            try:
+                skills_link.symlink_to("../../../skills")
+                logger.debug(f"Created skills symlink at {skills_link}")
+            except Exception as e:
+                logger.warning(f"Failed to create skills symlink: {e}")
 
     def _cleanup_session(self, session_id: str) -> None:
         """
@@ -506,10 +517,16 @@ class ClaudeAgent:
             workspace_dir=workspace_dir,
         )
 
+        # Build custom sandbox executor for bubblewrap isolation
+        # SDK's built-in sandbox doesn't work reliably in Docker environments,
+        # so we use our own bubblewrap wrapper via the permission callback
+        sandbox_executor = self._build_sandbox_executor(sandbox_config, workspace_dir)
+
         # Create permission callback using the permission manager
         # Pass tracer's on_permission_check for tracing (if available)
         # Pass denial tracker to record denials for output generation
         # Pass trace_processor so permission denial shows FAILED status
+        # Pass sandbox_executor to wrap Bash commands in bubblewrap
         on_permission_check = (
             self._tracer.on_permission_check
             if hasattr(self._tracer, 'on_permission_check')
@@ -523,6 +540,7 @@ class ClaudeAgent:
             denial_tracker=self._denial_tracker,
             trace_processor=trace_processor,
             system_message_builder=self._sandbox_system_message_builder,
+            sandbox_executor=sandbox_executor,
         )
 
         all_tools = available_tools
@@ -559,6 +577,7 @@ class ClaudeAgent:
             f"cwd={workspace_dir}, "
             f"CLAUDE_CONFIG_DIR={session_dir}, "
             f"mcp_servers={list(mcp_servers.keys())}, "
+            f"bwrap_sandbox={'ENABLED' if sandbox_executor else 'DISABLED'}, "
             f"resume={resume_id}, fork_session={fork_session}"
         )
 
@@ -573,7 +592,7 @@ class ClaudeAgent:
             cwd=str(workspace_dir),  # Sandboxed workspace, not session dir
             add_dirs=add_dirs,
             setting_sources=["project"] if self._config.enable_skills else [],
-            can_use_tool=can_use_tool,
+            can_use_tool=can_use_tool,  # Includes bwrap sandboxing for Bash
             env={"CLAUDE_CONFIG_DIR": str(session_dir)},  # Per-session storage
             resume=resume_id,  # Claude's session ID for resumption
             fork_session=fork_session,  # Fork instead of continue when resuming
@@ -634,6 +653,50 @@ class ClaudeAgent:
             raise AgentError("User prompt is empty after rendering")
 
         return user_prompt
+
+    def _build_sandbox_executor(
+        self,
+        sandbox_config: Optional[SandboxConfig],
+        workspace_dir: Path,
+    ) -> Optional[SandboxExecutor]:
+        """
+        Build a SandboxExecutor with resolved mounts for bubblewrap isolation.
+
+        This creates the executor that will wrap Bash commands in bubblewrap
+        to provide proper filesystem isolation within Docker containers.
+
+        Args:
+            sandbox_config: Sandbox configuration from permissions.yaml.
+            workspace_dir: Absolute path to the session workspace directory.
+
+        Returns:
+            SandboxExecutor if sandbox is enabled, None otherwise.
+        """
+        if sandbox_config is None or not sandbox_config.enabled:
+            logger.info("BWRAP SANDBOX: Disabled in config")
+            return None
+
+        if not sandbox_config.file_sandboxing:
+            logger.info("BWRAP SANDBOX: File sandboxing disabled")
+            return None
+
+        executor = SandboxExecutor(sandbox_config)
+
+        # Validate mount sources exist
+        missing = executor.validate_mount_sources()
+        if missing:
+            logger.warning(
+                f"BWRAP SANDBOX: Some mount sources don't exist: {missing}. "
+                "Sandbox may fail at runtime."
+            )
+
+        logger.info(
+            f"BWRAP SANDBOX: Enabled with {len(sandbox_config.static_mounts)} static mounts, "
+            f"{len(sandbox_config.session_mounts)} session mounts, "
+            f"workspace={workspace_dir}"
+        )
+
+        return executor
 
     def _sandbox_system_message_builder(
         self,
@@ -812,9 +875,9 @@ class ClaudeAgent:
                 workspace_absolute_path=workspace_absolute
             )
 
-        # Copy skills to workspace before execution
-        # This enables skills to read/write in their own isolated folder
-        self._copy_skills_to_workspace(session_info.session_id)
+        # Setup skills access in workspace
+        # This creates a symlink to enable ./skills access
+        self._setup_workspace_skills(session_info.session_id)
 
         # Load system prompt from template if not provided
         # Done after session creation so permissions reflect session-specific rules
@@ -1004,6 +1067,27 @@ class ClaudeAgent:
                     status="FAILED"
                 )
 
+                # Emit completion after output_display so the UI can close the stream
+                # deterministically and render the final output.
+                if result:
+                    self._tracer.on_agent_complete(
+                        status="FAILED",
+                        num_turns=result.num_turns,
+                        duration_ms=result.duration_ms,
+                        total_cost_usd=result.total_cost_usd,
+                        result=result.result,
+                        session_id=getattr(result, "session_id", None),
+                        usage=getattr(result, "usage", None),
+                        model=self._config.model,
+                        cumulative_cost_usd=session_info.cumulative_cost_usd,
+                        cumulative_turns=session_info.cumulative_turns,
+                        cumulative_tokens=(
+                            session_info.cumulative_usage.total_tokens
+                            if session_info.cumulative_usage is not None
+                            else None
+                        ),
+                    )
+
                 return AgentResult(
                     status=TaskStatus.FAILED,
                     output=output.get("output"),
@@ -1054,6 +1138,27 @@ class ClaudeAgent:
                 result_files=output.get("result_files", []),
                 status=raw_status
             )
+
+            # Emit completion after output_display so the UI can render final output
+            # before treating the stream as terminal.
+            if result:
+                self._tracer.on_agent_complete(
+                    status=raw_status,
+                    num_turns=result.num_turns,
+                    duration_ms=result.duration_ms,
+                    total_cost_usd=result.total_cost_usd,
+                    result=result.result,
+                    session_id=getattr(result, "session_id", None),
+                    usage=getattr(result, "usage", None),
+                    model=self._config.model,
+                    cumulative_cost_usd=session_info.cumulative_cost_usd,
+                    cumulative_turns=session_info.cumulative_turns,
+                    cumulative_tokens=(
+                        session_info.cumulative_usage.total_tokens
+                        if session_info.cumulative_usage is not None
+                        else None
+                    ),
+                )
 
             return AgentResult(
                 status=TaskStatus(raw_status),

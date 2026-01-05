@@ -224,6 +224,21 @@ class SessionManager:
             session_id: The session ID.
         """
         skills_dir = self.get_session_dir(session_id) / "workspace" / "skills"
+        
+        # Check if it's a symlink first (to avoid following it with rmtree)
+        if skills_dir.is_symlink():
+            try:
+                skills_dir.unlink()
+                logger.info(
+                    f"Removed workspace skills symlink for session {session_id}"
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Failed to remove skills symlink for session {session_id}: {e}"
+                )
+                return
+
         if skills_dir.exists():
             try:
                 shutil.rmtree(skills_dir)

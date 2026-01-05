@@ -494,8 +494,6 @@ class PermissionManager:
         logger.info(
             f"Built session-specific profile: {self._profile.name}"
         )
-        # Notify tracer about profile update
-        self._notify_profile_loaded()
 
     def clear_session_context(self) -> None:
         """

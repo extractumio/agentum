@@ -37,8 +37,9 @@ from .permission_config import (
 )
 
 # Import system tools check function (path configured in entry point agent.py)
+# Note: agentum module is in tools/ directory, added to sys.path at runtime
 try:
-    from agentum.system_write_output import is_system_tool
+    from agentum.system_write_output import is_system_tool  # type: ignore[import-not-found]
 except ImportError:
     # Fallback if tools not installed - no system tools available
     def is_system_tool(tool_name: str) -> bool:
@@ -389,6 +390,7 @@ def create_permission_callback(
     trace_processor: Optional[Any] = None,
     max_denials_before_interrupt: int = 3,
     system_message_builder: Optional[Any] = None,
+    sandbox_executor: Optional[Any] = None,
 ):
     """
     Create a permission callback that enforces permission rules.
@@ -397,6 +399,7 @@ def create_permission_callback(
     1. Provides actionable guidance on denial (what IS allowed)
     2. Uses smart interrupt logic: stops only after repeated failures
     3. Immediately interrupts on security violations
+    4. Wraps Bash commands in bubblewrap sandbox when enabled
 
     Args:
         permission_manager: Permission manager instance (PermissionManager or
@@ -407,6 +410,9 @@ def create_permission_callback(
         trace_processor: Optional trace processor to mark as permission denied.
         max_denials_before_interrupt: Number of denials before interrupting.
                                       Default is 3 to allow Claude to learn.
+        sandbox_executor: Optional SandboxExecutor for wrapping Bash commands
+                         in bubblewrap. When provided, Bash commands are
+                         executed inside a sandbox for filesystem isolation.
 
     Returns:
         Async permission callback for ClaudeAgentOptions.can_use_tool.
@@ -473,7 +479,47 @@ def create_permission_callback(
             on_permission_check(tool_name, decision)
 
         if allowed:
-            allow_result = PermissionResultAllow(behavior="allow")
+            # Check if we need to sandbox Bash commands
+            updated_input = None
+            if (
+                tool_name == "Bash"
+                and sandbox_executor is not None
+                and hasattr(sandbox_executor, 'config')
+                and sandbox_executor.config.enabled
+            ):
+                original_command = tool_input.get("command", "")
+                if original_command:
+                    try:
+                        # Validate mount sources exist before wrapping
+                        missing_mounts = sandbox_executor.validate_mount_sources()
+                        if missing_mounts:
+                            logger.warning(
+                                f"SANDBOX: Missing mount sources: {missing_mounts}. "
+                                "Command will likely fail."
+                            )
+
+                        # Wrap the command in bubblewrap for filesystem isolation
+                        wrapped_command = sandbox_executor.wrap_shell_command(
+                            original_command,
+                            allow_network=False,  # Default: no network inside sandbox
+                        )
+                        updated_input = {**tool_input, "command": wrapped_command}
+                        logger.info(
+                            f"SANDBOX: Wrapping Bash command in bwrap: "
+                            f"{original_command[:50]}..."
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"SANDBOX: Failed to wrap command in bwrap: {e}. "
+                            "Running without sandbox."
+                        )
+                        # Allow command to run without sandbox wrapper
+                        # The agent will see the error if the command fails
+
+            allow_result = PermissionResultAllow(
+                behavior="allow",
+                updated_input=updated_input,
+            )
             if system_message_builder is not None:
                 message = system_message_builder(tool_name, tool_input)
                 if message and hasattr(allow_result, "system_message"):
@@ -541,6 +587,7 @@ def create_permission_hooks(
     denial_tracker: Optional[PermissionDenialTracker] = None,
     trace_processor: Optional[Any] = None,
     system_message_builder: Optional[Any] = None,
+    workspace_dir: Optional[str] = None,
 ) -> dict:
     """
     Create SDK hooks configuration for permission management.
@@ -553,11 +600,18 @@ def create_permission_hooks(
         on_permission_check: Optional callback for tracing permission decisions.
         denial_tracker: Optional tracker to record denials.
         trace_processor: Optional trace processor for status updates.
+        workspace_dir: Optional workspace directory for path normalization.
 
     Returns:
         Dictionary for ClaudeAgentOptions.hooks parameter.
     """
     manager = HooksManager()
+    
+    # Add path normalization hook FIRST (so permissions check normalized relative paths)
+    if workspace_dir:
+        from .hooks import create_path_normalization_hook
+        norm_hook = create_path_normalization_hook(workspace_dir)
+        manager.add_pre_tool_hook(norm_hook)
 
     # Add permission checking hook
     permission_hook = create_permission_hook(

@@ -20,6 +20,7 @@ Usage:
 """
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from claude_agent_sdk import HookMatcher
 
-from .tool_utils import build_actionable_denial_message, build_tool_call_string
+from .tool_utils import build_actionable_denial_message, build_tool_call_string, TOOL_PARAM_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -622,3 +623,152 @@ def create_dangerous_command_hook(
         return {}  # Allow
 
     return dangerous_command_hook
+
+
+def create_sandbox_execution_hook(
+    sandbox_executor: Any,
+) -> HookCallback:
+    """
+    Create a PreToolUse hook that wraps Bash commands in bubblewrap sandbox.
+
+    This hook intercepts Bash tool calls and modifies the command to run
+    inside a bubblewrap sandbox, providing filesystem isolation.
+
+    The SDK's built-in sandbox doesn't work reliably in Docker environments,
+    so we use our own bubblewrap wrapper for proper isolation.
+
+    Args:
+        sandbox_executor: SandboxExecutor instance with resolved mounts.
+
+    Returns:
+        Async hook callback function.
+    """
+    from .sandbox import SandboxExecutor
+
+    async def sandbox_execution_hook(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any
+    ) -> dict[str, Any]:
+        """PreToolUse hook to wrap Bash commands in bubblewrap."""
+        tool_name = input_data.get("tool_name", "")
+
+        if tool_name != "Bash":
+            return {}  # Only sandbox Bash commands
+
+        if sandbox_executor is None:
+            logger.debug("Sandbox executor not configured, skipping sandbox")
+            return {}
+
+        if not isinstance(sandbox_executor, SandboxExecutor):
+            logger.warning(f"Invalid sandbox executor type: {type(sandbox_executor)}")
+            return {}
+
+        if not sandbox_executor.config.enabled:
+            logger.debug("Sandbox disabled in config, skipping")
+            return {}
+
+        original_command = input_data.get("tool_input", {}).get("command", "")
+        if not original_command:
+            return {}
+
+        # Wrap the command in bubblewrap
+        # The SDK will execute this wrapped command instead of the original
+        wrapped_command = sandbox_executor.wrap_shell_command(
+            original_command,
+            allow_network=False,
+        )
+
+        logger.info("SANDBOX HOOK: Wrapping command in bwrap")
+        logger.debug(f"SANDBOX HOOK: Original: {original_command[:100]}")
+        logger.debug(f"SANDBOX HOOK: Wrapped: {wrapped_command[:200]}...")
+
+        # Return modified input with wrapped command
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": {
+                    "command": wrapped_command,
+                    "description": input_data.get("tool_input", {}).get(
+                        "description", "Sandboxed command execution"
+                    ),
+                },
+            }
+        }
+
+    return sandbox_execution_hook
+
+
+def create_path_normalization_hook(workspace_dir: str) -> HookCallback:
+    """
+    Create a PreToolUse hook that converts absolute paths to relative paths.
+    
+    This hook ensures compliance with "Relative Paths Only" policy by detecting
+    absolute paths in tool inputs and converting them to relative paths if they
+    are within the workspace.
+
+    Args:
+        workspace_dir: Absolute path to the workspace directory.
+
+    Returns:
+        Async hook callback function.
+    """
+    workspace_path = Path(workspace_dir).resolve()
+
+    async def path_normalization_hook(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any
+    ) -> dict[str, Any]:
+        """PreToolUse hook to normalize absolute paths."""
+        tool_name = input_data.get("tool_name", "")
+        tool_input = input_data.get("tool_input", {})
+        
+        # Check if tool uses file paths
+        if tool_name not in TOOL_PARAM_MAP:
+            return {}
+            
+        param_keys = TOOL_PARAM_MAP[tool_name]
+        updated_input = None
+        
+        for key in param_keys:
+            if key in tool_input and isinstance(tool_input[key], str):
+                path_str = tool_input[key]
+                path = Path(path_str)
+                
+                # Check if path is absolute
+                if path.is_absolute():
+                    try:
+                        # Try to make relative to workspace
+                        # resolve() resolves symlinks, which we might not want if we want to preserve
+                        # the logical path structure (e.g. symlinked skills), but relative_to requires
+                        # strict containment.
+                        # For safety, we just check string prefix or use pathlib logic.
+                        
+                        # Note: We don't use resolve() on the input path because the file might not exist yet (Write)
+                        # We just want string manipulation based on workspace root.
+                        
+                        # Use os.path.relpath for robustness even if path doesn't exist
+                        rel_path = os.path.relpath(path_str, start=str(workspace_path))
+                        
+                        # Check if it's truly inside (not starting with ..)
+                        if not rel_path.startswith(".."):
+                            if updated_input is None:
+                                updated_input = tool_input.copy()
+                            updated_input[key] = rel_path
+                            logger.info(f"PATH NORM: Converted '{path_str}' to '{rel_path}'")
+                    except ValueError:
+                        # Path is on different drive or cannot be made relative
+                        pass
+        
+        if updated_input:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": updated_input,
+                }
+            }
+            
+        return {}
+
+    return path_normalization_hook

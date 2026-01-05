@@ -140,18 +140,48 @@ class SandboxExecutor:
         self,
         command: Iterable[str],
         allow_network: bool,
+        nested_container: bool = True,
     ) -> list[str]:
-        """Build a bubblewrap command for the given command args."""
+        """
+        Build a bubblewrap command for the given command args.
+
+        Args:
+            command: Command arguments to execute inside sandbox.
+            allow_network: Whether to allow network access.
+            nested_container: If True, use flags compatible with running
+                inside Docker (avoids pivot_root issues).
+        """
         config = self._config
-        cmd = [
-            config.bwrap_path,
-            "--unshare-all",
+
+        # Base command - avoid flags that cause pivot_root in Docker
+        cmd = [config.bwrap_path]
+
+        # In Docker, we need to be careful about namespace operations
+        # Use --unshare-user --unshare-pid for basic isolation
+        # but avoid --unshare-all which requires pivot_root
+        if nested_container:
+            cmd.extend([
+                "--unshare-pid",
+                "--unshare-uts",
+                "--unshare-ipc",
+            ])
+        else:
+            cmd.append("--unshare-all")
+
+        cmd.extend([
             "--die-with-parent",
             "--new-session",
-        ]
+        ])
 
-        if config.use_tmpfs_root:
+        # For nested containers: don't try to create a new root filesystem
+        # Instead, bind-mount everything explicitly and block access to
+        # sensitive paths by NOT mounting them
+        if config.use_tmpfs_root and not nested_container:
             cmd.extend(["--tmpfs", "/"])
+        else:
+            # In Docker, create an isolated filesystem view
+            # Start with tmpfs at /tmp for scratch space
+            cmd.extend(["--tmpfs", "/tmp:size=100M"])
 
         cmd.extend(["--proc", "/proc", "--dev", "/dev"])
 
@@ -161,11 +191,9 @@ class SandboxExecutor:
         for mount in config.dynamic_mounts:
             cmd.extend(_mount_args(mount))
 
-        if config.file_sandboxing:
-            if allow_network or not config.network_sandboxing:
-                cmd.append("--share-net")
-            else:
-                cmd.append("--unshare-net")
+        # Network isolation - only if not in nested container
+        if not allow_network and config.network_sandboxing and not nested_container:
+            cmd.append("--unshare-net")
 
         if config.environment.clear_env:
             cmd.append("--clearenv")
@@ -209,3 +237,64 @@ def _mount_args(mount: SandboxMount) -> list[str]:
     if mount.mode == "rw":
         return ["--bind", mount.source, mount.target]
     return ["--ro-bind", mount.source, mount.target]
+
+
+async def execute_sandboxed_command(
+    executor: SandboxExecutor,
+    command: str,
+    allow_network: bool = False,
+    timeout: int = 300,
+) -> tuple[int, str, str]:
+    """
+    Execute a shell command inside the bubblewrap sandbox.
+
+    This is the core sandboxed execution function that wraps any command
+    in bubblewrap with the configured mounts and isolation.
+
+    Args:
+        executor: SandboxExecutor with resolved mount configuration.
+        command: Shell command to execute inside the sandbox.
+        allow_network: Whether to allow network access.
+        timeout: Command timeout in seconds.
+
+    Returns:
+        Tuple of (exit_code, stdout, stderr).
+    """
+    import asyncio
+
+    # Build the bwrap command
+    bwrap_cmd = executor.build_bwrap_command(
+        ["bash", "-c", command],
+        allow_network=allow_network,
+    )
+
+    logger.info(f"SANDBOX EXEC: {' '.join(bwrap_cmd[:10])}...")
+    logger.debug(f"SANDBOX FULL CMD: {' '.join(bwrap_cmd)}")
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *bwrap_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout,
+        )
+
+        exit_code = process.returncode or 0
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+        logger.info(f"SANDBOX RESULT: exit={exit_code}, stdout_len={len(stdout)}")
+        return exit_code, stdout, stderr
+
+    except asyncio.TimeoutError:
+        logger.warning(f"SANDBOX TIMEOUT: Command timed out after {timeout}s")
+        if process:
+            process.kill()
+        return 124, "", f"Command timed out after {timeout} seconds"
+    except Exception as e:
+        logger.error(f"SANDBOX ERROR: {e}")
+        return 1, "", str(e)

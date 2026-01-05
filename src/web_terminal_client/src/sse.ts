@@ -34,8 +34,13 @@ export function connectSSE(
         onEvent(parsed);
         
         // Stop reconnecting on terminal events
-        if (parsed.type === 'agent_complete' || parsed.type === 'error' || parsed.type === 'cancelled') {
+        if (
+          parsed.type === 'agent_complete' ||
+          parsed.type === 'error' ||
+          parsed.type === 'cancelled'
+        ) {
           isClosed = true;
+          source?.close();
         }
       } catch (error) {
         onError(new Error('Failed to parse SSE payload'));
@@ -43,12 +48,13 @@ export function connectSSE(
     };
 
     source.onerror = () => {
+      source?.close();
+      
+      // If already marked as closed (terminal event received), this is expected
       if (isClosed) {
-        source?.close();
         return;
       }
 
-      source?.close();
       reconnectAttempts++;
 
       if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {

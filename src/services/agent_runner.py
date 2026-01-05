@@ -147,23 +147,56 @@ class AgentRunner:
         Run the agent in background using the unified task runner.
 
         Uses execute_agent_task() for consistent behavior with CLI.
+
+        Error Handling Strategy:
+        - Creates tracer early to ensure error events can be sent to frontend
+        - Catches exceptions at all levels and emits proper error events
+        - Always emits a completion/error event so frontend knows session ended
+        - Updates database status on completion or failure
         """
         session_id = params.session_id
+        tracer: Optional[EventingTracer] = None
+        event_queue = self._event_queues.get(session_id)
+
+        def emit_error_event(message: str, error_type: str = "server_error") -> None:
+            """Helper to emit error event even if tracer creation failed."""
+            if tracer is not None:
+                tracer.emit_event("error", {
+                    "message": message,
+                    "error_type": error_type,
+                    "session_id": session_id,
+                })
+            elif event_queue is not None:
+                # Fallback: put error directly in queue
+                import asyncio
+                from datetime import datetime, timezone
+                error_event = {
+                    "type": "error",
+                    "data": {
+                        "message": message,
+                        "error_type": error_type,
+                        "session_id": session_id,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sequence": 9999,  # High sequence for late events
+                }
+                try:
+                    event_queue.put_nowait(error_event)
+                except asyncio.QueueFull:
+                    logger.warning(f"Event queue full, could not send error: {message}")
 
         try:
+            # Create tracer early for error reporting
+            base_tracer = BackendConsoleTracer(session_id=session_id)
+            tracer = EventingTracer(base_tracer, event_queue=event_queue)
+
             # Determine working directory
             if params.working_dir:
                 working_dir = Path(params.working_dir).resolve()
             else:
-                # Use AGENT_DIR as sensible default for API (not server's cwd)
                 working_dir = AGENT_DIR
 
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
-
-            # Build TaskExecutionParams from TaskParams
-            event_queue = self._event_queues.get(session_id)
-            base_tracer = BackendConsoleTracer(session_id=session_id)
-            tracer = EventingTracer(base_tracer, event_queue=event_queue)
 
             exec_params = TaskExecutionParams(
                 task=params.task,
@@ -171,7 +204,6 @@ class AgentRunner:
                 session_id=session_id,
                 resume_session_id=params.resume_session_id,
                 fork_session=params.fork_session,
-                # Config overrides
                 model=params.model,
                 max_turns=params.max_turns,
                 timeout_seconds=params.timeout_seconds,
@@ -181,7 +213,6 @@ class AgentRunner:
                 additional_dirs=params.additional_dirs or [],
                 enable_skills=params.enable_skills,
                 enable_file_checkpointing=params.enable_file_checkpointing,
-                # Backend uses BackendConsoleTracer for linear logging
                 tracer=tracer,
             )
 
@@ -220,31 +251,33 @@ class AgentRunner:
                 "status": "cancelled",
                 "error": "Task was cancelled",
             }
-            if "tracer" in locals():
-                tracer.emit_event(
-                    "cancelled",
-                    {
-                        "session_id": session_id,
-                        "message": "Task was cancelled",
-                    },
-                )
+            emit_error_event("Task was cancelled", "cancelled")
             await self._update_session_status(session_id, "cancelled")
             raise
 
         except Exception as e:
+            error_message = str(e)
             logger.exception(f"Agent failed for session: {session_id}")
+
+            # Provide user-friendly error message
+            if "Can't find source path" in error_message:
+                user_message = (
+                    f"Internal sandbox configuration error: {error_message}. "
+                    "Check backend logs for details."
+                )
+            elif "bwrap" in error_message.lower():
+                user_message = (
+                    f"Sandbox execution error: {error_message}. "
+                    "The sandboxed command failed to execute."
+                )
+            else:
+                user_message = f"Internal error: {error_message}"
+
             self._results[session_id] = {
                 "status": "failed",
-                "error": str(e),
+                "error": user_message,
             }
-            if "tracer" in locals():
-                tracer.emit_event(
-                    "error",
-                    {
-                        "message": str(e),
-                        "error_type": "server_error",
-                    },
-                )
+            emit_error_event(user_message, "execution_error")
             await self._update_session_status(session_id, "failed")
 
         finally:

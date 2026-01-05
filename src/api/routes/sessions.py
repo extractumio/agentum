@@ -354,23 +354,72 @@ async def stream_events(
     queue = agent_runner.get_or_create_event_queue(session_id)
 
     async def event_generator():
+        """
+        Generate SSE events for a session.
+
+        Handles:
+        - Normal event streaming from the agent
+        - Heartbeats during idle periods
+        - Error events if the agent fails before sending events
+        - Graceful completion when agent finishes
+        """
+        completion_event_sent = False
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
+
+                    # Check if task finished while waiting
                     if not agent_runner.is_running(session_id) and queue.empty():
+                        # Task ended - check if we need to send a synthetic completion
+                        if not completion_event_sent:
+                            result = agent_runner.get_result(session_id)
+                            if result and result.get("status") == "failed":
+                                # Send error event for failed task
+                                error_event = {
+                                    "type": "error",
+                                    "data": {
+                                        "message": result.get("error", "Task failed"),
+                                        "error_type": "execution_error",
+                                    },
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "sequence": 9999,
+                                }
+                                payload = json.dumps(error_event, default=str)
+                                yield f"id: 9999\n"
+                                yield f"data: {payload}\n\n"
+                                completion_event_sent = True
                         break
                     continue
 
                 payload = json.dumps(event, default=str)
-                
+
                 yield f"id: {event.get('sequence')}\n"
                 yield f"data: {payload}\n\n"
 
-                if event.get("type") in ("output_display", "error", "cancelled"):
+                event_type = event.get("type")
+                if event_type in ("agent_complete", "error", "cancelled"):
+                    completion_event_sent = True
                     break
+
+        except Exception as e:
+            # Send error event if SSE streaming fails
+            logger.exception(f"SSE streaming error for session {session_id}")
+            error_event = {
+                "type": "error",
+                "data": {
+                    "message": f"Streaming error: {str(e)}",
+                    "error_type": "streaming_error",
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "sequence": 9998,
+            }
+            payload = json.dumps(error_event, default=str)
+            yield f"id: 9998\n"
+            yield f"data: {payload}\n\n"
+
         finally:
             if not agent_runner.is_running(session_id):
                 agent_runner.clear_event_queue(session_id)
@@ -379,8 +428,10 @@ async def stream_events(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "Content-Type": "text/event-stream; charset=utf-8",
         },
     )
 

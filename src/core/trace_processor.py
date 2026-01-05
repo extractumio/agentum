@@ -287,44 +287,12 @@ class TraceProcessor:
 
     def _handle_result_message(self, msg: ResultMessage) -> None:
         """Handle final result with metrics and usage."""
-        status = self._determine_status(msg)
-
-        # Get usage data from result message
-        usage = msg.usage if hasattr(msg, 'usage') else None
-
-        # Calculate cumulative totals if we have previous stats
-        cumulative_cost = None
-        cumulative_turns = None
-        cumulative_tokens = None
-
-        if self._cumulative_cost_usd is not None:
-            cumulative_cost = self._cumulative_cost_usd + (msg.total_cost_usd or 0)
-
-        if self._cumulative_turns is not None:
-            cumulative_turns = self._cumulative_turns + msg.num_turns
-
-        if self._cumulative_tokens is not None and usage:
-            current_tokens = (
-                usage.get("input_tokens", 0) +
-                usage.get("cache_creation_input_tokens", 0) +
-                usage.get("cache_read_input_tokens", 0) +
-                usage.get("output_tokens", 0)
-            )
-            cumulative_tokens = self._cumulative_tokens + current_tokens
-
-        self.tracer.on_agent_complete(
-            status=status,
-            num_turns=msg.num_turns,
-            duration_ms=msg.duration_ms,
-            total_cost_usd=msg.total_cost_usd,
-            result=msg.result,
-            session_id=getattr(msg, 'session_id', None),
-            usage=usage,
-            model=self._model,
-            cumulative_cost_usd=cumulative_cost,
-            cumulative_turns=cumulative_turns,
-            cumulative_tokens=cumulative_tokens,
-        )
+        # The SDK emits ResultMessage before the agent writes and the runtime parses
+        # `output.yaml`. The UI expects the final output (`output_display`) to precede
+        # terminal completion (`agent_complete`) so the stream can close cleanly.
+        #
+        # Completion is emitted by the agent runtime after `output_display`.
+        _ = msg
 
     def _determine_status(self, msg: ResultMessage) -> str:
         """

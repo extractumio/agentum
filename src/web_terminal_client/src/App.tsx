@@ -406,6 +406,12 @@ function formatToolInput(input: unknown): string {
 }
 
 function formatToolName(name: string): string {
+  // Handle double underscore prefix (mcp__agentum__WriteOutput -> AgentumWriteOutput)
+  if (name.startsWith('mcp__agentum__')) {
+    const suffix = name.slice('mcp__agentum__'.length);
+    return `Agentum${suffix}`;
+  }
+  // Handle single underscore prefix (legacy: mcp_agentum_write_output -> AgentumWriteOutput)
   if (name.startsWith('mcp_agentum_')) {
     const suffix = name.slice('mcp_agentum_'.length);
     const capitalized = suffix
@@ -735,55 +741,258 @@ function OutputBlock({
   );
 }
 
+type AttachedFile = {
+  file: File;
+  id: string;
+};
+
+const AVAILABLE_MODELS = [
+  'claude-sonnet-4-20250514',
+  'claude-opus-4-20250514',
+  'claude-3-7-sonnet-20250219',
+  'claude-3-5-sonnet-20241022',
+];
+
 function InputField({
   value,
   onChange,
   onSubmit,
   onCancel,
   isRunning,
+  attachedFiles,
+  onAttachFiles,
+  onRemoveFile,
+  model,
+  onModelChange,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
   isRunning: boolean;
+  attachedFiles: AttachedFile[];
+  onAttachFiles: (files: File[]) => void;
+  onRemoveFile: (id: string) => void;
+  model: string;
+  onModelChange: (model: string) => void;
 }): JSX.Element {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounter = useRef(0);
+
+  // Auto-focus textarea when not running, and refocus after running completes
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [isRunning]);
+
+  // Keep focus on the input area - refocus when clicking elsewhere in the app
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (textareaRef.current && document.activeElement !== textareaRef.current) {
+        // Small delay to not interfere with intentional clicks
+        setTimeout(() => {
+          if (textareaRef.current && !document.activeElement?.closest('.input-shell')) {
+            textareaRef.current.focus();
+          }
+        }, 100);
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, []);
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current = 0;
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      onAttachFiles(files);
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      onAttachFiles(files);
+    }
+    e.target.value = '';
+  };
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter') {
+      // Shift+Enter = new line (let default behavior happen)
+      if (e.shiftKey) {
+        return;
+      }
+      // Enter or Ctrl+Enter or Cmd+Enter = send message
+      e.preventDefault();
+      if (!isRunning && value.trim()) {
+        onSubmit();
+      }
+    }
+  };
+
+  // Auto-resize textarea based on content
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      // Reset height to auto to get the correct scrollHeight
+      textarea.style.height = 'auto';
+      // Set height to scrollHeight, capped at max-height via CSS
+      textarea.style.height = `${textarea.scrollHeight}px`;
+    }
+  }, [value]);
+
   return (
-    <div className="input-shell">
-      <div className="input-row">
-        <span className="input-prompt">⟩</span>
-        <textarea
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              if (!isRunning) {
-                onSubmit();
-              }
-            }
-          }}
-          placeholder="Enter your request..."
-          className="input-textarea"
-          disabled={isRunning}
-          rows={1}
-        />
+    <div className="input-area">
+      <div
+        className={`input-shell ${isDragging ? 'input-dragging' : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        {isDragging && (
+          <div className="input-drop-overlay">
+            <div className="input-drop-content">
+              <span className="input-drop-icon">📁</span>
+              <span className="input-drop-text">Drop files here</span>
+            </div>
+          </div>
+        )}
+
+        {attachedFiles.length > 0 && (
+          <div className="attached-files">
+            {attachedFiles.map((item) => (
+              <div key={item.id} className="attached-file">
+                <span className="attached-file-icon">📄</span>
+                <span className="attached-file-name" title={item.file.name}>
+                  {item.file.name.length > 24
+                    ? `${item.file.name.slice(0, 20)}...${item.file.name.slice(-4)}`
+                    : item.file.name}
+                </span>
+                <span className="attached-file-size">{formatFileSize(item.file.size)}</span>
+                <button
+                  type="button"
+                  className="attached-file-remove"
+                  onClick={() => onRemoveFile(item.id)}
+                  title="Remove file"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="input-main">
+          <span className="input-prompt">⟩</span>
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Enter your request... (Shift+Enter for new line)"
+            className="input-textarea"
+            rows={2}
+          />
+        </div>
+
+        <div className="input-footer">
+          <button
+            type="button"
+            className="input-attach-button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach files"
+          >
+            <span className="input-attach-icon">📎</span>
+            <span className="input-attach-label">Attach</span>
+            {attachedFiles.length > 0 && (
+              <span className="input-attach-count">{attachedFiles.length}</span>
+            )}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileSelect}
+            style={{ display: 'none' }}
+          />
+
+          <div className="input-spacer" />
+
+          <div className="dropdown input-model-dropdown">
+            <span className="dropdown-value">
+              {model.replace('claude-', '').replace(/-\d{8}$/, '')}
+            </span>
+            <span className="dropdown-icon">▾</span>
+            <div className="dropdown-list">
+              {AVAILABLE_MODELS.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`dropdown-item ${m === model ? 'active' : ''}`}
+                  onClick={() => onModelChange(m)}
+                >
+                  {m.replace('claude-', '').replace(/-\d{8}$/, '')}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="input-actions">
         {isRunning ? (
-          <button className="input-button cancel" type="button" onClick={onCancel}>
-            ■ Cancel
+          <button className="input-button cancel" type="button" onClick={onCancel} title="Cancel (Esc)">
+            <span className="input-button-icon">■</span>
           </button>
         ) : (
-          <button className="input-button" type="button" onClick={onSubmit}>
-            Send ↵
+          <button
+            className="input-button send"
+            type="button"
+            onClick={onSubmit}
+            disabled={!value.trim()}
+            title="Send (Enter)"
+          >
+            <span className="input-button-icon">↑</span>
           </button>
         )}
-      </div>
-      <div className="input-footer">
-        <span className="input-footer-item">📎 Attach</span>
-        <span className="input-footer-item">📁 Files</span>
-        <span className="input-divider">│</span>
-        <span className="input-footer-item">[skills]</span>
-        <span className="input-footer-item">[model ▼]</span>
       </div>
     </div>
   );
@@ -849,6 +1058,8 @@ export default function App(): JSX.Element {
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>(AVAILABLE_MODELS[0]);
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -1099,6 +1310,12 @@ export default function App(): JSX.Element {
     const shouldContinue = currentSession && currentSession.status !== 'running';
 
     if (shouldContinue) {
+      // Close old SSE connection before appending user event to prevent
+      // late-arriving events from previous request appearing after the new message
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
       appendEvent(userEvent);
       try {
         const response = await continueTask(
@@ -1115,6 +1332,7 @@ export default function App(): JSX.Element {
         }));
 
         setInputValue('');
+        setAttachedFiles([]);
         startSSE(currentSession.id);
         refreshSessions();
       } catch (err) {
@@ -1136,13 +1354,13 @@ export default function App(): JSX.Element {
       });
 
       try {
-        const response = await runTask(config.api.base_url, token, taskText);
+        const response = await runTask(config.api.base_url, token, taskText, selectedModel);
         const sessionId = response.session_id;
         setCurrentSession({
           id: sessionId,
           status: response.status,
           task: taskText,
-          model: null,
+          model: selectedModel,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           completed_at: null,
@@ -1152,6 +1370,7 @@ export default function App(): JSX.Element {
           cancel_requested: false,
         });
         setInputValue('');
+        setAttachedFiles([]);
         startSSE(sessionId);
         refreshSessions();
       } catch (err) {
@@ -1173,6 +1392,18 @@ export default function App(): JSX.Element {
       setError(`Failed to cancel: ${(err as Error).message}`);
     }
   };
+
+  const handleAttachFiles = useCallback((files: File[]) => {
+    const newFiles: AttachedFile[] = files.map((file) => ({
+      file,
+      id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    }));
+    setAttachedFiles((prev) => [...prev, ...newFiles]);
+  }, []);
+
+  const handleRemoveFile = useCallback((id: string) => {
+    setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  }, []);
 
   const handleSelectSession = async (sessionId: string): Promise<void> => {
     if (!config || !token) {
@@ -1222,6 +1453,7 @@ export default function App(): JSX.Element {
     setExpandedTools(new Set());
     setExpandedComments(new Set());
     setExpandedFiles(new Set());
+    setAttachedFiles([]);
     setStats({
       turns: 0,
       cost: 0,
@@ -1233,6 +1465,21 @@ export default function App(): JSX.Element {
   };
 
   const conversation = useMemo<ConversationItem[]>(() => {
+    // Sort events by timestamp to ensure chronological display order.
+    // This handles cases where events arrive out of order (e.g., output_display
+    // arriving after user sends a new message during session continuation).
+    const sortedEvents = [...events].sort((a, b) => {
+      const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      if (timeA !== timeB) {
+        return timeA - timeB;
+      }
+      // If timestamps are equal, preserve original order by sequence
+      const seqA = a.sequence ?? 0;
+      const seqB = b.sequence ?? 0;
+      return seqA - seqB;
+    });
+
     const items: ConversationItem[] = [];
     let pendingTools: ToolCallView[] = [];
     let pendingResult: { comments?: string; files?: string[]; status?: ResultStatus } = {};
@@ -1286,7 +1533,7 @@ export default function App(): JSX.Element {
 
     let toolIdCounter = 0;
 
-    events.forEach((event) => {
+    sortedEvents.forEach((event) => {
       switch (event.type) {
         case 'user_message': {
           const content = String(event.data.text ?? '');
@@ -1311,16 +1558,19 @@ export default function App(): JSX.Element {
         case 'tool_start': {
           const toolName = String(event.data.tool_name ?? 'Tool');
           const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
+          const isWriteOutputTool = toolName.includes('WriteOutput') || toolName.includes('write_output');
           
-          pendingTools.push({
-            id: `tool-${toolIdCounter++}`,
-            tool: toolName,
-            time: formatTimestamp(event.timestamp),
-            status: 'running',
-            input: toolInput ?? '',
-          });
+          if (!isWriteOutputTool) {
+            pendingTools.push({
+              id: `tool-${toolIdCounter++}`,
+              tool: toolName,
+              time: formatTimestamp(event.timestamp),
+              status: 'running',
+              input: toolInput ?? '',
+            });
+          }
           
-          if (toolName.includes('WriteOutput') || toolName.includes('write_output')) {
+          if (isWriteOutputTool) {
             if (toolInput) {
               const comments = String(toolInput.comments ?? '').trim();
               const files = parseResultFiles(toolInput.result_files);
@@ -1476,9 +1726,14 @@ export default function App(): JSX.Element {
     const seen = new Set<string>();
     const files: string[] = [];
     conversation.forEach((item) => {
-      const itemFiles = item.type === 'output' ? item.files : item.files ?? [];
+      let itemFiles: string[] = [];
+      if (item.type === 'output') {
+        itemFiles = item.files;
+      } else if (item.type === 'agent_message') {
+        itemFiles = item.files ?? [];
+      }
       if (itemFiles.length > 0) {
-        itemFiles.forEach((file) => {
+        itemFiles.forEach((file: string) => {
           if (!seen.has(file)) {
             seen.add(file);
             files.push(file);
@@ -1634,9 +1889,7 @@ export default function App(): JSX.Element {
         <div className="header-top">
           <div className="header-title">
             <span className="header-icon">◆</span>
-            <span className="header-label">AGENT SESSION</span>
-            <span className="header-divider">│</span>
-            <span className="header-meta">{sessionIdLabel}</span>
+            <span className="header-label">Agentum</span>
             <span className="header-divider">│</span>
             <span className="header-meta">user: {userId || 'unknown'}</span>
           </div>
@@ -1658,9 +1911,10 @@ export default function App(): JSX.Element {
             <button className="session-new-button" type="button" onClick={handleNewSession}>
               + New
             </button>
-            <div className="session-dropdown">
-              <span className="session-current">[...select]</span>
-              <div className="session-list">
+            <div className="dropdown session-dropdown">
+              <span className="dropdown-value">[...select]</span>
+              <span className="dropdown-icon">▾</span>
+              <div className="dropdown-list">
                 {sessionItems}
               </div>
             </div>
@@ -1772,8 +2026,15 @@ export default function App(): JSX.Element {
             onSubmit={handleSubmit}
             onCancel={handleCancel}
             isRunning={isRunning}
+            attachedFiles={attachedFiles}
+            onAttachFiles={handleAttachFiles}
+            onRemoveFile={handleRemoveFile}
+            model={selectedModel}
+            onModelChange={setSelectedModel}
           />
-          {error && <div className={reconnecting ? 'terminal-warning' : 'terminal-error'}>{error}</div>}
+          <div className={`input-message ${error ? (reconnecting ? 'warning' : 'error') : ''}`}>
+            {error || '\u00A0'}
+          </div>
         </div>
         <StatusFooter
           isRunning={isRunning}

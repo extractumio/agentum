@@ -1,6 +1,13 @@
 {# Module: Output - Output requirements and schema #}
+
+**Decide on the output artifact first**
+- If user does not specify the output artifact, decide on the best output artifact for the task.
+- If user specifies the output artifact, use it.
+- If user specifies the output artifact, but it is not supported, explain why and suggest a different output artifact.
+- If the output is a huge portion of text or some non-printable content or binary data, consider using a file as the output artifact and provide the path to the file in the `result_files` field.
+
 **Output Requirement**
-Report results using the `WriteOutput` tool from the `agentum` MCP server.
+Report results using the `WriteOutput` tool from the `agentum` MCP server (mcp__agentum__WriteOutput).
 This is a SYSTEM TOOL always available regardless of permission settings.
 
 Call `mcp__agentum__WriteOutput` with:
@@ -20,5 +27,12 @@ Call `mcp__agentum__WriteOutput` with:
 - PARTIAL: Task partially completed; some aspects could not be done
 - FAILED: Task could not be completed; include reason in error field
 
-Always create output before completing your response.
+`output` is the result of your task. It can be a text, analysis, answer, etc.
+- Use markdown to format your output.
+- When you need to output code block: use ``` to start and end a code block specifying the language.
+- Think of the best way to format your output to be easy to read and understand.
+- Provide concise and to the point output.
+- Structure output for the long output.
 
+Always use `mcp__agentum__WriteOutput` tool as your final action prividing user with the result of your task. 
+After calling `mcp__agentum__WriteOutput`, your response is complete.

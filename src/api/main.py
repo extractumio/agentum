@@ -255,6 +255,6 @@ if __name__ == "__main__":
         "src.api.main:app",
         host=api_config["host"],
         port=api_config["port"],
-        reload=True,
+        reload=api_config.get("reload", False),
         reload_excludes=["sessions/*", "logs/*", "data/*"],
     )

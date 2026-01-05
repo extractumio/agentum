@@ -45,34 +45,85 @@ session_workspace:
     - Write(./**)
     - Edit(./**)
     - MultiEdit(./**)
-    # Skills directory read access
-    - Read({workspace}/skills/**)
+    
+    # Skills directory read access (mapped to /skills)
+    # The path normalization hook converts absolute /skills paths to relative ./skills
+    # But we keep this for robust matching if normalization is bypassed/fails
     - Read(./skills/**)
-    # Only allow running pre-approved skill scripts
-    - Bash(python {workspace}/skills/**/*.py)
-    - Bash(python3 {workspace}/skills/**/*.py)
-    - Bash(python ./skills/**/*.py)
-    - Bash(python3 ./skills/**/*.py)
-    - Task
-    - Skill
-    - TodoRead
-    - TodoWrite
-  deny:
-    # Skills directory is READ-ONLY (prevent code injection)
-    - Write({workspace}/skills/**)
-    - Edit({workspace}/skills/**)
-    - MultiEdit({workspace}/skills/**)
-    - Write(./skills/**)
-    - Edit(./skills/**)
-    - MultiEdit(./skills/**)
-    # Block all other bash commands
+    - Read(/skills/**)
+    
+    # Allow all Bash commands (relies on sandbox isolation)
     - Bash(*)
     - Glob(*)
     - Grep(*)
     - LS(*)
+    
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    
+  deny:
+    # Block access to system paths if not covered by sandbox (though sandbox handles this)
+    # We explicitly deny writing to skills (both absolute and relative paths)
+    - Write(/skills/**)
+    - Edit(/skills/**)
+    - MultiEdit(/skills/**)
+    - Write(./skills/**)
+    - Edit(./skills/**)
+    - MultiEdit(./skills/**)
+
   allowed_dirs:
     - "{workspace}"
-    - "{workspace}/skills"
+    # We include /skills here so the permissions manager knows this is a valid target 
+    # for reading, even if the agent accesses it via ./skills (which resolves to /skills)
+    - "/skills"
+
+# Sandbox configuration (bubblewrap). Toggle for non-docker runs as needed.
+sandbox:
+  enabled: true
+  file_sandboxing: true
+  network_sandboxing: true
+  bwrap_path: "bwrap"
+  use_tmpfs_root: true
+  static_mounts:
+    skills:
+      source: "{agent_dir}/skills"
+      target: "/skills"
+      mode: ro
+    system_usr:
+      source: "/usr"
+      target: "/usr"
+      mode: ro
+    system_lib:
+      source: "/lib"
+      target: "/lib"
+      mode: ro
+    system_bin:
+      source: "/bin"
+      target: "/bin"
+      mode: ro
+  session_mounts:
+    workspace:
+      source: "{workspace_dir}"
+      target: "/workspace"
+      mode: rw
+  dynamic_mounts: []
+  network:
+    enabled: false
+    allowed_domains: []
+    allow_localhost: false
+  environment:
+    home: "/workspace"
+    path: "/usr/bin:/bin"
+    clear_env: true
+  writable_paths:
+    - "/workspace"
+  readonly_paths:
+    - "/skills"
+    - "/usr"
+    - "/lib"
+    - "/bin"
 
 # File checkpointing configuration
 checkpointing:

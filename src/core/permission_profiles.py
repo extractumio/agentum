@@ -26,7 +26,14 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from ..config import CONFIG_DIR
+from ..config import (
+    AGENT_DIR,
+    CONFIG_DIR,
+    DATA_DIR,
+    LOGS_DIR,
+    SESSIONS_DIR,
+    SKILLS_DIR,
+)
 from .tool_utils import extract_patterns_for_tool
 from .permission_config import (
     PermissionConfig,
@@ -35,6 +42,7 @@ from .permission_config import (
     PermissionRules,
     ToolsConfig,
 )
+from .sandbox import SandboxConfig
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -187,6 +195,10 @@ class PermissionProfile(BaseModel):
     checkpointing: Optional[CheckpointingConfig] = Field(
         default=None,
         description="File checkpointing configuration"
+    )
+    sandbox: Optional[SandboxConfig] = Field(
+        default=None,
+        description="Sandbox configuration for tool execution"
     )
 
 
@@ -403,6 +415,14 @@ class PermissionManager:
         if workspace_absolute_path is not None:
             self._config_manager.set_working_directory(workspace_absolute_path)
 
+        if self._profile_base and self._profile_base.sandbox:
+            logger.info(
+                "Sandbox configuration loaded: enabled=%s file=%s network=%s",
+                self._profile_base.sandbox.enabled,
+                self._profile_base.sandbox.file_sandboxing,
+                self._profile_base.sandbox.network_sandboxing,
+            )
+
         logger.info(
             f"Session context set: session_id={session_id}, "
             f"workspace={workspace_path}"
@@ -474,8 +494,6 @@ class PermissionManager:
         logger.info(
             f"Built session-specific profile: {self._profile.name}"
         )
-        # Notify tracer about profile update
-        self._notify_profile_loaded()
 
     def clear_session_context(self) -> None:
         """
@@ -506,6 +524,39 @@ class PermissionManager:
         if self._active_profile is None:
             self._ensure_profile_loaded()
         return self._active_profile  # type: ignore
+
+    @property
+    def sandbox_config(self) -> Optional[SandboxConfig]:
+        """Get sandbox configuration from the base profile, if any."""
+        self._ensure_profile_loaded()
+        if self._profile_base is None:
+            return None
+        return self.get_sandbox_config()
+
+    def get_sandbox_config(self) -> Optional[SandboxConfig]:
+        """Resolve sandbox config placeholders using current session context."""
+        self._ensure_profile_loaded()
+        if self._profile_base is None or self._profile_base.sandbox is None:
+            return None
+
+        session_dir = ""
+        workspace_dir = ""
+        if self._session_id:
+            session_dir = str(SESSIONS_DIR / self._session_id)
+        if self._workspace_absolute_path is not None:
+            workspace_dir = str(self._workspace_absolute_path)
+
+        placeholders = {
+            "agent_dir": str(AGENT_DIR),
+            "sessions_dir": str(SESSIONS_DIR),
+            "session_dir": session_dir,
+            "workspace_dir": workspace_dir,
+            "config_dir": str(CONFIG_DIR),
+            "skills_dir": str(SKILLS_DIR),
+            "logs_dir": str(LOGS_DIR),
+            "data_dir": str(DATA_DIR),
+        }
+        return self._profile_base.sandbox.resolve(placeholders)
 
     def activate(self) -> PermissionProfile:
         """

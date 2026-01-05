@@ -1,6 +1,6 @@
 server:
   port: 50080
-  host: "localhost"
+  host: "0.0.0.0"
 
 api:
   base_url: "http://localhost:40080"

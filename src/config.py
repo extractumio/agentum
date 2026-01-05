@@ -35,9 +35,14 @@ class ConfigValidationError(Exception):
     pass
 
 
-# AGENT_DIR is the root of the AGENT project
-# config.py is at AGENT/src/config.py, so parent.parent = AGENT/
-AGENT_DIR: Path = Path(__file__).parent.parent.resolve()
+# AGENT_DIR is the root of the AGENT project.
+# Allow override via AGENTUM_ROOT so Docker can mount directories at /config, /src, etc.
+_agent_root_override = os.environ.get("AGENTUM_ROOT")
+if _agent_root_override:
+    AGENT_DIR: Path = Path(_agent_root_override).resolve()
+else:
+    # config.py is at AGENT/src/config.py, so parent.parent = AGENT/
+    AGENT_DIR = Path(__file__).parent.parent.resolve()
 
 # Standard directories
 LOGS_DIR: Path = AGENT_DIR / "logs"
@@ -45,6 +50,7 @@ SESSIONS_DIR: Path = AGENT_DIR / "sessions"
 CONFIG_DIR: Path = AGENT_DIR / "config"
 SKILLS_DIR: Path = AGENT_DIR / "skills"
 PROMPTS_DIR: Path = AGENT_DIR / "prompts"
+DATA_DIR: Path = AGENT_DIR / "data"
 
 # Configuration files
 AGENT_CONFIG_FILE: Path = CONFIG_DIR / "agent.yaml"

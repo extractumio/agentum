@@ -450,6 +450,25 @@ class ExecutionTracer(TracerBase):
         """
         return truncate_path(path, max_len)
 
+    def _format_tool_name(self, tool_name: str) -> str:
+        """
+        Format tool name for display.
+
+        Converts MCP tool prefixes to readable format:
+        - mcp__agentum__WriteOutput -> AgentumWriteOutput
+
+        Args:
+            tool_name: Raw tool name from SDK.
+
+        Returns:
+            Formatted display name.
+        """
+        prefix = "mcp__agentum__"
+        if tool_name.startswith(prefix):
+            suffix = tool_name[len(prefix):]
+            return f"Agentum{suffix}"
+        return tool_name
+
     def _is_path_like(self, key: str, value: str) -> bool:
         """Check if a key-value pair looks like a file path."""
         path_keys = {"file_path", "path", "filepath", "directory", "dir", "folder", "cwd"}
@@ -1214,10 +1233,11 @@ class ExecutionTracer(TracerBase):
         tool_icon = self._symbol(Symbol.TOOL, ">")
         turn_badge = self._color(f"[{self._turn_count}]", Color.DIM)
 
+        display_name = self._format_tool_name(tool_name)
         self._write(
             f"  {self._color(tool_icon, Color.CYAN)} "
             f"{turn_badge} "
-            f"{self._color(tool_name, Color.BRIGHT_CYAN, Color.BOLD)}"
+            f"{self._color(display_name, Color.BRIGHT_CYAN, Color.BOLD)}"
         )
 
         if self.verbose and tool_input:
@@ -1288,7 +1308,7 @@ class ExecutionTracer(TracerBase):
                             indent=2
                         )
 
-        self._start_spinner(f"Executing {tool_name}...")
+        self._start_spinner(f"Executing {display_name}...")
 
     def on_tool_complete(
         self,
@@ -1314,8 +1334,9 @@ class ExecutionTracer(TracerBase):
             status_icon = self._symbol(Symbol.CHECK, "V")
             status_text = "OK"
 
+        display_name = self._format_tool_name(tool_name)
         self._stop_spinner(
-            f"{tool_name} {status_icon} {status_text} "
+            f"{display_name} {status_icon} {status_text} "
             f"{self._color(f'({duration_str})', Color.DIM)}",
             success=not is_error
         )
@@ -1578,7 +1599,8 @@ class ExecutionTracer(TracerBase):
             icon = self._symbol(Symbol.WARN, "?")
             color = Color.YELLOW
 
-        msg = f"{tool_name} {self._symbol(Symbol.ARROW_RIGHT, '->')} {decision}"
+        display_name = self._format_tool_name(tool_name)
+        msg = f"{display_name} {self._symbol(Symbol.ARROW_RIGHT, '->')} {decision}"
         if reason:
             msg += f" ({reason})"
 
@@ -1760,7 +1782,8 @@ class ExecutionTracer(TracerBase):
 
         parts = [hook_event]
         if tool_name:
-            parts.append(f"[{tool_name}]")
+            display_name = self._format_tool_name(tool_name)
+            parts.append(f"[{display_name}]")
         if decision:
             parts.append(f"-> {decision}")
 

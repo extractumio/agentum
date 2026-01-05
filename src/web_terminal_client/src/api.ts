@@ -53,7 +53,8 @@ export async function getSession(
 export async function runTask(
   baseUrl: string,
   token: string,
-  task: string
+  task: string,
+  model?: string
 ): Promise<TaskStartedResponse> {
   return apiRequest<TaskStartedResponse>(
     baseUrl,
@@ -62,7 +63,7 @@ export async function runTask(
       method: 'POST',
       body: JSON.stringify({
         task,
-        config: {},
+        config: model ? { model } : {},
       }),
     },
     token

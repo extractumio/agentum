@@ -5,6 +5,8 @@ api:
   # Server host and port
   host: "0.0.0.0"
   port: 40080
+  external_port: 40080
+  reload: false
 
   # CORS allowed origins
   # Add your frontend URL here
@@ -17,6 +19,12 @@ database:
   # SQLite database path (relative to Project root)
   path: "./data/agentum.db"
 
+# Web UI settings
+web:
+  host: "0.0.0.0"
+  port: 50080
+  external_port: 50080
+
 # JWT authentication settings
 jwt:
   # Token algorithm (do not change)
@@ -24,4 +32,3 @@ jwt:
 
   # Token expiry in hours (7 days default)
   expiry_hours: 168
-

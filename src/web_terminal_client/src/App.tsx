@@ -26,6 +26,8 @@ type ConversationItem =
       time: string;
       content: string;
       toolCalls: ToolCallView[];
+      comments?: string;
+      files?: string[];
     }
   | {
       type: 'output';
@@ -316,6 +318,15 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
   });
 
   if (result) {
+    // Create a message event with output text so output_display can attach files to it
+    events.push({
+      type: 'message',
+      data: {
+        text: result.output || 'Task completed.',
+      },
+      timestamp: now,
+      sequence: 2,
+    });
     events.push({
       type: 'output_display',
       data: {
@@ -326,7 +337,7 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
         status: result.status,
       },
       timestamp: now,
-      sequence: 2,
+      sequence: 3,
     });
     events.push({
       type: 'agent_complete',
@@ -340,24 +351,82 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
         model: result.metrics?.model ?? session.model,
       },
       timestamp: now,
-      sequence: 3,
+      sequence: 4,
     });
   }
 
   return events;
 }
 
-function ToolTag({ type, count }: { type: string; count?: number }): JSX.Element {
+function formatToolInput(input: unknown): string {
+  let obj: unknown = input;
+  
+  // If input is a string, try to parse it as JSON
+  if (typeof input === 'string') {
+    try {
+      obj = JSON.parse(input);
+    } catch {
+      // Not valid JSON, return the string as-is
+      return input;
+    }
+  }
+  
+  // If it's an object, format it with custom replacer to unescape newlines in display
+  if (typeof obj === 'object' && obj !== null) {
+    const formatted = JSON.stringify(obj, null, 2);
+    // Replace escaped newlines with actual newlines for display (but preserve JSON structure)
+    return formatted
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t');
+  }
+  
+  return String(input);
+}
+
+function formatToolName(name: string): string {
+  if (name.startsWith('mcp_agentum_')) {
+    const suffix = name.slice('mcp_agentum_'.length);
+    const capitalized = suffix
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join('');
+    return `Agentum${capitalized}`;
+  }
+  return name;
+}
+
+function ToolTag({ type, count, showSymbol = true }: { type: string; count?: number; showSymbol?: boolean }): JSX.Element {
   const colorClass = TOOL_COLOR_CLASS[type] ?? 'tool-read';
   const symbol = TOOL_SYMBOL[type] ?? TOOL_SYMBOL.Read;
+  const displayName = formatToolName(type);
 
   return (
     <span className={`tool-tag ${colorClass}`}>
-      <span className="tool-symbol">{symbol}</span>
-      <span className="tool-name">{type}</span>
+      {showSymbol && <span className="tool-symbol">{symbol}</span>}
+      <span className="tool-name">{displayName}</span>
       {count !== undefined && (
         <span className="tool-count">×{count}</span>
       )}
+    </span>
+  );
+}
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function AgentSpinner(): JSX.Element {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setFrame((prev) => (prev + 1) % SPINNER_FRAMES.length);
+    }, 80);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <span className="agent-spinner">
+      <span className="agent-spinner-char">{SPINNER_FRAMES[frame]}</span>
+      <span className="agent-spinner-label">processing...</span>
     </span>
   );
 }
@@ -398,7 +467,7 @@ function ToolCallBlock({
       <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button">
         <span className="tool-tree">{treeChar}</span>
         {hasContent && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
-        <ToolTag type={tool.tool} />
+        <ToolTag type={tool.tool} showSymbol={false} />
         <span className="tool-time">@ {tool.time}</span>
         {!expanded && previewText && (
           <span className="tool-preview">
@@ -412,10 +481,10 @@ function ToolCallBlock({
           {tool.thinking && (
             <div className="tool-thinking">💭 {tool.thinking}</div>
           )}
-          {tool.input && (
+          {tool.input !== undefined && tool.input !== null && (
             <div className="tool-section">
               <div className="tool-section-title">┌─ command ─────────</div>
-              <pre className="tool-section-body">$ {typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input, null, 2)}</pre>
+              <pre className="tool-section-body">{formatToolInput(tool.input)}</pre>
               <div className="tool-section-title">└────────────────────</div>
             </div>
           )}
@@ -444,29 +513,84 @@ function AgentMessageBlock({
   toolCalls,
   toolExpanded,
   onToggleTool,
+  status,
+  comments,
+  commentsExpanded,
+  onToggleComments,
+  files,
+  filesExpanded,
+  onToggleFiles,
 }: {
   time: string;
   content: string;
   toolCalls: ToolCallView[];
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
+  status?: string;
+  comments?: string;
+  commentsExpanded?: boolean;
+  onToggleComments?: () => void;
+  files?: string[];
+  filesExpanded?: boolean;
+  onToggleFiles?: () => void;
 }): JSX.Element {
+  const statusClass = status ? `agent-status-${status}` : '';
+  const hasResult = Boolean(comments) || (files && files.length > 0);
+
   return (
-    <div className="message-block agent-message">
+    <div className={`message-block agent-message ${statusClass}`}>
       <div className="message-header">
         <span className="message-icon">◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
       </div>
       <div className="message-content md-container">
-        {content ? renderMarkdown(content) : <span className="agent-placeholder">…</span>}
+        {content ? renderMarkdown(content) : <AgentSpinner />}
       </div>
-      <div className="tool-call-section">
-        <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
-        {toolCalls.length === 0 ? (
-          <div className="tool-call-empty">No tool calls recorded.</div>
-        ) : (
-          toolCalls.map((tool, index) => (
+      {hasResult && (
+        <div className="result-section">
+          <div className="result-title">Result</div>
+          {comments && (
+            <div className="result-item">
+              <div className="result-item-header" onClick={onToggleComments} role="button">
+                <span className="result-tree">└──</span>
+                <span className="result-toggle">{commentsExpanded ? '▼' : '▶'}</span>
+                <span className="result-label">Comments</span>
+                <span className="result-count">({comments.length})</span>
+              </div>
+              {commentsExpanded && (
+                <div className="result-item-body md-container">
+                  {renderMarkdown(comments)}
+                </div>
+              )}
+            </div>
+          )}
+          {files && files.length > 0 && (
+            <div className="result-item">
+              <div className="result-item-header" onClick={onToggleFiles} role="button">
+                <span className="result-tree">{comments ? '└──' : '└──'}</span>
+                <span className="result-toggle">{filesExpanded ? '▼' : '▶'}</span>
+                <span className="result-label">Files</span>
+                <span className="result-count">({files.length})</span>
+              </div>
+              {filesExpanded && (
+                <div className="result-item-body result-files-list">
+                  {files.map((file, index) => (
+                    <div key={index} className="result-file-item">
+                      <span className="result-file-icon">📄</span>
+                      <span className="result-file-name">{file}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div className="tool-call-section">
+          <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+          {toolCalls.map((tool, index) => (
             <ToolCallBlock
               key={tool.id}
               tool={tool}
@@ -474,9 +598,9 @@ function AgentMessageBlock({
               onToggle={() => onToggleTool(tool.id)}
               isLast={index === toolCalls.length - 1}
             />
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -670,6 +794,7 @@ export default function App(): JSX.Element {
   const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -937,6 +1062,7 @@ export default function App(): JSX.Element {
       setEvents([userEvent]);
       setExpandedTools(new Set());
       setExpandedComments(new Set());
+      setExpandedFiles(new Set());
       setStats({
         turns: 0,
         cost: 0,
@@ -1033,6 +1159,7 @@ export default function App(): JSX.Element {
     setStatus('idle');
     setExpandedTools(new Set());
     setExpandedComments(new Set());
+    setExpandedFiles(new Set());
     setStats({
       turns: 0,
       cost: 0,
@@ -1046,6 +1173,11 @@ export default function App(): JSX.Element {
   const conversation = useMemo<ConversationItem[]>(() => {
     const items: ConversationItem[] = [];
     let pendingTools: ToolCallView[] = [];
+    // Capture result data from mcp__agentum__WriteOutput tool calls
+    // Using separate variables to avoid TypeScript's overly strict control flow narrowing
+    let capturedComments: string | undefined;
+    let capturedFiles: string[] | undefined;
+    let capturedResultAttached = false;
 
     const findOpenTool = (toolName: string): ToolCallView | undefined => {
       for (let i = pendingTools.length - 1; i >= 0; i -= 1) {
@@ -1063,12 +1195,35 @@ export default function App(): JSX.Element {
           type: 'agent_message',
           id: `agent-auto-${items.length}`,
           time: formatTimestamp(timestamp),
-          content: '…',
+          content: '',
           toolCalls: pendingTools,
         });
         pendingTools = [];
       }
     };
+
+    // Parse result_files from WriteOutput - can be JSON string or array
+    const parseResultFiles = (files: unknown): string[] => {
+      if (Array.isArray(files)) {
+        return files.map(String);
+      }
+      if (typeof files === 'string') {
+        try {
+          const parsed = JSON.parse(files);
+          if (Array.isArray(parsed)) {
+            return parsed.map(String);
+          }
+        } catch {
+          // Not valid JSON, treat as single file
+          if (files.trim()) {
+            return [files.trim()];
+          }
+        }
+      }
+      return [];
+    };
+
+    let toolIdCounter = 0;
 
     events.forEach((event) => {
       switch (event.type) {
@@ -1076,7 +1231,7 @@ export default function App(): JSX.Element {
           const content = String(event.data.text ?? '');
           items.push({
             type: 'user',
-            id: `user-${event.sequence}`,
+            id: `user-${items.length}`,
             time: formatTimestamp(event.timestamp),
             content,
           });
@@ -1084,7 +1239,7 @@ export default function App(): JSX.Element {
         }
         case 'thinking': {
           pendingTools.push({
-            id: `think-${event.sequence}`,
+            id: `think-${toolIdCounter++}`,
             tool: 'Think',
             time: formatTimestamp(event.timestamp),
             status: 'complete',
@@ -1094,13 +1249,32 @@ export default function App(): JSX.Element {
         }
         case 'tool_start': {
           const toolName = String(event.data.tool_name ?? 'Tool');
+          const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
+          
           pendingTools.push({
-            id: `tool-${event.sequence}`,
+            id: `tool-${toolIdCounter++}`,
             tool: toolName,
             time: formatTimestamp(event.timestamp),
             status: 'running',
-            input: event.data.tool_input ?? '',
+            input: toolInput ?? '',
           });
+          
+          // Extract result data from WriteOutput tool calls
+          // These contain status, output, comments, result_files
+          if (toolName.includes('WriteOutput') || toolName.includes('write_output')) {
+            if (toolInput) {
+              const comments = String(toolInput.comments ?? '').trim();
+              const files = parseResultFiles(toolInput.result_files);
+              
+              if (comments) {
+                capturedComments = comments;
+              }
+              if (files.length > 0) {
+                capturedFiles = files;
+              }
+              capturedResultAttached = false;
+            }
+          }
           break;
         }
         case 'tool_complete': {
@@ -1123,13 +1297,26 @@ export default function App(): JSX.Element {
         }
         case 'message': {
           const text = String(event.data.text ?? '').trim();
-          items.push({
+          const agentMessage: ConversationItem = {
             type: 'agent_message',
-            id: `agent-${event.sequence}`,
+            id: `agent-${items.length}`,
             time: formatTimestamp(event.timestamp),
             content: text,
             toolCalls: pendingTools,
-          });
+          };
+          
+          // Attach pending result data from WriteOutput tool
+          if (!capturedResultAttached && (capturedComments || capturedFiles)) {
+            if (capturedComments) {
+              (agentMessage as { comments?: string }).comments = capturedComments;
+            }
+            if (capturedFiles && capturedFiles.length > 0) {
+              (agentMessage as { files?: string[] }).files = capturedFiles;
+            }
+            capturedResultAttached = true;
+          }
+          
+          items.push(agentMessage);
           pendingTools = [];
           break;
         }
@@ -1149,9 +1336,66 @@ export default function App(): JSX.Element {
             | 'failed'
             | 'running';
 
+
+          // Find the last agent message WITH CONTENT to attach comments and files
+          // Skip empty auto-flushed messages (created by flushPendingTools)
+          let foundAgentMessage = false;
+          
+          if (comments || files.length > 0) {
+            for (let i = items.length - 1; i >= 0; i--) {
+              const item = items[i];
+              if (item.type === 'agent_message') {
+                const hasContent = item.content && item.content.trim() !== '';
+                const hasWriteOutputTool = item.toolCalls.some(
+                  (t) => t.tool.includes('WriteOutput') || t.tool.includes('Output')
+                );
+                
+                if (hasContent || hasWriteOutputTool) {
+                  if (comments) {
+                    (item as { comments?: string }).comments = comments;
+                  }
+                  if (files.length > 0) {
+                    (item as { files?: string[] }).files = files;
+                  }
+                  foundAgentMessage = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          // If no suitable agent message found, try any agent_message as fallback
+          if (!foundAgentMessage && (comments || files.length > 0)) {
+            for (let i = items.length - 1; i >= 0; i--) {
+              if (items[i].type === 'agent_message') {
+                if (comments) {
+                  (items[i] as { comments?: string }).comments = comments;
+                }
+                if (files.length > 0) {
+                  (items[i] as { files?: string[] }).files = files;
+                }
+                foundAgentMessage = true;
+                break;
+              }
+            }
+          }
+
+          // If still no agent message found, create one
+          if (!foundAgentMessage && (comments || files.length > 0)) {
+            items.push({
+              type: 'agent_message',
+              id: `agent-output-${items.length}`,
+              time: formatTimestamp(event.timestamp),
+              content: output || 'Task completed.',
+              toolCalls: [],
+              comments: comments || undefined,
+              files: files.length > 0 ? files : undefined,
+            });
+          }
+
           items.push({
             type: 'output',
-            id: `output-${event.sequence}`,
+            id: `output-${items.length}`,
             time: formatTimestamp(event.timestamp),
             outputParts: output ? [output] : [],
             commentParts: comments ? [comments] : [],
@@ -1168,6 +1412,22 @@ export default function App(): JSX.Element {
 
     if (pendingTools.length > 0) {
       flushPendingTools();
+    }
+
+    // Attach any remaining pending result to the last agent message if not yet attached
+    if (!capturedResultAttached && (capturedComments || capturedFiles)) {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (item.type === 'agent_message') {
+          if (capturedComments) {
+            item.comments = capturedComments;
+          }
+          if (capturedFiles && capturedFiles.length > 0) {
+            item.files = capturedFiles;
+          }
+          break;
+        }
+      }
     }
 
     return items;
@@ -1288,22 +1548,39 @@ export default function App(): JSX.Element {
     });
   };
 
+  const toggleFiles = (id: string) => {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   const expandAllSections = () => {
     const allToolIds = conversation.flatMap((item) =>
       item.type === 'agent_message' ? item.toolCalls.map((tool) => tool.id) : []
     );
     const allOutputIds = outputItems.map((item) => item.id);
+    const allAgentMessageIds = conversation
+      .filter((item) => item.type === 'agent_message')
+      .map((item) => item.id);
     setExpandedTools(new Set(allToolIds));
-    setExpandedComments(new Set(allOutputIds));
+    setExpandedComments(new Set([...allOutputIds, ...allAgentMessageIds]));
+    setExpandedFiles(new Set(allAgentMessageIds));
   };
 
   const collapseAllSections = () => {
     setExpandedTools(new Set());
     setExpandedComments(new Set());
+    setExpandedFiles(new Set());
   };
 
   const toggleAllSections = () => {
-    if (expandedTools.size > 0 || expandedComments.size > 0) {
+    if (expandedTools.size > 0 || expandedComments.size > 0 || expandedFiles.size > 0) {
       collapseAllSections();
     } else {
       expandAllSections();
@@ -1384,7 +1661,7 @@ export default function App(): JSX.Element {
           {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
           ) : (
-            conversation.map((item) => {
+            conversation.map((item, index) => {
               if (item.type === 'user') {
                 return (
                   <MessageBlock
@@ -1396,6 +1673,10 @@ export default function App(): JSX.Element {
                 );
               }
               if (item.type === 'agent_message') {
+                const isLastAgentMessage = conversation
+                  .slice(index + 1)
+                  .every((i) => i.type !== 'agent_message');
+                const messageStatus = isLastAgentMessage && status !== 'running' ? status : undefined;
                 return (
                   <AgentMessageBlock
                     key={item.id}
@@ -1404,6 +1685,13 @@ export default function App(): JSX.Element {
                     toolCalls={item.toolCalls}
                     toolExpanded={expandedTools}
                     onToggleTool={toggleTool}
+                    status={messageStatus}
+                    comments={item.comments}
+                    commentsExpanded={expandedComments.has(item.id)}
+                    onToggleComments={() => toggleComments(item.id)}
+                    files={item.files}
+                    filesExpanded={expandedFiles.has(item.id)}
+                    onToggleFiles={() => toggleFiles(item.id)}
                   />
                 );
               }
@@ -1435,8 +1723,8 @@ export default function App(): JSX.Element {
       <div className="terminal-footer">
         <div className="tool-usage-bar">
           <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
-          {Object.keys(TOOL_SYMBOL).map((tool) => (
-            <ToolTag key={tool} type={tool} count={toolStats[tool] ?? 0} />
+          {Object.keys(toolStats).map((tool) => (
+            <ToolTag key={tool} type={tool} count={toolStats[tool]} />
           ))}
         </div>
         <div className="input-wrapper">

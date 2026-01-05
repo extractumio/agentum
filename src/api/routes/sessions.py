@@ -12,9 +12,12 @@ Provides endpoints for:
 """
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -372,6 +375,7 @@ async def stream_events(
                     continue
 
                 payload = json.dumps(event, default=str)
+                
                 yield f"id: {event.get('sequence')}\n"
                 yield f"data: {payload}\n\n"
 

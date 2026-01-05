@@ -51,7 +51,6 @@ def session_to_response(session) -> SessionResponse:
         status=session.status,
         task=session.task,
         model=session.model,
-        working_dir=session.working_dir,
         created_at=session.created_at,
         updated_at=session.updated_at,
         completed_at=session.completed_at,
@@ -65,7 +64,6 @@ def session_to_response(session) -> SessionResponse:
 def build_task_params(
     session_id: str,
     task: str,
-    working_dir: str | None,
     additional_dirs: list[str],
     resume_session_id: str | None,
     fork_session: bool,
@@ -81,7 +79,6 @@ def build_task_params(
         session_id=session_id,
         resume_session_id=resume_session_id,
         fork_session=fork_session,
-        working_dir=working_dir,
         additional_dirs=additional_dirs,
         model=config.model,
         max_turns=config.max_turns,
@@ -126,7 +123,6 @@ async def run_task(
         db=db,
         user_id=user_id,
         task=request.task,
-        working_dir=request.working_dir,
         model=request.config.model,
     )
 
@@ -134,7 +130,6 @@ async def run_task(
     params = build_task_params(
         session_id=session.id,
         task=request.task,
-        working_dir=request.working_dir,
         additional_dirs=request.additional_dirs,
         resume_session_id=request.resume_session_id,
         fork_session=request.fork_session,
@@ -175,7 +170,6 @@ async def create_session(
         db=db,
         user_id=user_id,
         task=request.task,
-        working_dir=request.working_dir,
         model=request.model,
     )
 
@@ -295,14 +289,10 @@ async def start_task(
         # This session has history, resume from itself
         resume_from = session_id
 
-    # Determine working directory: request override > session stored value
-    effective_working_dir = request.working_dir or session.working_dir
-
     # Build task parameters
     params = build_task_params(
         session_id=session_id,
         task=task_to_run,
-        working_dir=effective_working_dir,
         additional_dirs=request.additional_dirs,
         resume_session_id=resume_from,
         fork_session=request.fork_session,
@@ -379,7 +369,7 @@ async def stream_events(
                 yield f"id: {event.get('sequence')}\n"
                 yield f"data: {payload}\n\n"
 
-                if event.get("type") in ("agent_complete", "error", "cancelled"):
+                if event.get("type") in ("output_display", "error", "cancelled"):
                     break
         finally:
             if not agent_runner.is_running(session_id):

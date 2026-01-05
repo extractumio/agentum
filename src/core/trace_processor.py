@@ -405,17 +405,24 @@ class TraceProcessor:
         """
         Track status from Write tool calls to output.yaml.
 
-        When the agent writes to output.yaml, extract the status
+        When the agent writes to output.yaml (or uses WriteOutput),
+        extract the status
         from the content to determine final success/failure.
 
         Args:
             tool_name: Name of the tool being called.
             tool_input: Input parameters for the tool.
         """
-        if tool_name != "Write":
+        if not isinstance(tool_input, dict):
             return
 
-        if not isinstance(tool_input, dict):
+        if "WriteOutput" in tool_name or "write_output" in tool_name:
+            status_value = tool_input.get("status")
+            if status_value:
+                self._output_status = str(status_value)
+            return
+
+        if tool_name != "Write":
             return
 
         # Check if writing to output.yaml
@@ -552,4 +559,3 @@ def create_stderr_callback(tracer: TracerBase):
             tracer.on_error(text.strip(), error_type="stderr")
 
     return stderr_callback
-

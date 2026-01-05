@@ -15,7 +15,6 @@ services:
       - ./prompts:/prompts:ro
       - ./skills:/skills:ro
       - ./tools:/tools:ro
-      - /var/run/agentum/mounts:/mounts:rshared
     ports:
       - "${AGENTUM_API_PORT:-40080}:40080"
     cap_add:

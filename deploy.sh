@@ -5,9 +5,26 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 ACTION="${1:-}"
+shift || true
+
+MOUNT_DIR_READONLY=""
+MOUNT_DIR_RW=""
+
+for arg in "$@"; do
+  case "${arg}" in
+    --mount-dir-readonly=*)
+      MOUNT_DIR_READONLY="${arg#*=}"
+      ;;
+    --mount-dir-rw=*)
+      MOUNT_DIR_RW="${arg#*=}"
+      ;;
+    *)
+      ;;
+  esac
+done
 
 if [[ "${ACTION}" != "build" && "${ACTION}" != "cleanup" ]]; then
-  echo "Usage: ./deploy.sh <build|cleanup>"
+  echo "Usage: ./deploy.sh <build|cleanup> [--mount-dir-readonly=/path] [--mount-dir-rw=/path]"
   exit 1
 fi
 
@@ -31,11 +48,30 @@ print(value)
 PY
 }
 
-function ensure_mount_dir() {
-  local mount_dir="/var/run/agentum/mounts"
-  if [[ ! -d "${mount_dir}" ]]; then
-    mkdir -p "${mount_dir}"
+function prepare_mount_overrides() {
+  local override_file="docker-compose.override.yml"
+  rm -f "${override_file}"
+
+  if [[ -z "${MOUNT_DIR_READONLY}" && -z "${MOUNT_DIR_RW}" ]]; then
+    return
   fi
+
+  local rw_suffix=""
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    rw_suffix=":rshared"
+  fi
+
+  {
+    echo "services:"
+    echo "  agentum-api:"
+    echo "    volumes:"
+    if [[ -n "${MOUNT_DIR_READONLY}" ]]; then
+      echo "      - ${MOUNT_DIR_READONLY}:/mounts/readonly:ro"
+    fi
+    if [[ -n "${MOUNT_DIR_RW}" ]]; then
+      echo "      - ${MOUNT_DIR_RW}:/mounts${rw_suffix}"
+    fi
+  } > "${override_file}"
 }
 
 function render_ui_config() {
@@ -68,6 +104,7 @@ function check_services() {
 
 if [[ "${ACTION}" == "cleanup" ]]; then
   docker compose down --remove-orphans
+  rm -f docker-compose.override.yml
   if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^agentum:'; then
     docker images --format '{{.Repository}}:{{.Tag}}' \
       | grep '^agentum:' \
@@ -77,12 +114,11 @@ if [[ "${ACTION}" == "cleanup" ]]; then
   exit 0
 fi
 
-ensure_mount_dir
-
 API_PORT="$(read_config_value 'api.external_port')"
 WEB_PORT="$(read_config_value 'web.external_port')"
 
 render_ui_config
+prepare_mount_overrides
 
 IMAGE_TAG="deploy-$(date +%Y%m%d%H%M%S)"
 BACKUP_ENV="$(mktemp)"

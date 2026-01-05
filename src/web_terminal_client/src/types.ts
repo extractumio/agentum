@@ -1,5 +1,6 @@
 export type SSEEventType =
   | 'agent_start'
+  | 'user_message'
   | 'tool_start'
   | 'tool_complete'
   | 'thinking'

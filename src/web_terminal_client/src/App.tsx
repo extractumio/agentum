@@ -13,7 +13,45 @@ import { loadConfig } from './config';
 import { connectSSE } from './sse';
 import type { AppConfig, ResultResponse, SessionResponse, TerminalEvent } from './types';
 
-const BOX_WIDTH = 62;
+type ConversationItem =
+  | {
+      type: 'user';
+      id: string;
+      time: string;
+      content: string;
+    }
+  | {
+      type: 'agent_message';
+      id: string;
+      time: string;
+      content: string;
+      toolCalls: ToolCallView[];
+      comments?: string;
+      files?: string[];
+    }
+  | {
+      type: 'output';
+      id: string;
+      time: string;
+      outputParts: string[];
+      commentParts: string[];
+      files: string[];
+      status: 'complete' | 'partial' | 'failed' | 'running';
+      error?: string;
+    };
+
+type ToolCallView = {
+  id: string;
+  tool: string;
+  time: string;
+  status: 'running' | 'complete' | 'failed';
+  durationMs?: number;
+  input?: unknown;
+  output?: string;
+  thinking?: string;
+  error?: string;
+  suggestion?: string;
+};
 
 const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
@@ -33,6 +71,31 @@ const STATUS_CLASS: Record<string, string> = {
 
 const EMPTY_EVENTS: TerminalEvent[] = [];
 
+const TOOL_COLOR_CLASS: Record<string, string> = {
+  Read: 'tool-read',
+  Bash: 'tool-bash',
+  Write: 'tool-write',
+  WebFetch: 'tool-webfetch',
+  Output: 'tool-output',
+  Think: 'tool-think',
+};
+
+const TOOL_SYMBOL: Record<string, string> = {
+  Read: '◉',
+  Bash: '▶',
+  Write: '✎',
+  WebFetch: '⬡',
+  Output: '◈',
+  Think: '◇',
+};
+
+const OUTPUT_STATUS_CLASS: Record<string, string> = {
+  complete: 'output-status-complete',
+  partial: 'output-status-partial',
+  failed: 'output-status-failed',
+  running: 'output-status-running',
+};
+
 function normalizeStatus(value: string): string {
   const statusValue = value.toLowerCase();
   if (statusValue === 'completed' || statusValue === 'complete') {
@@ -47,22 +110,10 @@ function normalizeStatus(value: string): string {
   if (statusValue === 'running') {
     return 'running';
   }
+  if (statusValue === 'partial') {
+    return 'partial';
+  }
   return statusValue || 'idle';
-}
-
-function padBoxLine(content: string): string {
-  const maxContentWidth = BOX_WIDTH - 4;
-  const trimmed = content.length > maxContentWidth
-    ? `${content.slice(0, maxContentWidth - 3)}...`
-    : content;
-  return `│ ${trimmed.padEnd(maxContentWidth, ' ')} │`;
-}
-
-function buildBox(lines: string[]): string[] {
-  const top = `┌${'─'.repeat(BOX_WIDTH - 2)}┐`;
-  const mid = `├${'─'.repeat(BOX_WIDTH - 2)}┤`;
-  const bottom = `└${'─'.repeat(BOX_WIDTH - 2)}┘`;
-  return [top, padBoxLine(lines[0] ?? ''), mid, ...lines.slice(1).map(padBoxLine), bottom];
 }
 
 function formatDuration(durationMs?: number | null): string {
@@ -81,15 +132,45 @@ function formatCost(cost?: number | null): string {
   return `$${cost.toFixed(4)}`;
 }
 
+function formatTimestamp(timestamp?: string): string {
+  if (!timestamp) {
+    return '--:--:--';
+  }
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString('en-US', { hour12: false });
+}
+
 function renderMarkdown(text: string): JSX.Element[] {
   const lines = text.split('\n');
   const elements: JSX.Element[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    if (line.trim().startsWith('```')) {
+      if (inCodeBlock) {
+        elements.push(
+          <pre key={`code-${i}`} className="md-code-block">
+            {codeLines.join('\n')}
+          </pre>
+        );
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
     let element: JSX.Element;
 
-    // Headers
     if (line.startsWith('### ')) {
       element = (
         <div key={i} className="md-h3">
@@ -108,22 +189,16 @@ function renderMarkdown(text: string): JSX.Element[] {
           {renderInlineMarkdown(line.slice(2))}
         </div>
       );
-    }
-    // Horizontal rule
-    else if (/^[-—─]{3,}$/.test(line.trim())) {
+    } else if (/^[-—─]{3,}$/.test(line.trim())) {
       element = <hr key={i} className="md-hr" />;
-    }
-    // List items
-    else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
+    } else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
       const indent = line.length - line.trimStart().length;
       element = (
         <div key={i} className="md-li" style={{ marginLeft: indent * 4 }}>
           • {renderInlineMarkdown(line.trimStart().slice(2))}
         </div>
       );
-    }
-    // Numbered list
-    else if (/^\s*\d+\.\s/.test(line)) {
+    } else if (/^\s*\d+\.\s/.test(line)) {
       const match = line.match(/^(\s*)(\d+)\.\s(.*)$/);
       if (match) {
         const [, spaces, num, content] = match;
@@ -135,17 +210,21 @@ function renderMarkdown(text: string): JSX.Element[] {
       } else {
         element = <div key={i}>{renderInlineMarkdown(line)}</div>;
       }
-    }
-    // Empty line
-    else if (line.trim() === '') {
+    } else if (line.trim() === '') {
       element = <div key={i} className="md-spacer" />;
-    }
-    // Regular paragraph
-    else {
+    } else {
       element = <div key={i}>{renderInlineMarkdown(line)}</div>;
     }
 
     elements.push(element);
+  }
+
+  if (inCodeBlock && codeLines.length > 0) {
+    elements.push(
+      <pre key="code-final" className="md-code-block">
+        {codeLines.join('\n')}
+      </pre>
+    );
   }
 
   return elements;
@@ -155,13 +234,11 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
   const result: (string | JSX.Element)[] = [];
   let key = 0;
 
-  // Process inline markdown: bold, italic, code, links
   const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
   let lastIndex = 0;
   let match;
 
   while ((match = regex.exec(text)) !== null) {
-    // Add text before match
     if (match.index > lastIndex) {
       result.push(text.slice(lastIndex, match.index));
     }
@@ -169,11 +246,23 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
     const [fullMatch, , bold, italic, code, linkText, linkUrl] = match;
 
     if (bold) {
-      result.push(<strong key={key++} className="md-bold">{bold}</strong>);
+      result.push(
+        <strong key={key++} className="md-bold">
+          {bold}
+        </strong>
+      );
     } else if (italic) {
-      result.push(<em key={key++} className="md-italic">{italic}</em>);
+      result.push(
+        <em key={key++} className="md-italic">
+          {italic}
+        </em>
+      );
     } else if (code) {
-      result.push(<code key={key++} className="md-code">{code}</code>);
+      result.push(
+        <code key={key++} className="md-code">
+          {code}
+        </code>
+      );
     } else if (linkText && linkUrl) {
       result.push(
         <a key={key++} href={linkUrl} className="md-link" target="_blank" rel="noopener noreferrer">
@@ -185,7 +274,6 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
     lastIndex = match.index + fullMatch.length;
   }
 
-  // Add remaining text
   if (lastIndex < text.length) {
     result.push(text.slice(lastIndex));
   }
@@ -205,22 +293,40 @@ function formatTokens(result?: ResultResponse | null): { input: number; output: 
 
 function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse | null): TerminalEvent[] {
   const now = new Date().toISOString();
-  const events: TerminalEvent[] = [
-    {
-      type: 'agent_start',
-      data: {
-        session_id: session.id,
-        model: session.model ?? 'unknown',
-        tools: [],
-        working_dir: session.working_dir ?? 'unknown',
-        task: session.task ?? '',
-      },
+  const events: TerminalEvent[] = [];
+
+  if (session.task) {
+    events.push({
+      type: 'user_message',
+      data: { text: session.task },
       timestamp: now,
-      sequence: 1,
+      sequence: 0,
+    });
+  }
+
+  events.push({
+    type: 'agent_start',
+    data: {
+      session_id: session.id,
+      model: session.model ?? 'unknown',
+      tools: [],
+      working_dir: session.working_dir ?? 'unknown',
+      task: session.task ?? '',
     },
-  ];
+    timestamp: now,
+    sequence: 1,
+  });
 
   if (result) {
+    // Create a message event with output text so output_display can attach files to it
+    events.push({
+      type: 'message',
+      data: {
+        text: result.output || 'Task completed.',
+      },
+      timestamp: now,
+      sequence: 2,
+    });
     events.push({
       type: 'output_display',
       data: {
@@ -231,7 +337,7 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
         status: result.status,
       },
       timestamp: now,
-      sequence: 2,
+      sequence: 3,
     });
     events.push({
       type: 'agent_complete',
@@ -245,16 +351,439 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
         model: result.metrics?.model ?? session.model,
       },
       timestamp: now,
-      sequence: 3,
+      sequence: 4,
     });
   }
 
   return events;
 }
 
+function formatToolInput(input: unknown): string {
+  let obj: unknown = input;
+  
+  // If input is a string, try to parse it as JSON
+  if (typeof input === 'string') {
+    try {
+      obj = JSON.parse(input);
+    } catch {
+      // Not valid JSON, return the string as-is
+      return input;
+    }
+  }
+  
+  // If it's an object, format it with custom replacer to unescape newlines in display
+  if (typeof obj === 'object' && obj !== null) {
+    const formatted = JSON.stringify(obj, null, 2);
+    // Replace escaped newlines with actual newlines for display (but preserve JSON structure)
+    return formatted
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t');
+  }
+  
+  return String(input);
+}
+
+function formatToolName(name: string): string {
+  if (name.startsWith('mcp_agentum_')) {
+    const suffix = name.slice('mcp_agentum_'.length);
+    const capitalized = suffix
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join('');
+    return `Agentum${capitalized}`;
+  }
+  return name;
+}
+
+function ToolTag({ type, count, showSymbol = true }: { type: string; count?: number; showSymbol?: boolean }): JSX.Element {
+  const colorClass = TOOL_COLOR_CLASS[type] ?? 'tool-read';
+  const symbol = TOOL_SYMBOL[type] ?? TOOL_SYMBOL.Read;
+  const displayName = formatToolName(type);
+
+  return (
+    <span className={`tool-tag ${colorClass}`}>
+      {showSymbol && <span className="tool-symbol">{symbol}</span>}
+      <span className="tool-name">{displayName}</span>
+      {count !== undefined && (
+        <span className="tool-count">×{count}</span>
+      )}
+    </span>
+  );
+}
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function AgentSpinner(): JSX.Element {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setFrame((prev) => (prev + 1) % SPINNER_FRAMES.length);
+    }, 80);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <span className="agent-spinner">
+      <span className="agent-spinner-char">{SPINNER_FRAMES[frame]}</span>
+      <span className="agent-spinner-label">processing...</span>
+    </span>
+  );
+}
+
+function MessageBlock({ sender, time, content }: { sender: string; time: string; content: string }): JSX.Element {
+  return (
+    <div className="message-block user-message">
+      <div className="message-header">
+        <span className="message-icon">⟩</span>
+        <span className="message-sender">{sender}</span>
+        <span className="message-time">@ {time}</span>
+      </div>
+      <div className="message-content">{content}</div>
+    </div>
+  );
+}
+
+function ToolCallBlock({
+  tool,
+  expanded,
+  onToggle,
+  isLast,
+}: {
+  tool: ToolCallView;
+  expanded: boolean;
+  onToggle: () => void;
+  isLast: boolean;
+}): JSX.Element {
+  const hasContent = Boolean(tool.thinking || tool.input || tool.output || tool.error);
+  const treeChar = isLast ? '└──' : '├──';
+  const previewSource = tool.output ?? tool.input;
+  const previewText = previewSource
+    ? String(typeof previewSource === 'string' ? previewSource : JSON.stringify(previewSource))
+    : '';
+
+  return (
+    <div className="tool-call">
+      <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button">
+        <span className="tool-tree">{treeChar}</span>
+        {hasContent && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
+        <ToolTag type={tool.tool} showSymbol={false} />
+        <span className="tool-time">@ {tool.time}</span>
+        {!expanded && previewText && (
+          <span className="tool-preview">
+            — {previewText.slice(0, 60)}
+            {previewText.length > 60 ? '...' : ''}
+          </span>
+        )}
+      </div>
+      {expanded && hasContent && (
+        <div className="tool-call-body">
+          {tool.thinking && (
+            <div className="tool-thinking">💭 {tool.thinking}</div>
+          )}
+          {tool.input !== undefined && tool.input !== null && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ command ─────────</div>
+              <pre className="tool-section-body">{formatToolInput(tool.input)}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {tool.output && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ output ──────────</div>
+              <pre className="tool-section-body tool-output">{tool.output}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {tool.error && (
+            <div className="tool-error">
+              <div className="tool-error-title">⚠ ERROR: {tool.error}</div>
+              {tool.suggestion && <div className="tool-suggestion">→ {tool.suggestion}</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentMessageBlock({
+  time,
+  content,
+  toolCalls,
+  toolExpanded,
+  onToggleTool,
+  status,
+  comments,
+  commentsExpanded,
+  onToggleComments,
+  files,
+  filesExpanded,
+  onToggleFiles,
+}: {
+  time: string;
+  content: string;
+  toolCalls: ToolCallView[];
+  toolExpanded: Set<string>;
+  onToggleTool: (id: string) => void;
+  status?: string;
+  comments?: string;
+  commentsExpanded?: boolean;
+  onToggleComments?: () => void;
+  files?: string[];
+  filesExpanded?: boolean;
+  onToggleFiles?: () => void;
+}): JSX.Element {
+  const statusClass = status ? `agent-status-${status}` : '';
+  const hasResult = Boolean(comments) || (files && files.length > 0);
+
+  return (
+    <div className={`message-block agent-message ${statusClass}`}>
+      <div className="message-header">
+        <span className="message-icon">◆</span>
+        <span className="message-sender">AGENT</span>
+        <span className="message-time">@ {time}</span>
+      </div>
+      <div className="message-content md-container">
+        {content ? renderMarkdown(content) : <AgentSpinner />}
+      </div>
+      {hasResult && (
+        <div className="result-section">
+          <div className="result-title">Result</div>
+          {comments && (
+            <div className="result-item">
+              <div className="result-item-header" onClick={onToggleComments} role="button">
+                <span className="result-tree">└──</span>
+                <span className="result-toggle">{commentsExpanded ? '▼' : '▶'}</span>
+                <span className="result-label">Comments</span>
+                <span className="result-count">({comments.length})</span>
+              </div>
+              {commentsExpanded && (
+                <div className="result-item-body md-container">
+                  {renderMarkdown(comments)}
+                </div>
+              )}
+            </div>
+          )}
+          {files && files.length > 0 && (
+            <div className="result-item">
+              <div className="result-item-header" onClick={onToggleFiles} role="button">
+                <span className="result-tree">{comments ? '└──' : '└──'}</span>
+                <span className="result-toggle">{filesExpanded ? '▼' : '▶'}</span>
+                <span className="result-label">Files</span>
+                <span className="result-count">({files.length})</span>
+              </div>
+              {filesExpanded && (
+                <div className="result-item-body result-files-list">
+                  {files.map((file, index) => (
+                    <div key={index} className="result-file-item">
+                      <span className="result-file-icon">📄</span>
+                      <span className="result-file-name">{file}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div className="tool-call-section">
+          <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+          {toolCalls.map((tool, index) => (
+            <ToolCallBlock
+              key={tool.id}
+              tool={tool}
+              expanded={toolExpanded.has(tool.id)}
+              onToggle={() => onToggleTool(tool.id)}
+              isLast={index === toolCalls.length - 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OutputBlock({
+  time,
+  outputParts,
+  commentParts,
+  commentsExpanded,
+  onToggleComments,
+  files,
+  status,
+  error,
+  onFileAction,
+}: {
+  time: string;
+  outputParts: string[];
+  commentParts: string[];
+  commentsExpanded: boolean;
+  onToggleComments: () => void;
+  files: string[];
+  status: 'complete' | 'partial' | 'failed' | 'running';
+  error?: string;
+  onFileAction: (filePath: string, mode: 'view' | 'download') => void;
+}): JSX.Element {
+  const statusClass = OUTPUT_STATUS_CLASS[status] ?? '';
+
+  return (
+    <div className={`message-block output-block ${statusClass}`}>
+      <div className="message-header">
+        <span className="message-icon">◆</span>
+        <span className="message-sender">OUTPUT</span>
+        <span className="message-time">@ {time}</span>
+      </div>
+      <div className="message-content md-container">
+        {outputParts.length > 0
+          ? outputParts.map((part, index) => (
+              <div key={`output-${index}`} className="output-part">
+                {renderMarkdown(part)}
+              </div>
+            ))
+          : 'No output yet.'}
+      </div>
+      {commentParts.length > 0 && (
+        <div className="output-comments">
+          <button className="comment-toggle" type="button" onClick={onToggleComments}>
+            {commentsExpanded ? '▼' : '▶'} comments
+          </button>
+          {commentsExpanded && (
+            <div className="comment-body md-container">
+              {commentParts.map((part, index) => (
+                <div key={`comment-${index}`} className="output-part">
+                  {renderMarkdown(part)}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="output-files">
+          {files.map((file) => (
+            <div key={file} className="output-file-row">
+              <span className="output-file-name">{file}</span>
+              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'view')}>
+                view
+              </button>
+              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'download')}>
+                download
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <div className="output-error">{error}</div>}
+    </div>
+  );
+}
+
+function InputField({
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+  isRunning,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  isRunning: boolean;
+}): JSX.Element {
+  return (
+    <div className="input-shell">
+      <div className="input-row">
+        <span className="input-prompt">⟩</span>
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              if (!isRunning) {
+                onSubmit();
+              }
+            }
+          }}
+          placeholder="Enter your request..."
+          className="input-textarea"
+          disabled={isRunning}
+          rows={1}
+        />
+        {isRunning ? (
+          <button className="input-button cancel" type="button" onClick={onCancel}>
+            ■ Cancel
+          </button>
+        ) : (
+          <button className="input-button" type="button" onClick={onSubmit}>
+            Send ↵
+          </button>
+        )}
+      </div>
+      <div className="input-footer">
+        <span className="input-footer-item">📎 Attach</span>
+        <span className="input-footer-item">📁 Files</span>
+        <span className="input-divider">│</span>
+        <span className="input-footer-item">[skills]</span>
+        <span className="input-footer-item">[model ▼]</span>
+      </div>
+    </div>
+  );
+}
+
+function StatusFooter({
+  isRunning,
+  statusLabel,
+  statusClass,
+  stats,
+  connected,
+}: {
+  isRunning: boolean;
+  statusLabel: string;
+  statusClass: string;
+  stats: {
+    turns: number;
+    tokensIn: number;
+    tokensOut: number;
+    cost: number;
+    durationMs: number;
+  };
+  connected: boolean;
+}): JSX.Element {
+  return (
+    <div className="terminal-status">
+      <div className="status-left">
+        <span className={`status-connection ${connected ? 'connected' : 'disconnected'}`}>
+          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+        </span>
+        <span className="status-divider">│</span>
+        <span className={`status-state ${statusClass}`}>
+          {isRunning ? (
+            <>
+              <span className="status-spinner">◐</span> Running...
+            </>
+          ) : (
+            <>{statusLabel === 'Idle' ? '● Idle' : statusLabel}</>
+          )}
+        </span>
+      </div>
+      <div className="status-right">
+        <span className="status-metric">Turns: <strong>{stats.turns}</strong></span>
+        <span className="status-metric">Tokens: <strong>{stats.tokensIn}</strong> in / <strong>{stats.tokensOut}</strong> out</span>
+        <span className="status-metric cost">${stats.cost.toFixed(4)}</span>
+        <span className="status-metric">{formatDuration(stats.durationMs)}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App(): JSX.Element {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('agentum_token'));
+  const [userId, setUserId] = useState<string>('');
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionResponse | null>(null);
   const [events, setEvents] = useState<TerminalEvent[]>(EMPTY_EVENTS);
@@ -262,6 +791,10 @@ export default function App(): JSX.Element {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -274,15 +807,10 @@ export default function App(): JSX.Element {
   const outputRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const activeTurnRef = useRef(0);
-  const isFirstTaskRef = useRef(true);
-  const lastProfileRef = useRef<string | null>(null);
-  const [sessionHeaderShown, setSessionHeaderShown] = useState(false);
 
   const isRunning = status === 'running';
-
   const statusLabel = STATUS_LABELS[status] ?? STATUS_LABELS.idle;
   const statusClass = STATUS_CLASS[status] ?? STATUS_CLASS.idle;
-  const statusSymbol = status === 'idle' ? '○' : '●';
 
   useEffect(() => {
     loadConfig().then(setConfig).catch(() => setConfig(null));
@@ -297,6 +825,7 @@ export default function App(): JSX.Element {
       .then((response) => {
         localStorage.setItem('agentum_token', response.access_token);
         setToken(response.access_token);
+        setUserId(response.user_id);
       })
       .catch((err) => {
         setError(`Failed to fetch token: ${err.message}`);
@@ -351,10 +880,8 @@ export default function App(): JSX.Element {
       let enriched = event;
 
       if (event.type === 'conversation_turn') {
-        // Track current turn within the task for tool association
         const turnNumber = Number(event.data.turn_number ?? 0);
         activeTurnRef.current = turnNumber;
-        // Turns are accumulated in agent_complete handler, not here
       }
 
       if (event.type === 'tool_start') {
@@ -367,15 +894,6 @@ export default function App(): JSX.Element {
         };
       }
 
-      // Skip duplicate profile_switch events
-      if (event.type === 'profile_switch') {
-        const profileName = String(event.data.profile_name ?? '');
-        if (profileName === lastProfileRef.current) {
-          return;
-        }
-        lastProfileRef.current = profileName;
-      }
-
       appendEvent(enriched);
 
       if (event.type === 'agent_start') {
@@ -383,7 +901,6 @@ export default function App(): JSX.Element {
         setError(null);
         const eventSessionId = String(event.data.session_id ?? '');
         setCurrentSession((prev) => ({
-          // Preserve database session ID - don't overwrite with file-based session ID from event
           id: prev?.id || eventSessionId || 'unknown',
           status: 'running',
           task: (event.data.task as string | undefined) ?? prev?.task,
@@ -401,9 +918,6 @@ export default function App(): JSX.Element {
           ...prev,
           model: String(event.data.model ?? prev.model ?? ''),
         }));
-        // Mark that we've seen the first task and shown the header
-        isFirstTaskRef.current = false;
-        setSessionHeaderShown(true);
       }
 
       if (event.type === 'agent_complete') {
@@ -419,7 +933,6 @@ export default function App(): JSX.Element {
           : 0;
         const newTokensOut = usage?.output_tokens ?? 0;
 
-        // Accumulate stats across tasks in the same session
         setStats((prev) => ({
           ...prev,
           turns: prev.turns + Number(event.data.num_turns ?? 0),
@@ -430,7 +943,6 @@ export default function App(): JSX.Element {
         }));
         setStatus(normalizedStatus);
 
-        // Update currentSession status so continuation logic works correctly
         setCurrentSession((prev) =>
           prev
             ? {
@@ -514,20 +1026,17 @@ export default function App(): JSX.Element {
     setError(null);
     setStatus('running');
     activeTurnRef.current = 0;
+    const userEvent: TerminalEvent = {
+      type: 'user_message',
+      data: { text: taskText },
+      timestamp: new Date().toISOString(),
+      sequence: Date.now(),
+    };
 
-    // Check if we should continue an existing session or create a new one
     const shouldContinue = currentSession && currentSession.status !== 'running';
 
     if (shouldContinue) {
-      // Continue existing session: keep events, accumulate stats
-      // Add a visual separator for the new task
-      appendEvent({
-        type: 'message',
-        data: { text: `━━━ Follow-up: ${taskText.slice(0, 60)}${taskText.length > 60 ? '...' : ''} ━━━` },
-        timestamp: new Date().toISOString(),
-        sequence: Date.now(),
-      });
-
+      appendEvent(userEvent);
       try {
         const response = await continueTask(
           config.api.base_url,
@@ -550,11 +1059,10 @@ export default function App(): JSX.Element {
         setError(`Failed to continue task: ${(err as Error).message}`);
       }
     } else {
-      // New session: clear events and reset stats
-      setEvents([]);
-      isFirstTaskRef.current = true;
-      lastProfileRef.current = null;
-      setSessionHeaderShown(false);
+      setEvents([userEvent]);
+      setExpandedTools(new Set());
+      setExpandedComments(new Set());
+      setExpandedFiles(new Set());
       setStats({
         turns: 0,
         cost: 0,
@@ -618,12 +1126,7 @@ export default function App(): JSX.Element {
         result = await getResult(config.api.base_url, token, sessionId);
       }
 
-      // Reset state for loaded session
-      setSessionHeaderShown(false);
-      lastProfileRef.current = null;
       setEvents(buildSyntheticEvents(session, result));
-      // Mark header as shown after building synthetic events
-      setSessionHeaderShown(true);
 
       if (result?.metrics) {
         const tokens = formatTokens(result);
@@ -654,9 +1157,9 @@ export default function App(): JSX.Element {
     setCurrentSession(null);
     setEvents([]);
     setStatus('idle');
-    isFirstTaskRef.current = true;
-    lastProfileRef.current = null;
-    setSessionHeaderShown(false);
+    setExpandedTools(new Set());
+    setExpandedComments(new Set());
+    setExpandedFiles(new Set());
     setStats({
       turns: 0,
       cost: 0,
@@ -667,176 +1170,304 @@ export default function App(): JSX.Element {
     });
   };
 
-  const sessionIdLabel = currentSession?.id
-    ? `${currentSession.id.slice(0, 8)}...`
-    : 'new';
+  const conversation = useMemo<ConversationItem[]>(() => {
+    const items: ConversationItem[] = [];
+    let pendingTools: ToolCallView[] = [];
+    // Capture result data from mcp__agentum__WriteOutput tool calls
+    // Using separate variables to avoid TypeScript's overly strict control flow narrowing
+    let capturedComments: string | undefined;
+    let capturedFiles: string[] | undefined;
+    let capturedResultAttached = false;
 
-  const renderEvent = useCallback((event: TerminalEvent, index: number) => {
-    switch (event.type) {
-      case 'agent_start': {
-        const sessionId = String(event.data.session_id ?? 'unknown');
-        const model = String(event.data.model ?? 'unknown');
-
-        // For the first task, show full session box
-        // For follow-up tasks, show a minimal indicator
-        if (index === 0 || !sessionHeaderShown) {
-          const lines = buildBox([
-            '★ AGENTUM | Self-Improving Agent',
-            `⚡ SESSION ${sessionId}`,
-            `• Model: ${model}`,
-          ]);
-          return (
-            <pre key={`${event.sequence}-${index}`} className="terminal-box">
-              {lines.join('\n')}
-            </pre>
-          );
+    const findOpenTool = (toolName: string): ToolCallView | undefined => {
+      for (let i = pendingTools.length - 1; i >= 0; i -= 1) {
+        const tool = pendingTools[i];
+        if (tool.tool === toolName && tool.status === 'running') {
+          return tool;
         }
+      }
+      return undefined;
+    };
 
-        // Follow-up task: minimal indicator
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            <span className="event-icon">▶</span>
-            <span>Task started (model: {model})</span>
-          </div>
-        );
+    const flushPendingTools = (timestamp?: string) => {
+      if (pendingTools.length > 0) {
+        items.push({
+          type: 'agent_message',
+          id: `agent-auto-${items.length}`,
+          time: formatTimestamp(timestamp),
+          content: '',
+          toolCalls: pendingTools,
+        });
+        pendingTools = [];
       }
-      case 'tool_start': {
-        const toolName = String(event.data.tool_name ?? 'Tool');
-        const turn = event.meta?.turn ? ` [${event.meta.turn}]` : '';
-        const input = event.data.tool_input;
-        const inputLines = typeof input === 'object' && input
-          ? Object.entries(input as Record<string, unknown>)
-              .slice(0, 6)
-              .map(([key, value]) => {
-                const formatted = typeof value === 'string' ? value : JSON.stringify(value);
-                const trimmed = formatted.length > 80 ? `${formatted.slice(0, 77)}...` : formatted;
-                return `  │ • ${key}: ${trimmed}`;
-              })
-          : [];
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            <div className="terminal-line">
-              <span className="event-icon">⚙</span>
-              <span className="event-dim">{turn}</span>
-              <span className="event-tool">{toolName}</span>
-            </div>
-            {inputLines.length > 0 && (
-              <pre className="terminal-subline">{inputLines.join('\n')}</pre>
-            )}
-          </div>
-        );
+    };
+
+    // Parse result_files from WriteOutput - can be JSON string or array
+    const parseResultFiles = (files: unknown): string[] => {
+      if (Array.isArray(files)) {
+        return files.map(String);
       }
-      case 'tool_complete': {
-        const toolName = String(event.data.tool_name ?? 'Tool');
-        const durationMs = Number(event.data.duration_ms ?? 0);
-        const isError = Boolean(event.data.is_error);
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            <div className={`terminal-line ${isError ? 'event-error' : 'event-success'}`}>
-              <span className="event-icon">└─</span>
-              <span className="event-tool">{toolName}</span>
-              <span>{isError ? 'FAILED' : 'OK'}</span>
-              <span className="event-dim">({durationMs}ms)</span>
-            </div>
-          </div>
-        );
+      if (typeof files === 'string') {
+        try {
+          const parsed = JSON.parse(files);
+          if (Array.isArray(parsed)) {
+            return parsed.map(String);
+          }
+        } catch {
+          // Not valid JSON, treat as single file
+          if (files.trim()) {
+            return [files.trim()];
+          }
+        }
       }
-      case 'thinking': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-thinking">
-            <span className="event-icon">❯</span>
-            <span>{String(event.data.text ?? '')}</span>
-          </div>
-        );
+      return [];
+    };
+
+    let toolIdCounter = 0;
+
+    events.forEach((event) => {
+      switch (event.type) {
+        case 'user_message': {
+          const content = String(event.data.text ?? '');
+          items.push({
+            type: 'user',
+            id: `user-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            content,
+          });
+          break;
+        }
+        case 'thinking': {
+          pendingTools.push({
+            id: `think-${toolIdCounter++}`,
+            tool: 'Think',
+            time: formatTimestamp(event.timestamp),
+            status: 'complete',
+            thinking: String(event.data.text ?? ''),
+          });
+          break;
+        }
+        case 'tool_start': {
+          const toolName = String(event.data.tool_name ?? 'Tool');
+          const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
+          
+          pendingTools.push({
+            id: `tool-${toolIdCounter++}`,
+            tool: toolName,
+            time: formatTimestamp(event.timestamp),
+            status: 'running',
+            input: toolInput ?? '',
+          });
+          
+          // Extract result data from WriteOutput tool calls
+          // These contain status, output, comments, result_files
+          if (toolName.includes('WriteOutput') || toolName.includes('write_output')) {
+            if (toolInput) {
+              const comments = String(toolInput.comments ?? '').trim();
+              const files = parseResultFiles(toolInput.result_files);
+              
+              if (comments) {
+                capturedComments = comments;
+              }
+              if (files.length > 0) {
+                capturedFiles = files;
+              }
+              capturedResultAttached = false;
+            }
+          }
+          break;
+        }
+        case 'tool_complete': {
+          const toolName = String(event.data.tool_name ?? 'Tool');
+          const durationMs = Number(event.data.duration_ms ?? 0);
+          const isError = Boolean(event.data.is_error);
+          const result = event.data.result;
+          const tool = findOpenTool(toolName);
+          if (tool) {
+            tool.status = isError ? 'failed' : 'complete';
+            tool.durationMs = durationMs;
+            if (result !== undefined && result !== null) {
+              tool.output = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+            }
+            if (isError) {
+              tool.error = String(event.data.error ?? 'Tool failed');
+            }
+          }
+          break;
+        }
+        case 'message': {
+          const text = String(event.data.text ?? '').trim();
+          const agentMessage: ConversationItem = {
+            type: 'agent_message',
+            id: `agent-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            content: text,
+            toolCalls: pendingTools,
+          };
+          
+          // Attach pending result data from WriteOutput tool
+          if (!capturedResultAttached && (capturedComments || capturedFiles)) {
+            if (capturedComments) {
+              (agentMessage as { comments?: string }).comments = capturedComments;
+            }
+            if (capturedFiles && capturedFiles.length > 0) {
+              (agentMessage as { files?: string[] }).files = capturedFiles;
+            }
+            capturedResultAttached = true;
+          }
+          
+          items.push(agentMessage);
+          pendingTools = [];
+          break;
+        }
+        case 'output_display': {
+          if (pendingTools.length > 0) {
+            flushPendingTools(event.timestamp);
+          }
+          const output = String(event.data.output ?? '').trim();
+          const comments = String(event.data.comments ?? '').trim();
+          const errorText = String(event.data.error ?? '').trim();
+          const files = Array.isArray(event.data.result_files)
+            ? (event.data.result_files as string[])
+            : [];
+          const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as
+            | 'complete'
+            | 'partial'
+            | 'failed'
+            | 'running';
+
+
+          // Find the last agent message WITH CONTENT to attach comments and files
+          // Skip empty auto-flushed messages (created by flushPendingTools)
+          let foundAgentMessage = false;
+          
+          if (comments || files.length > 0) {
+            for (let i = items.length - 1; i >= 0; i--) {
+              const item = items[i];
+              if (item.type === 'agent_message') {
+                const hasContent = item.content && item.content.trim() !== '';
+                const hasWriteOutputTool = item.toolCalls.some(
+                  (t) => t.tool.includes('WriteOutput') || t.tool.includes('Output')
+                );
+                
+                if (hasContent || hasWriteOutputTool) {
+                  if (comments) {
+                    (item as { comments?: string }).comments = comments;
+                  }
+                  if (files.length > 0) {
+                    (item as { files?: string[] }).files = files;
+                  }
+                  foundAgentMessage = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          // If no suitable agent message found, try any agent_message as fallback
+          if (!foundAgentMessage && (comments || files.length > 0)) {
+            for (let i = items.length - 1; i >= 0; i--) {
+              if (items[i].type === 'agent_message') {
+                if (comments) {
+                  (items[i] as { comments?: string }).comments = comments;
+                }
+                if (files.length > 0) {
+                  (items[i] as { files?: string[] }).files = files;
+                }
+                foundAgentMessage = true;
+                break;
+              }
+            }
+          }
+
+          // If still no agent message found, create one
+          if (!foundAgentMessage && (comments || files.length > 0)) {
+            items.push({
+              type: 'agent_message',
+              id: `agent-output-${items.length}`,
+              time: formatTimestamp(event.timestamp),
+              content: output || 'Task completed.',
+              toolCalls: [],
+              comments: comments || undefined,
+              files: files.length > 0 ? files : undefined,
+            });
+          }
+
+          items.push({
+            type: 'output',
+            id: `output-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            outputParts: output ? [output] : [],
+            commentParts: comments ? [comments] : [],
+            files,
+            status: statusValue,
+            error: errorText || undefined,
+          });
+          break;
+        }
+        default:
+          break;
       }
-      case 'message': {
-        const text = String(event.data.text ?? '');
-        const hasMarkdown = /[#*`\-\[]/.test(text) && text.includes('\n');
-        return hasMarkdown ? (
-          <div key={`${event.sequence}-${index}`} className="terminal-block event-message">
-            <div className="terminal-line">
-              <span className="event-icon">✦</span>
-            </div>
-            <div className="terminal-message-content md-container">
-              {renderMarkdown(text)}
-            </div>
-          </div>
-        ) : (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-message">
-            <span className="event-icon">✦</span>
-            <span>{text}</span>
-          </div>
-        );
-      }
-      case 'profile_switch': {
-        const profileName = String(event.data.profile_name ?? 'profile');
-        const allowCount = Number(event.data.allow_rules_count ?? 0);
-        const denyCount = Number(event.data.deny_rules_count ?? 0);
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            profile: <span className="event-highlight">{profileName}</span>
-            <span className="event-dim"> [allow={allowCount}, deny={denyCount}]</span>
-          </div>
-        );
-      }
-      case 'output_display': {
-        const output = String(event.data.output ?? '').trim();
-        const errorText = String(event.data.error ?? '').trim();
-        const comments = String(event.data.comments ?? '').trim();
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-block">
-            {output && (
-              <div className="terminal-output-block md-container">
-                {renderMarkdown(output)}
-              </div>
-            )}
-            {comments && (
-              <div className="terminal-line event-comment">{comments}</div>
-            )}
-            {errorText && (
-              <div className="terminal-line event-error">{errorText}</div>
-            )}
-          </div>
-        );
-      }
-      case 'agent_complete': {
-        const statusValue = String(event.data.status ?? 'COMPLETE').toUpperCase();
-        const durationMs = Number(event.data.duration_ms ?? 0);
-        const numTurns = Number(event.data.num_turns ?? 0);
-        const cost = Number(event.data.total_cost_usd ?? 0);
-        const lines = buildBox([
-          `✓ ${statusValue}`,
-          `Duration: ${formatDuration(durationMs)} | Turns: ${numTurns} | Cost: ${formatCost(cost)}`,
-        ]);
-        return (
-          <pre key={`${event.sequence}-${index}`} className="terminal-box event-complete">
-            {lines.join('\n')}
-          </pre>
-        );
-      }
-      case 'error': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-error">
-            ✖ {String(event.data.message ?? 'Unknown error')}
-          </div>
-        );
-      }
-      case 'cancelled': {
-        return (
-          <div key={`${event.sequence}-${index}`} className="terminal-line event-warning">
-            ● Cancelled: {String(event.data.message ?? 'Task was cancelled')}
-          </div>
-        );
-      }
-      default: {
-        return (
-          <pre key={`${event.sequence}-${index}`} className="terminal-line event-dim">
-            {JSON.stringify(event.data)}
-          </pre>
-        );
+    });
+
+    if (pendingTools.length > 0) {
+      flushPendingTools();
+    }
+
+    // Attach any remaining pending result to the last agent message if not yet attached
+    if (!capturedResultAttached && (capturedComments || capturedFiles)) {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (item.type === 'agent_message') {
+          if (capturedComments) {
+            item.comments = capturedComments;
+          }
+          if (capturedFiles && capturedFiles.length > 0) {
+            item.files = capturedFiles;
+          }
+          break;
+        }
       }
     }
-  }, [sessionHeaderShown]);
+
+    return items;
+  }, [events]);
+
+  const toolStats = useMemo(() => {
+    const statsMap: Record<string, number> = {};
+    conversation.forEach((item) => {
+      if (item.type === 'agent_message') {
+        item.toolCalls.forEach((tool) => {
+          const toolName = tool.tool;
+          statsMap[toolName] = (statsMap[toolName] ?? 0) + 1;
+        });
+      }
+    });
+    return statsMap;
+  }, [conversation]);
+
+  const totalToolCalls = Object.values(toolStats).reduce((sum, count) => sum + count, 0);
+
+  const headerStats = useMemo(() => {
+    const counts = { complete: 0, partial: 0, failed: 0 };
+    conversation.forEach((item) => {
+      if (item.type === 'output') {
+        if (item.status === 'complete') {
+          counts.complete += 1;
+        } else if (item.status === 'partial') {
+          counts.partial += 1;
+        } else if (item.status === 'failed') {
+          counts.failed += 1;
+        }
+      }
+    });
+    return counts;
+  }, [conversation]);
+
+  const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
+
+  const sessionDuration = formatDuration(stats.durationMs);
+  const sessionIdLabel = currentSession?.id ?? 'new';
 
   const sessionItems = useMemo(() => {
     return sessions.map((session) => (
@@ -855,84 +1486,265 @@ export default function App(): JSX.Element {
     ));
   }, [sessions]);
 
+  const handleFileAction = async (filePath: string, mode: 'view' | 'download') => {
+    if (!config || !token || !currentSession) {
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${config.api.base_url}/api/v1/sessions/${currentSession.id}/files?path=${encodeURIComponent(filePath)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const filename = filePath.split('/').pop() || 'result-file';
+
+      if (mode === 'view') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+      }
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setError(`Failed to load file: ${(err as Error).message}`);
+    }
+  };
+
+  const toggleTool = (id: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleComments = (id: string) => {
+    setExpandedComments((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleFiles = (id: string) => {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const expandAllSections = () => {
+    const allToolIds = conversation.flatMap((item) =>
+      item.type === 'agent_message' ? item.toolCalls.map((tool) => tool.id) : []
+    );
+    const allOutputIds = outputItems.map((item) => item.id);
+    const allAgentMessageIds = conversation
+      .filter((item) => item.type === 'agent_message')
+      .map((item) => item.id);
+    setExpandedTools(new Set(allToolIds));
+    setExpandedComments(new Set([...allOutputIds, ...allAgentMessageIds]));
+    setExpandedFiles(new Set(allAgentMessageIds));
+  };
+
+  const collapseAllSections = () => {
+    setExpandedTools(new Set());
+    setExpandedComments(new Set());
+    setExpandedFiles(new Set());
+  };
+
+  const toggleAllSections = () => {
+    if (expandedTools.size > 0 || expandedComments.size > 0 || expandedFiles.size > 0) {
+      collapseAllSections();
+    } else {
+      expandAllSections();
+    }
+  };
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && isRunning) {
+        handleCancel();
+      }
+      if (event.key === '/' && event.ctrlKey) {
+        event.preventDefault();
+        toggleAllSections();
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [handleCancel, isRunning, toggleAllSections]);
+
   return (
     <div className="terminal-app">
-      <header className="terminal-menu">
-        <div className="menu-left">
-          <span className="menu-logo">[::] AGENTUM</span>
-          <div className="session-dropdown">
-            <span className="session-current">{sessionIdLabel}</span>
-            <div className="session-list">{sessionItems}</div>
+      <header className="terminal-header">
+        <div className="header-top">
+          <div className="header-title">
+            <span className="header-icon">◆</span>
+            <span className="header-label">AGENT SESSION</span>
+            <span className="header-divider">│</span>
+            <span className="header-meta">{sessionIdLabel}</span>
+            <span className="header-divider">│</span>
+            <span className="header-meta">user: {userId || 'unknown'}</span>
           </div>
-          <button className="menu-button" type="button" onClick={handleNewSession}>
-            + New
-          </button>
+          <div className="session-dropdown">
+            <span className="session-current">session list</span>
+            <div className="session-list">
+              {sessionItems}
+              <button className="session-item session-new" type="button" onClick={handleNewSession}>
+                + New Session
+              </button>
+            </div>
+          </div>
         </div>
-        <div className="menu-right">
-          <span className="menu-title">Agentum | Self-Improving Agent</span>
+        <div className="header-stats">
+          <span>Messages: <strong>{conversation.length}</strong></span>
+          <span>Duration: <strong>{sessionDuration}</strong></span>
+          <span>Tools: <strong>{totalToolCalls}</strong></span>
+          <span className="header-status">
+            <span className="status-complete">✓ {headerStats.complete}</span>
+            <span className="status-partial">◐ {headerStats.partial}</span>
+            <span className="status-failed">✗ {headerStats.failed}</span>
+          </span>
+        </div>
+        <div className="header-filters">
+          <span className="filter-label">Filter:</span>
+          {(['all', 'complete', 'partial', 'failed'] as const).map((item) => (
+            <button
+              key={item}
+              className={`filter-button ${filter === item ? 'active' : ''}`}
+              type="button"
+              onClick={() => setFilter(item)}
+            >
+              [{item}]
+            </button>
+          ))}
+          <div className="filter-actions">
+            <button className="filter-button" type="button" onClick={expandAllSections}>
+              [expand all]
+            </button>
+            <button className="filter-button" type="button" onClick={collapseAllSections}>
+              [collapse all]
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="terminal-body">
         <div ref={outputRef} className="terminal-output">
-          {events.length === 0 ? (
+          {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
           ) : (
-            events.map(renderEvent)
-          )}
-        </div>
-
-        <div className="terminal-input">
-          <div className="input-header">
-            <span className="input-label">❯ input</span>
-            <span className="input-shortcut">Ctrl+Enter</span>
-          </div>
-          <div className="input-row">
-            <textarea
-              value={inputValue}
-              onChange={(event) => setInputValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                  event.preventDefault();
-                  handleSubmit();
+            conversation.map((item, index) => {
+              if (item.type === 'user') {
+                return (
+                  <MessageBlock
+                    key={item.id}
+                    sender="USER"
+                    time={item.time}
+                    content={item.content}
+                  />
+                );
+              }
+              if (item.type === 'agent_message') {
+                const isLastAgentMessage = conversation
+                  .slice(index + 1)
+                  .every((i) => i.type !== 'agent_message');
+                const messageStatus = isLastAgentMessage && status !== 'running' ? status : undefined;
+                return (
+                  <AgentMessageBlock
+                    key={item.id}
+                    time={item.time}
+                    content={item.content}
+                    toolCalls={item.toolCalls}
+                    toolExpanded={expandedTools}
+                    onToggleTool={toggleTool}
+                    status={messageStatus}
+                    comments={item.comments}
+                    commentsExpanded={expandedComments.has(item.id)}
+                    onToggleComments={() => toggleComments(item.id)}
+                    files={item.files}
+                    filesExpanded={expandedFiles.has(item.id)}
+                    onToggleFiles={() => toggleFiles(item.id)}
+                  />
+                );
+              }
+              if (item.type === 'output') {
+                if (filter !== 'all' && item.status !== filter) {
+                  return null;
                 }
-              }}
-              placeholder="Enter task..."
-              className="input-textarea"
-              disabled={!config || !token || isRunning}
-            />
-            <div className="input-actions">
-              <button
-                className="execute-button"
-                type="button"
-                onClick={handleSubmit}
-                disabled={!inputValue.trim() || !config || !token || isRunning}
-              >
-                {isRunning ? 'Running...' : 'Execute'}
-              </button>
-              {isRunning && currentSession && (
-                <button className="cancel-button" type="button" onClick={handleCancel}>
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-          {error && <div className={reconnecting ? "terminal-warning" : "terminal-error"}>{error}</div>}
+                return (
+                  <OutputBlock
+                    key={item.id}
+                    time={item.time}
+                    outputParts={item.outputParts}
+                    commentParts={item.commentParts}
+                    commentsExpanded={expandedComments.has(item.id)}
+                    onToggleComments={() => toggleComments(item.id)}
+                    files={item.files}
+                    status={item.status}
+                    error={item.error}
+                    onFileAction={handleFileAction}
+                  />
+                );
+              }
+              return null;
+            })
+          )}
         </div>
       </main>
 
-      <footer className="terminal-status">
-        <div className="status-left">
-          <span className={`status-indicator ${statusClass}`}>{statusSymbol}</span>
-          <span>{statusLabel}</span>
-          <span className="status-metric">Turns: {stats.turns}</span>
+      <div className="terminal-footer">
+        <div className="tool-usage-bar">
+          <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
+          {Object.keys(toolStats).map((tool) => (
+            <ToolTag key={tool} type={tool} count={toolStats[tool]} />
+          ))}
         </div>
-        <div className="status-right">
-          <span className="status-metric">Tokens: {stats.tokensIn} in / {stats.tokensOut} out</span>
-          <span className="status-metric">Cost: {formatCost(stats.cost)}</span>
-          <span className="status-metric">{formatDuration(stats.durationMs)}</span>
+        <div className="input-wrapper">
+          <InputField
+            value={inputValue}
+            onChange={setInputValue}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
+            isRunning={isRunning}
+          />
+          {error && <div className={reconnecting ? 'terminal-warning' : 'terminal-error'}>{error}</div>}
         </div>
-      </footer>
+        <StatusFooter
+          isRunning={isRunning}
+          statusLabel={statusLabel}
+          statusClass={statusClass}
+          stats={stats}
+          connected={Boolean(token) && !reconnecting}
+        />
+      </div>
     </div>
   );
 }

@@ -33,7 +33,6 @@ export interface SessionResponse {
   status: string;
   task?: string | null;
   model?: string | null;
-  working_dir?: string | null;
   created_at: string;
   updated_at: string;
   completed_at?: string | null;

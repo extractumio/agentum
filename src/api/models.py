@@ -116,12 +116,6 @@ class RunTaskRequest(BaseModel):
         description="Task description to execute"
     )
 
-    # Working directory (CLI: --dir)
-    working_dir: Optional[str] = Field(
-        default=None,
-        description="Working directory for the agent (resolved to absolute path)"
-    )
-
     # Additional directories (CLI: --add-dir)
     additional_dirs: list[str] = Field(
         default_factory=list,
@@ -153,10 +147,6 @@ class CreateSessionRequest(BaseModel):
     For most cases, use POST /sessions/run instead.
     """
     task: str = Field(description="Task description for the agent")
-    working_dir: Optional[str] = Field(
-        default=None,
-        description="Working directory for the agent"
-    )
     model: Optional[str] = Field(
         default=None,
         description="Claude model to use (overrides config)"
@@ -174,12 +164,6 @@ class StartTaskRequest(BaseModel):
     task: Optional[str] = Field(
         default=None,
         description="Task to execute (optional, uses session task if not provided)"
-    )
-
-    # Working directory override (CLI: --dir)
-    working_dir: Optional[str] = Field(
-        default=None,
-        description="Override working directory (uses session's stored value if not provided)"
     )
 
     # Additional directories (CLI: --add-dir)
@@ -215,7 +199,6 @@ class SessionResponse(BaseModel):
     status: str = Field(description="Session status")
     task: Optional[str] = Field(default=None, description="Task description")
     model: Optional[str] = Field(default=None, description="Model used")
-    working_dir: Optional[str] = Field(default=None, description="Working directory")
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: datetime = Field(description="Last update timestamp")
     completed_at: Optional[datetime] = Field(

@@ -111,7 +111,7 @@ class AgentRunner:
                     session.duration_ms = duration_ms
                 if total_cost_usd is not None:
                     session.total_cost_usd = total_cost_usd
-                if status in ("completed", "failed", "cancelled"):
+                if status in ("completed", "complete", "partial", "failed", "cancelled"):
                     session.completed_at = datetime.now(timezone.utc)
 
                 await db.commit()
@@ -200,9 +200,12 @@ class AgentRunner:
 
             # Update database with final status and metrics
             metrics = result.metrics
+            final_status = result.status.value.lower()
+            if final_status == "error":
+                final_status = "failed"
             await self._update_session_status(
                 session_id=session_id,
-                status="completed",
+                status=final_status,
                 model=metrics.model if metrics else params.model,
                 num_turns=metrics.num_turns if metrics else None,
                 duration_ms=metrics.duration_ms if metrics else None,

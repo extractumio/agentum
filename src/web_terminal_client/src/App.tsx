@@ -13,6 +13,8 @@ import { loadConfig } from './config';
 import { connectSSE } from './sse';
 import type { AppConfig, ResultResponse, SessionResponse, TerminalEvent } from './types';
 
+type ResultStatus = 'complete' | 'partial' | 'failed' | 'running';
+
 type ConversationItem =
   | {
       type: 'user';
@@ -26,6 +28,7 @@ type ConversationItem =
       time: string;
       content: string;
       toolCalls: ToolCallView[];
+      status?: ResultStatus;
       comments?: string;
       files?: string[];
     }
@@ -33,10 +36,10 @@ type ConversationItem =
       type: 'output';
       id: string;
       time: string;
-      outputParts: string[];
-      commentParts: string[];
+      output: string;
+      comments?: string;
       files: string[];
-      status: 'complete' | 'partial' | 'failed' | 'running';
+      status: ResultStatus;
       error?: string;
     };
 
@@ -291,6 +294,26 @@ function formatTokens(result?: ResultResponse | null): { input: number; output: 
   return { input, output, total: input + output };
 }
 
+function parseResultFiles(files: unknown): string[] {
+  if (Array.isArray(files)) {
+    return files.map(String);
+  }
+  if (typeof files === 'string') {
+    try {
+      const parsed = JSON.parse(files);
+      if (Array.isArray(parsed)) {
+        return parsed.map(String);
+      }
+    } catch {
+      const trimmed = files.trim();
+      if (trimmed) {
+        return [trimmed];
+      }
+    }
+  }
+  return [];
+}
+
 function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse | null): TerminalEvent[] {
   const now = new Date().toISOString();
   const events: TerminalEvent[] = [];
@@ -310,7 +333,6 @@ function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse 
       session_id: session.id,
       model: session.model ?? 'unknown',
       tools: [],
-      working_dir: session.working_dir ?? 'unknown',
       task: session.task ?? '',
     },
     timestamp: now,
@@ -507,6 +529,90 @@ function ToolCallBlock({
   );
 }
 
+function ResultSection({
+  comments,
+  commentsExpanded,
+  onToggleComments,
+  files,
+  filesExpanded,
+  onToggleFiles,
+  onFileAction,
+}: {
+  comments?: string;
+  commentsExpanded?: boolean;
+  onToggleComments?: () => void;
+  files?: string[];
+  filesExpanded?: boolean;
+  onToggleFiles?: () => void;
+  onFileAction?: (filePath: string, mode: 'view' | 'download') => void;
+}): JSX.Element | null {
+  const hasComments = Boolean(comments);
+  const hasFiles = Boolean(files && files.length > 0);
+
+  if (!hasComments && !hasFiles) {
+    return null;
+  }
+
+  return (
+    <div className="result-section">
+      <div className="result-title">Result</div>
+      {hasComments && comments && (
+        <div className="result-item">
+          <div className="result-item-header" onClick={onToggleComments} role="button">
+            <span className="result-tree">└──</span>
+            <span className="result-toggle">{commentsExpanded ? '▼' : '▶'}</span>
+            <span className="result-label">Comments</span>
+            <span className="result-count">({comments.length})</span>
+          </div>
+          {commentsExpanded && (
+            <div className="result-item-body md-container">
+              {renderMarkdown(comments)}
+            </div>
+          )}
+        </div>
+      )}
+      {hasFiles && files && (
+        <div className="result-item">
+          <div className="result-item-header" onClick={onToggleFiles} role="button">
+            <span className="result-tree">└──</span>
+            <span className="result-toggle">{filesExpanded ? '▼' : '▶'}</span>
+            <span className="result-label">Files</span>
+            <span className="result-count">({files.length})</span>
+          </div>
+          {filesExpanded && (
+            <div className="result-item-body result-files-list">
+              {files.map((file) => (
+                <div key={file} className="result-file-item">
+                  <span className="result-file-icon">📄</span>
+                  <span className="result-file-name">{file}</span>
+                  {onFileAction && (
+                    <div className="result-file-actions">
+                      <button
+                        type="button"
+                        className="result-file-action"
+                        onClick={() => onFileAction(file, 'view')}
+                      >
+                        view
+                      </button>
+                      <button
+                        type="button"
+                        className="result-file-action"
+                        onClick={() => onFileAction(file, 'download')}
+                      >
+                        download
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AgentMessageBlock({
   time,
   content,
@@ -535,7 +641,6 @@ function AgentMessageBlock({
   onToggleFiles?: () => void;
 }): JSX.Element {
   const statusClass = status ? `agent-status-${status}` : '';
-  const hasResult = Boolean(comments) || (files && files.length > 0);
 
   return (
     <div className={`message-block agent-message ${statusClass}`}>
@@ -547,46 +652,6 @@ function AgentMessageBlock({
       <div className="message-content md-container">
         {content ? renderMarkdown(content) : <AgentSpinner />}
       </div>
-      {hasResult && (
-        <div className="result-section">
-          <div className="result-title">Result</div>
-          {comments && (
-            <div className="result-item">
-              <div className="result-item-header" onClick={onToggleComments} role="button">
-                <span className="result-tree">└──</span>
-                <span className="result-toggle">{commentsExpanded ? '▼' : '▶'}</span>
-                <span className="result-label">Comments</span>
-                <span className="result-count">({comments.length})</span>
-              </div>
-              {commentsExpanded && (
-                <div className="result-item-body md-container">
-                  {renderMarkdown(comments)}
-                </div>
-              )}
-            </div>
-          )}
-          {files && files.length > 0 && (
-            <div className="result-item">
-              <div className="result-item-header" onClick={onToggleFiles} role="button">
-                <span className="result-tree">{comments ? '└──' : '└──'}</span>
-                <span className="result-toggle">{filesExpanded ? '▼' : '▶'}</span>
-                <span className="result-label">Files</span>
-                <span className="result-count">({files.length})</span>
-              </div>
-              {filesExpanded && (
-                <div className="result-item-body result-files-list">
-                  {files.map((file, index) => (
-                    <div key={index} className="result-file-item">
-                      <span className="result-file-icon">📄</span>
-                      <span className="result-file-name">{file}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
       {toolCalls.length > 0 && (
         <div className="tool-call-section">
           <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
@@ -601,28 +666,40 @@ function AgentMessageBlock({
           ))}
         </div>
       )}
+      <ResultSection
+        comments={comments}
+        commentsExpanded={commentsExpanded}
+        onToggleComments={onToggleComments}
+        files={files}
+        filesExpanded={filesExpanded}
+        onToggleFiles={onToggleFiles}
+      />
     </div>
   );
 }
 
 function OutputBlock({
   time,
-  outputParts,
-  commentParts,
+  output,
+  comments,
   commentsExpanded,
   onToggleComments,
   files,
+  filesExpanded,
+  onToggleFiles,
   status,
   error,
   onFileAction,
 }: {
   time: string;
-  outputParts: string[];
-  commentParts: string[];
+  output: string;
+  comments?: string;
   commentsExpanded: boolean;
   onToggleComments: () => void;
   files: string[];
-  status: 'complete' | 'partial' | 'failed' | 'running';
+  filesExpanded: boolean;
+  onToggleFiles: () => void;
+  status: ResultStatus;
   error?: string;
   onFileAction: (filePath: string, mode: 'view' | 'download') => void;
 }): JSX.Element {
@@ -636,45 +713,23 @@ function OutputBlock({
         <span className="message-time">@ {time}</span>
       </div>
       <div className="message-content md-container">
-        {outputParts.length > 0
-          ? outputParts.map((part, index) => (
-              <div key={`output-${index}`} className="output-part">
-                {renderMarkdown(part)}
+        {output
+          ? (
+              <div className="output-part">
+                {renderMarkdown(output)}
               </div>
-            ))
+            )
           : 'No output yet.'}
       </div>
-      {commentParts.length > 0 && (
-        <div className="output-comments">
-          <button className="comment-toggle" type="button" onClick={onToggleComments}>
-            {commentsExpanded ? '▼' : '▶'} comments
-          </button>
-          {commentsExpanded && (
-            <div className="comment-body md-container">
-              {commentParts.map((part, index) => (
-                <div key={`comment-${index}`} className="output-part">
-                  {renderMarkdown(part)}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-      {files.length > 0 && (
-        <div className="output-files">
-          {files.map((file) => (
-            <div key={file} className="output-file-row">
-              <span className="output-file-name">{file}</span>
-              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'view')}>
-                view
-              </button>
-              <button type="button" className="output-file-action" onClick={() => onFileAction(file, 'download')}>
-                download
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      <ResultSection
+        comments={comments}
+        commentsExpanded={commentsExpanded}
+        onToggleComments={onToggleComments}
+        files={files}
+        filesExpanded={filesExpanded}
+        onToggleFiles={onToggleFiles}
+        onFileAction={onFileAction}
+      />
       {error && <div className="output-error">{error}</div>}
     </div>
   );
@@ -791,7 +846,6 @@ export default function App(): JSX.Element {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'complete' | 'partial' | 'failed'>('all');
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
@@ -905,7 +959,6 @@ export default function App(): JSX.Element {
           status: 'running',
           task: (event.data.task as string | undefined) ?? prev?.task,
           model: (event.data.model as string | undefined) ?? prev?.model,
-          working_dir: (event.data.working_dir as string | undefined) ?? prev?.working_dir,
           created_at: prev?.created_at ?? new Date().toISOString(),
           updated_at: new Date().toISOString(),
           completed_at: prev?.completed_at ?? null,
@@ -979,7 +1032,17 @@ export default function App(): JSX.Element {
       if (event.type === 'output_display') {
         const statusValue = String(event.data.status ?? '');
         if (statusValue) {
-          setStatus(normalizeStatus(statusValue));
+          const normalized = normalizeStatus(statusValue);
+          setStatus(normalized);
+          setCurrentSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  status: normalized,
+                  completed_at: new Date().toISOString(),
+                }
+              : null
+          );
         }
       }
     },
@@ -1080,7 +1143,6 @@ export default function App(): JSX.Element {
           status: response.status,
           task: taskText,
           model: null,
-          working_dir: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           completed_at: null,
@@ -1173,11 +1235,8 @@ export default function App(): JSX.Element {
   const conversation = useMemo<ConversationItem[]>(() => {
     const items: ConversationItem[] = [];
     let pendingTools: ToolCallView[] = [];
-    // Capture result data from mcp__agentum__WriteOutput tool calls
-    // Using separate variables to avoid TypeScript's overly strict control flow narrowing
-    let capturedComments: string | undefined;
-    let capturedFiles: string[] | undefined;
-    let capturedResultAttached = false;
+    let pendingResult: { comments?: string; files?: string[]; status?: ResultStatus } = {};
+    let pendingResultAttached = false;
 
     const findOpenTool = (toolName: string): ToolCallView | undefined => {
       for (let i = pendingTools.length - 1; i >= 0; i -= 1) {
@@ -1202,25 +1261,27 @@ export default function App(): JSX.Element {
       }
     };
 
-    // Parse result_files from WriteOutput - can be JSON string or array
-    const parseResultFiles = (files: unknown): string[] => {
-      if (Array.isArray(files)) {
-        return files.map(String);
+    const attachResultToAgent = (result: { comments?: string; files?: string[]; status?: ResultStatus }): boolean => {
+      const { comments, files, status } = result;
+      if (!comments && (!files || files.length === 0)) {
+        return false;
       }
-      if (typeof files === 'string') {
-        try {
-          const parsed = JSON.parse(files);
-          if (Array.isArray(parsed)) {
-            return parsed.map(String);
+      for (let i = items.length - 1; i >= 0; i -= 1) {
+        const item = items[i];
+        if (item.type === 'agent_message') {
+          if (comments) {
+            item.comments = comments;
           }
-        } catch {
-          // Not valid JSON, treat as single file
-          if (files.trim()) {
-            return [files.trim()];
+          if (files && files.length > 0) {
+            item.files = files;
           }
+          if (status) {
+            item.status = status;
+          }
+          return true;
         }
       }
-      return [];
+      return false;
     };
 
     let toolIdCounter = 0;
@@ -1259,20 +1320,18 @@ export default function App(): JSX.Element {
             input: toolInput ?? '',
           });
           
-          // Extract result data from WriteOutput tool calls
-          // These contain status, output, comments, result_files
           if (toolName.includes('WriteOutput') || toolName.includes('write_output')) {
             if (toolInput) {
               const comments = String(toolInput.comments ?? '').trim();
               const files = parseResultFiles(toolInput.result_files);
-              
-              if (comments) {
-                capturedComments = comments;
-              }
-              if (files.length > 0) {
-                capturedFiles = files;
-              }
-              capturedResultAttached = false;
+              const statusRaw = String(toolInput.status ?? '').trim();
+              const statusValue = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+              pendingResult = {
+                comments: comments || undefined,
+                files: files.length > 0 ? files : undefined,
+                status: statusValue,
+              };
+              pendingResultAttached = false;
             }
           }
           break;
@@ -1304,18 +1363,20 @@ export default function App(): JSX.Element {
             content: text,
             toolCalls: pendingTools,
           };
-          
-          // Attach pending result data from WriteOutput tool
-          if (!capturedResultAttached && (capturedComments || capturedFiles)) {
-            if (capturedComments) {
-              (agentMessage as { comments?: string }).comments = capturedComments;
+
+          if (!pendingResultAttached) {
+            if (pendingResult.comments) {
+              agentMessage.comments = pendingResult.comments;
             }
-            if (capturedFiles && capturedFiles.length > 0) {
-              (agentMessage as { files?: string[] }).files = capturedFiles;
+            if (pendingResult.files) {
+              agentMessage.files = pendingResult.files;
             }
-            capturedResultAttached = true;
+            if (pendingResult.status) {
+              agentMessage.status = pendingResult.status;
+            }
+            pendingResultAttached = true;
           }
-          
+
           items.push(agentMessage);
           pendingTools = [];
           break;
@@ -1327,61 +1388,17 @@ export default function App(): JSX.Element {
           const output = String(event.data.output ?? '').trim();
           const comments = String(event.data.comments ?? '').trim();
           const errorText = String(event.data.error ?? '').trim();
-          const files = Array.isArray(event.data.result_files)
-            ? (event.data.result_files as string[])
-            : [];
-          const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as
-            | 'complete'
-            | 'partial'
-            | 'failed'
-            | 'running';
+          const files = parseResultFiles(event.data.result_files);
+          const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as ResultStatus;
 
+          const resultPayload = {
+            comments: comments || undefined,
+            files: files.length > 0 ? files : undefined,
+            status: statusValue,
+          };
 
-          // Find the last agent message WITH CONTENT to attach comments and files
-          // Skip empty auto-flushed messages (created by flushPendingTools)
-          let foundAgentMessage = false;
-          
-          if (comments || files.length > 0) {
-            for (let i = items.length - 1; i >= 0; i--) {
-              const item = items[i];
-              if (item.type === 'agent_message') {
-                const hasContent = item.content && item.content.trim() !== '';
-                const hasWriteOutputTool = item.toolCalls.some(
-                  (t) => t.tool.includes('WriteOutput') || t.tool.includes('Output')
-                );
-                
-                if (hasContent || hasWriteOutputTool) {
-                  if (comments) {
-                    (item as { comments?: string }).comments = comments;
-                  }
-                  if (files.length > 0) {
-                    (item as { files?: string[] }).files = files;
-                  }
-                  foundAgentMessage = true;
-                  break;
-                }
-              }
-            }
-          }
-
-          // If no suitable agent message found, try any agent_message as fallback
-          if (!foundAgentMessage && (comments || files.length > 0)) {
-            for (let i = items.length - 1; i >= 0; i--) {
-              if (items[i].type === 'agent_message') {
-                if (comments) {
-                  (items[i] as { comments?: string }).comments = comments;
-                }
-                if (files.length > 0) {
-                  (items[i] as { files?: string[] }).files = files;
-                }
-                foundAgentMessage = true;
-                break;
-              }
-            }
-          }
-
-          // If still no agent message found, create one
-          if (!foundAgentMessage && (comments || files.length > 0)) {
+          const attached = attachResultToAgent(resultPayload);
+          if (!attached && (comments || files.length > 0)) {
             items.push({
               type: 'agent_message',
               id: `agent-output-${items.length}`,
@@ -1390,6 +1407,7 @@ export default function App(): JSX.Element {
               toolCalls: [],
               comments: comments || undefined,
               files: files.length > 0 ? files : undefined,
+              status: statusValue,
             });
           }
 
@@ -1397,8 +1415,8 @@ export default function App(): JSX.Element {
             type: 'output',
             id: `output-${items.length}`,
             time: formatTimestamp(event.timestamp),
-            outputParts: output ? [output] : [],
-            commentParts: comments ? [comments] : [],
+            output,
+            comments: comments || undefined,
             files,
             status: statusValue,
             error: errorText || undefined,
@@ -1414,20 +1432,8 @@ export default function App(): JSX.Element {
       flushPendingTools();
     }
 
-    // Attach any remaining pending result to the last agent message if not yet attached
-    if (!capturedResultAttached && (capturedComments || capturedFiles)) {
-      for (let i = items.length - 1; i >= 0; i--) {
-        const item = items[i];
-        if (item.type === 'agent_message') {
-          if (capturedComments) {
-            item.comments = capturedComments;
-          }
-          if (capturedFiles && capturedFiles.length > 0) {
-            item.files = capturedFiles;
-          }
-          break;
-        }
-      }
+    if (!pendingResultAttached) {
+      attachResultToAgent(pendingResult);
     }
 
     return items;
@@ -1465,6 +1471,23 @@ export default function App(): JSX.Element {
   }, [conversation]);
 
   const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
+
+  const sessionFiles = useMemo(() => {
+    const seen = new Set<string>();
+    const files: string[] = [];
+    conversation.forEach((item) => {
+      const itemFiles = item.type === 'output' ? item.files : item.files ?? [];
+      if (itemFiles.length > 0) {
+        itemFiles.forEach((file) => {
+          if (!seen.has(file)) {
+            seen.add(file);
+            files.push(file);
+          }
+        });
+      }
+    });
+    return files;
+  }, [conversation]);
 
   const sessionDuration = formatDuration(stats.durationMs);
   const sessionIdLabel = currentSession?.id ?? 'new';
@@ -1524,6 +1547,10 @@ export default function App(): JSX.Element {
     }
   };
 
+  const handleSessionFileDownload = (filePath: string) => {
+    handleFileAction(filePath, 'download');
+  };
+
   const toggleTool = (id: string) => {
     setExpandedTools((prev) => {
       const next = new Set(prev);
@@ -1570,7 +1597,7 @@ export default function App(): JSX.Element {
       .map((item) => item.id);
     setExpandedTools(new Set(allToolIds));
     setExpandedComments(new Set([...allOutputIds, ...allAgentMessageIds]));
-    setExpandedFiles(new Set(allAgentMessageIds));
+    setExpandedFiles(new Set([...allAgentMessageIds, ...allOutputIds]));
   };
 
   const collapseAllSections = () => {
@@ -1613,15 +1640,6 @@ export default function App(): JSX.Element {
             <span className="header-divider">│</span>
             <span className="header-meta">user: {userId || 'unknown'}</span>
           </div>
-          <div className="session-dropdown">
-            <span className="session-current">session list</span>
-            <div className="session-list">
-              {sessionItems}
-              <button className="session-item session-new" type="button" onClick={handleNewSession}>
-                + New Session
-              </button>
-            </div>
-          </div>
         </div>
         <div className="header-stats">
           <span>Messages: <strong>{conversation.length}</strong></span>
@@ -1634,17 +1652,19 @@ export default function App(): JSX.Element {
           </span>
         </div>
         <div className="header-filters">
-          <span className="filter-label">Filter:</span>
-          {(['all', 'complete', 'partial', 'failed'] as const).map((item) => (
-            <button
-              key={item}
-              className={`filter-button ${filter === item ? 'active' : ''}`}
-              type="button"
-              onClick={() => setFilter(item)}
-            >
-              [{item}]
+          <div className="session-selector">
+            <span className="filter-label">Sessions:</span>
+            <span className="session-current-id">{sessionIdLabel}</span>
+            <button className="session-new-button" type="button" onClick={handleNewSession}>
+              + New
             </button>
-          ))}
+            <div className="session-dropdown">
+              <span className="session-current">[...select]</span>
+              <div className="session-list">
+                {sessionItems}
+              </div>
+            </div>
+          </div>
           <div className="filter-actions">
             <button className="filter-button" type="button" onClick={expandAllSections}>
               [expand all]
@@ -1661,61 +1681,79 @@ export default function App(): JSX.Element {
           {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
           ) : (
-            conversation.map((item, index) => {
-              if (item.type === 'user') {
-                return (
-                  <MessageBlock
-                    key={item.id}
-                    sender="USER"
-                    time={item.time}
-                    content={item.content}
-                  />
-                );
-              }
-              if (item.type === 'agent_message') {
-                const isLastAgentMessage = conversation
-                  .slice(index + 1)
-                  .every((i) => i.type !== 'agent_message');
-                const messageStatus = isLastAgentMessage && status !== 'running' ? status : undefined;
-                return (
-                  <AgentMessageBlock
-                    key={item.id}
-                    time={item.time}
-                    content={item.content}
-                    toolCalls={item.toolCalls}
-                    toolExpanded={expandedTools}
-                    onToggleTool={toggleTool}
-                    status={messageStatus}
-                    comments={item.comments}
-                    commentsExpanded={expandedComments.has(item.id)}
-                    onToggleComments={() => toggleComments(item.id)}
-                    files={item.files}
-                    filesExpanded={expandedFiles.has(item.id)}
-                    onToggleFiles={() => toggleFiles(item.id)}
-                  />
-                );
-              }
-              if (item.type === 'output') {
-                if (filter !== 'all' && item.status !== filter) {
-                  return null;
+            <>
+              {conversation.map((item, index) => {
+                if (item.type === 'user') {
+                  return (
+                    <MessageBlock
+                      key={item.id}
+                      sender="USER"
+                      time={item.time}
+                      content={item.content}
+                    />
+                  );
                 }
-                return (
-                  <OutputBlock
-                    key={item.id}
-                    time={item.time}
-                    outputParts={item.outputParts}
-                    commentParts={item.commentParts}
-                    commentsExpanded={expandedComments.has(item.id)}
-                    onToggleComments={() => toggleComments(item.id)}
-                    files={item.files}
-                    status={item.status}
-                    error={item.error}
-                    onFileAction={handleFileAction}
-                  />
-                );
-              }
-              return null;
-            })
+                if (item.type === 'agent_message') {
+                  const isLastAgentMessage = conversation
+                    .slice(index + 1)
+                    .every((i) => i.type !== 'agent_message');
+                  const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
+                  return (
+                    <AgentMessageBlock
+                      key={item.id}
+                      time={item.time}
+                      content={item.content}
+                      toolCalls={item.toolCalls}
+                      toolExpanded={expandedTools}
+                      onToggleTool={toggleTool}
+                      status={messageStatus}
+                      comments={item.comments}
+                      commentsExpanded={expandedComments.has(item.id)}
+                      onToggleComments={() => toggleComments(item.id)}
+                      files={item.files}
+                      filesExpanded={expandedFiles.has(item.id)}
+                      onToggleFiles={() => toggleFiles(item.id)}
+                    />
+                  );
+                }
+                if (item.type === 'output') {
+                  return (
+                    <OutputBlock
+                      key={item.id}
+                      time={item.time}
+                      output={item.output}
+                      comments={item.comments}
+                      commentsExpanded={expandedComments.has(item.id)}
+                      onToggleComments={() => toggleComments(item.id)}
+                      files={item.files}
+                      filesExpanded={expandedFiles.has(item.id)}
+                      onToggleFiles={() => toggleFiles(item.id)}
+                      status={item.status}
+                      error={item.error}
+                      onFileAction={handleFileAction}
+                    />
+                  );
+                }
+                return null;
+              })}
+              {sessionFiles.length > 0 && (
+                <div className="session-files">
+                  <div className="session-files-title">Session Files</div>
+                  <div className="session-files-list">
+                    {sessionFiles.map((file) => (
+                      <button
+                        key={file}
+                        type="button"
+                        className="session-file-button"
+                        onClick={() => handleSessionFileDownload(file)}
+                      >
+                        {file}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </main>

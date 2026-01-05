@@ -62,9 +62,11 @@ class SessionService:
         """
         session_id = generate_session_id()
 
+        working_dir_value = working_dir or str(self._sessions_dir)
+
         # Create file-based session (creates folder structure)
         self._session_manager.create_session(
-            working_dir=working_dir or str(self._sessions_dir),
+            working_dir=working_dir_value,
             session_id=session_id
         )
 
@@ -75,7 +77,7 @@ class SessionService:
             status="pending",
             task=task,
             model=model,
-            working_dir=working_dir,
+            working_dir=working_dir_value,
         )
         db.add(db_session)
         await db.commit()

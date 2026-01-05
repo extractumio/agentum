@@ -140,6 +140,33 @@ body,
   gap: 8px;
 }
 
+.session-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-current-id {
+  color: var(--color-text-bright);
+  font-size: 11px;
+}
+
+.session-new-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-dim);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.session-new-button:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+}
+
 .session-dropdown {
   position: relative;
   background: var(--color-bg-light);
@@ -216,6 +243,10 @@ body,
 }
 
 .session-status.running {
+  color: var(--color-yellow);
+}
+
+.session-status.partial {
   color: var(--color-yellow);
 }
 
@@ -353,6 +384,7 @@ body,
   align-items: center;
   gap: 6px;
   font-size: 11px;
+  flex-wrap: wrap;
 }
 
 .result-file-icon {
@@ -361,6 +393,28 @@ body,
 
 .result-file-name {
   color: var(--color-text);
+}
+
+.result-file-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.result-file-action {
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.result-file-action:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
 }
 
 .message-header {
@@ -669,6 +723,49 @@ body,
   flex-shrink: 0;
   padding: 0 30px 12px;
   background: var(--color-bg);
+}
+
+.session-files {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.session-files-title {
+  font-size: 11px;
+  color: var(--color-dim);
+}
+
+.session-files-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+
+.session-file-button {
+  width: 220px;
+  max-width: 250px;
+  background: var(--color-bg-light);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-file-button:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
 }
 
 .tool-usage-bar {
@@ -997,4 +1094,3 @@ body,
     transform: rotate(360deg);
   }
 }
-

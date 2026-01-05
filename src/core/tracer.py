@@ -2310,7 +2310,6 @@ class EventingTracer(TracerBase):
                 "session_id": session_id,
                 "model": model,
                 "tools": tools,
-                "working_dir": working_dir,
                 "skills": skills,
                 "task": task,
             },
@@ -2477,7 +2476,6 @@ class EventingTracer(TracerBase):
                 "tools": tools,
                 "allow_rules_count": allow_rules_count,
                 "deny_rules_count": deny_rules_count,
-                "profile_path": profile_path,
             },
         )
 

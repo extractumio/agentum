@@ -1950,7 +1950,7 @@ export default function App(): JSX.Element {
         }
       }
 
-      if (!todos || agentIndices.length === 0) {
+      if (!todos || agentIndices.length === 0 || lastAgentIndex < 0) {
         return;
       }
 
@@ -1968,23 +1968,17 @@ export default function App(): JSX.Element {
         terminalStatus = normalizeStatus(status) as ResultStatus;
       }
 
-      const isTerminal = terminalStatus && terminalStatus !== 'running';
-
-      agentIndices.forEach((agentIndex) => {
-        if (agentIndex < firstTodoIndex) {
-          return;
-        }
-        if (isTerminal && agentIndex !== lastAgentIndex) {
-          return;
-        }
-        const agentItem = conversation[agentIndex];
-        if (agentItem.type === 'agent_message') {
-          todosMap.set(agentItem.id, {
-            todos,
-            status: terminalStatus,
-          });
-        }
-      });
+      const targetIndex = lastAgentIndex;
+      if (targetIndex < firstTodoIndex) {
+        return;
+      }
+      const agentItem = conversation[targetIndex];
+      if (agentItem.type === 'agent_message') {
+        todosMap.set(agentItem.id, {
+          todos,
+          status: terminalStatus,
+        });
+      }
     });
 
     return todosMap;

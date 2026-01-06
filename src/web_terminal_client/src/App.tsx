@@ -1321,7 +1321,19 @@ export default function App(): JSX.Element {
       setCurrentSession(session);
 
       const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
-      setEvents(historyEvents);
+      const hasUserMessage = historyEvents.some((event) => event.type === 'user_message');
+      const seededEvents = hasUserMessage || !session.task
+        ? historyEvents
+        : [
+            {
+              type: 'user_message',
+              data: { text: session.task },
+              timestamp: session.created_at ?? new Date().toISOString(),
+              sequence: 0,
+            },
+            ...historyEvents,
+          ];
+      setEvents(seededEvents);
 
       const lastCompletion = [...historyEvents].reverse().find((event) => event.type === 'agent_complete');
       if (lastCompletion) {
@@ -1381,14 +1393,14 @@ export default function App(): JSX.Element {
 
   const conversation = useMemo<ConversationItem[]>(() => {
     const sortedEvents = [...events].sort((a, b) => {
-      const seqA = a.sequence ?? 0;
-      const seqB = b.sequence ?? 0;
-      if (seqA !== seqB) {
-        return seqA - seqB;
-      }
       const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
       const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-      return timeA - timeB;
+      if (timeA !== timeB) {
+        return timeA - timeB;
+      }
+      const seqA = a.sequence ?? 0;
+      const seqB = b.sequence ?? 0;
+      return seqA - seqB;
     });
 
     const items: ConversationItem[] = [];
@@ -1550,17 +1562,6 @@ export default function App(): JSX.Element {
           if (lastAgentMessage) {
             lastAgentMessage.status = statusValue;
           }
-
-          const outputText = lastAgentMessage?.content?.trim() || 'Task completed.';
-          items.push({
-            type: 'output',
-            id: `output-${items.length}`,
-            time: formatTimestamp(event.timestamp),
-            output: outputText,
-            comments: undefined,
-            files: lastAgentMessage?.files ?? [],
-            status: statusValue,
-          });
           break;
         }
         case 'error': {

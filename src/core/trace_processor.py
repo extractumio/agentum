@@ -74,6 +74,13 @@ class TraceProcessor:
         self._task: Optional[str] = None
         self._model: Optional[str] = None  # Model used in this session
         self._permission_denied: bool = False  # Set when permission denial interrupts
+        self._metrics_input_tokens = 0
+        self._metrics_output_tokens = 0
+        self._metrics_cache_creation_tokens = 0
+        self._metrics_cache_read_tokens = 0
+        self._metrics_turns = 0
+        self._metrics_cost_usd: Optional[float] = None
+        self._last_metrics_snapshot: Optional[tuple[int, int, int, int, int, Optional[float]]] = None
         # Cumulative stats (set externally when resuming a session)
         self._cumulative_cost_usd: Optional[float] = None
         self._cumulative_turns: Optional[int] = None
@@ -213,6 +220,8 @@ class TraceProcessor:
                 tool_input=block.input,
                 tool_id=block.id
             )
+            self._metrics_turns += 1
+            self._emit_metrics_update()
 
         elif isinstance(block, ToolResultBlock):
             tool_id = block.tool_use_id
@@ -280,10 +289,115 @@ class TraceProcessor:
 
     def _handle_stream_event(self, event: StreamEvent) -> None:
         """Handle low-level stream events."""
-        # Stream events are typically progress updates
-        # For now, we ignore most stream events as they're low-level
-        # Future: could be extended to handle specific streaming events
-        _ = event  # Acknowledge the parameter is intentionally unused
+        raw_event = event.event
+        if not isinstance(raw_event, dict):
+            return
+
+        event_type = raw_event.get("type")
+        usage = None
+
+        if event_type == "message_start":
+            message = raw_event.get("message", {})
+            if isinstance(message, dict):
+                usage = message.get("usage")
+        elif event_type == "message_delta":
+            usage = raw_event.get("usage")
+        elif event_type == "message_stop":
+            usage = raw_event.get("usage")
+        else:
+            usage = raw_event.get("usage")
+
+        if isinstance(usage, dict):
+            self._apply_usage_update(usage)
+
+    def _apply_usage_update(self, usage: dict[str, Any]) -> None:
+        def update_max(current: int, value: Optional[int]) -> int:
+            if value is None:
+                return current
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                return current
+            return max(current, numeric)
+
+        self._metrics_input_tokens = update_max(
+            self._metrics_input_tokens, usage.get("input_tokens")
+        )
+        self._metrics_output_tokens = update_max(
+            self._metrics_output_tokens, usage.get("output_tokens")
+        )
+        self._metrics_cache_creation_tokens = update_max(
+            self._metrics_cache_creation_tokens, usage.get("cache_creation_input_tokens")
+        )
+        self._metrics_cache_read_tokens = update_max(
+            self._metrics_cache_read_tokens, usage.get("cache_read_input_tokens")
+        )
+
+        cost_value = usage.get("total_cost_usd") or usage.get("cost_usd")
+        if cost_value is not None:
+            try:
+                self._metrics_cost_usd = float(cost_value)
+            except (TypeError, ValueError):
+                pass
+
+        if self._metrics_cost_usd is None:
+            estimated = self._estimate_cost_usd()
+            if estimated is not None:
+                self._metrics_cost_usd = estimated
+
+        self._emit_metrics_update()
+
+    def _estimate_cost_usd(self) -> Optional[float]:
+        if not self._model:
+            return None
+
+        pricing_map = {
+            "claude-sonnet-4-20250514": (3.0, 15.0),
+            "claude-opus-4-20250514": (15.0, 75.0),
+            "claude-3-7-sonnet-20250219": (3.0, 15.0),
+            "claude-3-5-sonnet-20241022": (3.0, 15.0),
+        }
+
+        rates = pricing_map.get(self._model)
+        if not rates:
+            return None
+
+        input_rate, output_rate = rates
+        total_input = (
+            self._metrics_input_tokens
+            + self._metrics_cache_creation_tokens
+            + self._metrics_cache_read_tokens
+        )
+        return (total_input / 1_000_000) * input_rate + (
+            self._metrics_output_tokens / 1_000_000
+        ) * output_rate
+
+    def _emit_metrics_update(self) -> None:
+        snapshot = (
+            self._metrics_input_tokens,
+            self._metrics_output_tokens,
+            self._metrics_cache_creation_tokens,
+            self._metrics_cache_read_tokens,
+            self._metrics_turns,
+            self._metrics_cost_usd,
+        )
+        if snapshot == self._last_metrics_snapshot:
+            return
+
+        self._last_metrics_snapshot = snapshot
+        payload: dict[str, Any] = {
+            "tokens_in": self._metrics_input_tokens,
+            "tokens_out": self._metrics_output_tokens,
+            "cache_creation_input_tokens": self._metrics_cache_creation_tokens,
+            "cache_read_input_tokens": self._metrics_cache_read_tokens,
+            "turns": self._metrics_turns,
+        }
+        if self._metrics_cost_usd is not None:
+            payload["total_cost_usd"] = self._metrics_cost_usd
+        if self._model:
+            payload["model"] = self._model
+
+        self.tracer.on_metrics_update(payload)
 
     def _handle_unknown_message(self, message: Any) -> None:
         """Handle unknown message types."""

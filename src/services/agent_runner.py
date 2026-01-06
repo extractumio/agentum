@@ -364,6 +364,10 @@ class AgentRunner:
         """Unsubscribe from events for a session."""
         await self._event_hub.unsubscribe(session_id, queue)
 
+    async def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Publish an event to all subscribers for a session."""
+        await self._event_hub.publish(session_id, event)
+
     def get_result(self, session_id: str) -> Optional[dict]:
         """
         Get the result of a completed task.

@@ -196,6 +196,10 @@ class TracerBase(ABC):
         """Called when an error occurs."""
         pass
 
+    def on_metrics_update(self, metrics: dict[str, Any]) -> None:
+        """Called when execution metrics are updated."""
+        _ = metrics
+
     @abstractmethod
     def on_agent_complete(
         self,
@@ -2404,6 +2408,11 @@ class EventingTracer(TracerBase):
                 "is_partial": is_partial,
             },
         )
+
+    def on_metrics_update(self, metrics: dict[str, Any]) -> None:
+        if hasattr(self._tracer, "on_metrics_update"):
+            self._tracer.on_metrics_update(metrics)
+        self.emit_event("metrics_update", metrics)
 
     def on_error(self, error_message: str, error_type: str = "error") -> None:
         self._tracer.on_error(error_message, error_type=error_type)

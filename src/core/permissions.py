@@ -439,9 +439,13 @@ def create_permission_callback(
                             )
 
                         # Wrap the command in bubblewrap for filesystem isolation
+                        allow_network = bool(
+                            getattr(sandbox_executor.config, "network", None)
+                            and sandbox_executor.config.network.enabled
+                        )
                         wrapped_command = sandbox_executor.wrap_shell_command(
                             original_command,
-                            allow_network=False,  # Default: no network inside sandbox
+                            allow_network=allow_network,
                         )
                         updated_input = {**tool_input, "command": wrapped_command}
                         logger.info(
@@ -547,11 +551,9 @@ def create_permission_hooks(
     """
     manager = HooksManager()
     
-    # Add path normalization hook FIRST (so permissions check normalized relative paths)
-    if workspace_dir:
-        from .hooks import create_path_normalization_hook
-        norm_hook = create_path_normalization_hook(workspace_dir)
-        manager.add_pre_tool_hook(norm_hook)
+    # Add absolute path blocking hook FIRST (enforce relative paths)
+    from .hooks import create_absolute_path_block_hook
+    manager.add_pre_tool_hook(create_absolute_path_block_hook())
 
     # Add permission checking hook
     permission_hook = create_permission_hook(

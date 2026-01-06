@@ -155,15 +155,19 @@ function coerceStructuredFields(value: unknown): Record<string, string> | null {
 }
 
 function parseStructuredMessage(text: string): StructuredMessage {
-  if (!text || !text.startsWith('---')) {
+  if (!text) {
     return { body: text, fields: {} };
   }
+
   const lines = text.split('\n');
-  if (lines.length < 3 || lines[0].trim() !== '---') {
+  const isFenced = lines[0]?.trim().startsWith('```');
+  const startIndex = isFenced ? 1 : 0;
+  if (lines.length < startIndex + 3 || lines[startIndex]?.trim() !== '---') {
     return { body: text, fields: {} };
   }
+
   let endIndex = -1;
-  for (let i = 1; i < lines.length; i += 1) {
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
     if (lines[i].trim() === '---') {
       endIndex = i;
       break;
@@ -172,8 +176,9 @@ function parseStructuredMessage(text: string): StructuredMessage {
   if (endIndex === -1) {
     return { body: text, fields: {} };
   }
+
   const fields: Record<string, string> = {};
-  lines.slice(1, endIndex).forEach((line) => {
+  lines.slice(startIndex + 1, endIndex).forEach((line) => {
     if (!line.trim()) {
       return;
     }
@@ -188,7 +193,17 @@ function parseStructuredMessage(text: string): StructuredMessage {
     }
   });
 
-  let body = lines.slice(endIndex + 1).join('\n');
+  let bodyStartIndex = endIndex + 1;
+  if (isFenced) {
+    while (bodyStartIndex < lines.length && lines[bodyStartIndex].trim() === '') {
+      bodyStartIndex += 1;
+    }
+    if (lines[bodyStartIndex]?.trim().startsWith('```')) {
+      bodyStartIndex += 1;
+    }
+  }
+
+  let body = lines.slice(bodyStartIndex).join('\n');
   if (body.startsWith('\n')) {
     body = body.slice(1);
   }

@@ -2297,6 +2297,7 @@ class EventingTracer(TracerBase):
         self._sequence = initial_sequence
         self._stream_header_buffer = ""
         self._stream_header_expected: Optional[bool] = None
+        self._stream_header_wrapped = False
         self._stream_structured_fields: Optional[dict[str, str]] = None
         self._stream_structured_status: Optional[str] = None
         self._stream_structured_error: Optional[str] = None
@@ -2434,7 +2435,9 @@ class EventingTracer(TracerBase):
             return
 
         if self._stream_active:
-            body_text = self._consume_stream_text(text) if text else ""
+            body_text = ""
+            if text and not self._stream_full_text:
+                body_text = self._consume_stream_text(text)
             if not body_text and self._stream_header_expected is None and self._stream_header_buffer:
                 body_text = self._stream_header_buffer
                 self._stream_header_buffer = ""
@@ -2487,6 +2490,7 @@ class EventingTracer(TracerBase):
     def _reset_stream_state(self) -> None:
         self._stream_header_buffer = ""
         self._stream_header_expected = None
+        self._stream_header_wrapped = False
         self._stream_structured_fields = None
         self._stream_structured_status = None
         self._stream_structured_error = None
@@ -2498,11 +2502,19 @@ class EventingTracer(TracerBase):
             self._stream_header_buffer += text
             if len(self._stream_header_buffer) < 3:
                 return ""
-            if not self._stream_header_buffer.startswith("---"):
+            if self._stream_header_buffer.startswith("```"):
+                fence_end = self._stream_header_buffer.find("\n")
+                if fence_end == -1:
+                    return ""
+                self._stream_header_wrapped = True
+                self._stream_header_buffer = self._stream_header_buffer[fence_end + 1 :]
+            trimmed = self._stream_header_buffer.lstrip()
+            if not trimmed.startswith("---"):
                 output = self._stream_header_buffer
                 self._stream_header_buffer = ""
                 self._stream_header_expected = False
                 return output
+            self._stream_header_buffer = trimmed
             self._stream_header_expected = True
             return self._extract_header_body()
 
@@ -2543,7 +2555,11 @@ class EventingTracer(TracerBase):
         self._stream_structured_error = fields.get("error") if fields else None
         self._stream_header_expected = False
 
-        body = "".join(lines[header_end_index + 1:])
+        body_lines = lines[header_end_index + 1 :]
+        if self._stream_header_wrapped and body_lines:
+            if body_lines[0].strip().startswith("```"):
+                body_lines = body_lines[1:]
+        body = "".join(body_lines)
         self._stream_header_buffer = ""
         return body
 

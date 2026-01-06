@@ -15,11 +15,11 @@ async def test_eventing_tracer_streams_without_header_leak() -> None:
     queue: asyncio.Queue = asyncio.Queue()
     tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="session-1")
 
-    tracer.on_message("---\nstatus: COMPLETE\n", is_partial=True)
+    tracer.on_message("```\n---\nstatus: COMPLETE\n", is_partial=True)
     await asyncio.sleep(0)
     assert queue.empty()
 
-    tracer.on_message("---\nHello", is_partial=True)
+    tracer.on_message("---\n```\n\nHello", is_partial=True)
     await asyncio.sleep(0)
 
     partial_event = await queue.get()

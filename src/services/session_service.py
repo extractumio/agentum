@@ -264,6 +264,25 @@ class SessionService:
             logger.warning(f"Failed to load session info for {session_id}: {e}")
             return {}
 
+    def update_resume_id(self, session_id: str, resume_id: str) -> None:
+        """
+        Persist a Claude resume_id for a session.
+
+        Args:
+            session_id: The local session ID.
+            resume_id: Claude session ID to store.
+        """
+        try:
+            session_info = self._session_manager.load_session(session_id)
+            if session_info.resume_id == resume_id:
+                return
+            self._session_manager.update_session(
+                session_info,
+                resume_id=resume_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update resume_id for {session_id}: {e}")
+
     def is_cancellation_requested(self, session_id: str) -> bool:
         """
         Check if cancellation was requested for a session.

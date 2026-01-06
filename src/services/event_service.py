@@ -13,6 +13,7 @@ from typing import Any, Optional
 from sqlalchemy import func, select
 
 from ..db.database import AsyncSessionLocal
+from ..services.session_service import session_service
 from ..db.models import Event
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,10 @@ async def record_event(event: dict[str, Any]) -> None:
         timestamp = datetime.utcnow()
 
     payload = dict(event.get("data", {}))
+    if event.get("type") == "agent_start":
+        resume_id = payload.get("session_id")
+        if isinstance(resume_id, str) and resume_id:
+            session_service.update_resume_id(session_id, resume_id)
     if event.get("type") == "message" and payload.get("is_partial"):
         return
     if event.get("type") == "message" and "full_text" in payload:

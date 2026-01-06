@@ -309,9 +309,11 @@ async def start_task(
     # - If request.resume_session_id is set, resume from that session
     # - Otherwise, if this session was already run before (has turns), resume it
     resume_from = request.resume_session_id
-    if not resume_from and session.num_turns > 0:
-        # This session has history, resume from itself
-        resume_from = session_id
+    if not resume_from:
+        session_info = session_service.get_session_info(session_id)
+        if session.num_turns > 0 or session_info.get("resume_id"):
+            # This session has history, resume from itself
+            resume_from = session_id
 
     # Build task parameters
     params = build_task_params(

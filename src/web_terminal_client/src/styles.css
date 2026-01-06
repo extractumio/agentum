@@ -150,6 +150,9 @@ body,
 .session-current-id {
   color: var(--color-text-bright);
   font-size: 12px;
+  display: inline-block;
+  min-width: 12ch;
+  text-align: left;
 }
 
 .session-new-button {
@@ -1333,11 +1336,20 @@ body,
   gap: 8px;
 }
 
+.agent-status-indicator {
+  color: var(--color-red);
+  font-weight: 600;
+}
+
 .todo-progress {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding-left: 4px;
+}
+
+.todo-progress-done {
+  opacity: 0.6;
 }
 
 .todo-item {
@@ -1350,6 +1362,10 @@ body,
 
 .todo-bullet {
   color: var(--color-cyan);
+}
+
+.todo-cancelled .todo-bullet {
+  color: var(--color-red);
 }
 
 .todo-text.todo-active {

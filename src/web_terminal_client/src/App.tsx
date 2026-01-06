@@ -445,6 +445,13 @@ function formatToolName(name: string): string {
   return name;
 }
 
+function getStatusLabel(status?: string): string {
+  if (!status) {
+    return '';
+  }
+  return STATUS_LABELS[status] ?? status;
+}
+
 function extractTodos(toolCalls: ToolCallView[]): TodoItem[] | null {
   const todoTool = [...toolCalls].reverse().find((tool) => tool.tool === 'TodoWrite' && tool.input);
   if (!todoTool) {
@@ -534,19 +541,42 @@ function StatusSpinner(): JSX.Element {
   return <span className="status-spinner">{SPINNER_FRAMES[frame]}</span>;
 }
 
-function TodoProgressList({ todos }: { todos: TodoItem[] }): JSX.Element {
+function TodoProgressList({
+  todos,
+  overallStatus,
+}: {
+  todos: TodoItem[];
+  overallStatus: ResultStatus | undefined;
+}): JSX.Element {
+  const isRunning = overallStatus === 'running' || !overallStatus;
+  const isCancelled = overallStatus === 'cancelled';
+  const isFailed = overallStatus === 'failed';
+  const isDone = !isRunning;
+  const frame = useSpinnerFrame();
+
   return (
-    <div className="todo-progress">
+    <div className={`todo-progress${isDone ? ' todo-progress-done' : ''}`}>
       {todos.map((todo, index) => {
         const status = todo.status?.toLowerCase?.() ?? 'pending';
-        const isActive = status === 'in_progress';
-        const isCompleted = status === 'completed';
+        const isActive = status === 'in_progress' && isRunning;
+        const isCompleted = isDone || status === 'completed';
         const label = isActive && todo.activeForm ? todo.activeForm : todo.content;
+        const showCancel = (isCancelled || isFailed) && status === 'in_progress';
+        const bullet = showCancel
+          ? '✗'
+          : isActive
+            ? SPINNER_FRAMES[frame]
+            : isCompleted
+              ? '✓'
+              : '•';
 
         return (
-          <div key={`${todo.content}-${index}`} className={`todo-item todo-${status}`}>
+          <div
+            key={`${todo.content}-${index}`}
+            className={`todo-item todo-${status}${showCancel ? ' todo-cancelled' : ''}`}
+          >
             <span className="todo-bullet">
-              {isCompleted ? '✓' : isActive ? '➤' : '•'}
+              {bullet}
             </span>
             <span
               className={`todo-text${isActive ? ' todo-active' : ''}${isCompleted ? ' todo-completed' : ''}`}
@@ -750,6 +780,9 @@ function AgentMessageBlock({
   onToggleFiles?: () => void;
 }): JSX.Element {
   const statusClass = status ? `agent-status-${status}` : '';
+  const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
+  const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
+  const statusLabel = getStatusLabel(normalizedStatus);
 
   return (
     <div className={`message-block agent-message ${statusClass}`}>
@@ -759,13 +792,13 @@ function AgentMessageBlock({
         <span className="message-time">@ {time}</span>
       </div>
       <div className="message-content md-container">
-        {content ? (
-          renderMarkdown(content)
-        ) : (
-          <div className="agent-progress">
-            <AgentSpinner />
-            {todos && todos.length > 0 && <TodoProgressList todos={todos} />}
-          </div>
+        {content ? renderMarkdown(content) : null}
+        {!content && !isTerminalStatus && <AgentSpinner />}
+        {!content && isTerminalStatus && (
+          <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
+        )}
+        {todos && todos.length > 0 && (
+          <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
         )}
       </div>
       {toolCalls.length > 0 && (
@@ -1140,7 +1173,12 @@ function StatusFooter({
               <StatusSpinner /> Running...
             </>
           ) : (
-            <>{statusLabel === 'Idle' ? '● Idle' : statusLabel}</>
+            <>
+              {statusLabel === 'Idle' && '● Idle'}
+              {statusLabel === 'Cancelled' && '✗ Cancelled'}
+              {statusLabel === 'Failed' && '✗ Failed'}
+              {statusLabel !== 'Idle' && statusLabel !== 'Cancelled' && statusLabel !== 'Failed' && statusLabel}
+            </>
           )}
         </span>
       </div>
@@ -1872,6 +1910,29 @@ export default function App(): JSX.Element {
 
   const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
 
+  const lastAgentMessageId = useMemo(() => {
+    for (let i = conversation.length - 1; i >= 0; i -= 1) {
+      const item = conversation[i];
+      if (item.type === 'agent_message') {
+        return item.id;
+      }
+    }
+    return null;
+  }, [conversation]);
+
+  const latestTodos = useMemo(() => {
+    for (let i = conversation.length - 1; i >= 0; i -= 1) {
+      const item = conversation[i];
+      if (item.type === 'agent_message') {
+        const todos = extractTodos(item.toolCalls);
+        if (todos && todos.length > 0) {
+          return todos;
+        }
+      }
+    }
+    return null;
+  }, [conversation]);
+
   const sessionFiles = useMemo(() => {
     const seen = new Set<string>();
     const files: string[] = [];
@@ -2106,7 +2167,7 @@ export default function App(): JSX.Element {
                     .slice(index + 1)
                     .every((i) => i.type !== 'agent_message');
                   const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
-                  const todos = extractTodos(item.toolCalls);
+                  const todos = item.id === lastAgentMessageId ? latestTodos : null;
                   return (
                     <AgentMessageBlock
                       key={item.id}

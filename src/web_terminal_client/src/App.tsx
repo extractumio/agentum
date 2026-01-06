@@ -1955,13 +1955,17 @@ export default function App(): JSX.Element {
               };
               if (!existing) {
                 items.push(currentStreamMessage);
-              } else {
+              } else if (pendingTools.length > 0) {
                 currentStreamMessage.toolCalls = pendingTools;
               }
               pendingTools = [];
             } else {
               currentStreamMessage.content = streamBuffer;
             }
+            break;
+          }
+
+          if (!fullText && !text && !eventStructuredFields && !streamBuffer) {
             break;
           }
 

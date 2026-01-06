@@ -215,6 +215,14 @@ async def list_sessions(
         offset=offset,
     )
 
+    for session in sessions:
+        if session.status == "running" and not agent_runner.is_running(session.id):
+            terminal_status = await event_service.get_latest_terminal_status(session.id)
+            if terminal_status:
+                session.status = terminal_status
+                session.completed_at = datetime.now(timezone.utc)
+    await db.commit()
+
     return SessionListResponse(
         sessions=[session_to_response(s) for s in sessions],
         total=total,

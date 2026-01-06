@@ -2471,6 +2471,9 @@ class EventingTracer(TracerBase):
             self._reset_stream_state()
             return
 
+        if not text.strip():
+            return
+
         if self._suppress_next_message:
             if text.strip() == self._last_stream_full_text.strip():
                 self._suppress_next_message = False

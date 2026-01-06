@@ -89,3 +89,36 @@ async def get_last_sequence(session_id: str) -> int:
         )
         last = result.scalar_one_or_none()
         return int(last or 0)
+
+
+async def get_latest_terminal_status(session_id: str) -> Optional[str]:
+    """Return the latest terminal status from persisted events, if any."""
+    async with AsyncSessionLocal() as db:
+        query = (
+            select(Event)
+            .where(
+                Event.session_id == session_id,
+                Event.event_type.in_(["agent_complete", "error", "cancelled"]),
+            )
+            .order_by(Event.sequence.desc())
+            .limit(1)
+        )
+        result = await db.execute(query)
+        event = result.scalar_one_or_none()
+
+    if not event:
+        return None
+
+    try:
+        payload = json.loads(event.data) if event.data else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    if event.event_type == "agent_complete":
+        status_value = str(payload.get("status", "complete")).lower()
+        if status_value == "error":
+            return "failed"
+        return status_value
+    if event.event_type == "cancelled":
+        return "cancelled"
+    return "failed"

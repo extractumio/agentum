@@ -371,6 +371,10 @@ body,
   border-left-color: var(--color-cyan);
 }
 
+.user-message .message-content {
+  color: var(--color-cyan);
+}
+
 .agent-message {
   border-left-color: var(--color-border);
 }

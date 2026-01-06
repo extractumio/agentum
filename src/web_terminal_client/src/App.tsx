@@ -877,6 +877,7 @@ function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
+  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
   const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
 
   return (
@@ -891,7 +892,7 @@ function AgentMessageBlock({
           <div className="message-content md-container">
             {content ? renderMarkdown(content) : null}
             {!content && !isTerminalStatus && <AgentSpinner />}
-            {!content && isTerminalStatus && (
+            {!content && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
             {((structuredStatusLabel && structuredStatus === 'failed') || structuredError) && (
@@ -1814,13 +1815,15 @@ export default function App(): JSX.Element {
 
     const flushPendingTools = (timestamp?: string) => {
       if (pendingTools.length > 0) {
-        items.push({
+        const toolMessage: ConversationItem = {
           type: 'agent_message',
           id: `agent-auto-${items.length}`,
           time: formatTimestamp(timestamp),
           content: '',
           toolCalls: pendingTools,
-        });
+        };
+        items.push(toolMessage);
+        lastAgentMessage = toolMessage;
         pendingTools = [];
       }
     };
@@ -1838,6 +1841,20 @@ export default function App(): JSX.Element {
 
     sortedEvents.forEach((event) => {
       switch (event.type) {
+        case 'agent_start': {
+          if (!currentStreamMessage && !lastAgentMessage) {
+            currentStreamMessage = {
+              type: 'agent_message',
+              id: `agent-${items.length}`,
+              time: formatTimestamp(event.timestamp),
+              content: '',
+              toolCalls: pendingTools,
+            };
+            items.push(currentStreamMessage);
+            pendingTools = [];
+          }
+          break;
+        }
         case 'user_message': {
           const content = String(event.data.text ?? '');
           items.push({
@@ -1894,6 +1911,7 @@ export default function App(): JSX.Element {
         }
         case 'message': {
           const text = String(event.data.text ?? '');
+          const fullText = typeof event.data.full_text === 'string' ? event.data.full_text : '';
           const isPartial = Boolean(event.data.is_partial);
           const eventStructuredFields = coerceStructuredFields(event.data.structured_fields);
 
@@ -1915,7 +1933,15 @@ export default function App(): JSX.Element {
             break;
           }
 
-          const finalText = `${streamBuffer}${text}`.trim();
+          let finalText = '';
+          if (fullText) {
+            finalText = fullText;
+          } else if (currentStreamMessage || streamBuffer) {
+            finalText = streamBuffer;
+          } else {
+            finalText = text;
+          }
+          finalText = finalText.trim();
           streamBuffer = '';
           const structuredInfo = eventStructuredFields
             ? {
@@ -1944,7 +1970,7 @@ export default function App(): JSX.Element {
             currentStreamMessage.structuredFields = structuredInfo.fields;
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
-          } else {
+          } else if (bodyText || pendingTools.length > 0) {
             const agentMessage: ConversationItem = {
               type: 'agent_message',
               id: `agent-${items.length}`,
@@ -1971,6 +1997,19 @@ export default function App(): JSX.Element {
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
             streamBuffer = '';
+          }
+
+          if (!lastAgentMessage && pendingTools.length > 0) {
+            const toolMessage: ConversationItem = {
+              type: 'agent_message',
+              id: `agent-${items.length}`,
+              time: formatTimestamp(event.timestamp),
+              content: '',
+              toolCalls: pendingTools,
+            };
+            items.push(toolMessage);
+            pendingTools = [];
+            lastAgentMessage = toolMessage;
           }
 
           attachFilesToMessage(lastAgentMessage);

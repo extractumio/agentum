@@ -1258,6 +1258,19 @@ export default function App(): JSX.Element {
     [config]
   );
 
+  const syncSessionEvents = useCallback(
+    async (sessionId: string, sessionOverride?: SessionResponse) => {
+      if (!config || !token) {
+        return;
+      }
+      const session = sessionOverride ?? (await getSession(config.api.base_url, token, sessionId));
+      const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
+      setEvents(seedSessionEvents(session, historyEvents));
+      return { session, historyEvents };
+    },
+    [config, token]
+  );
+
   const handleEvent = useCallback(
     (event: TerminalEvent) => {
       let enriched = event;
@@ -1531,19 +1544,6 @@ export default function App(): JSX.Element {
   const handleRemoveFile = useCallback((id: string) => {
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
   }, []);
-
-  const syncSessionEvents = useCallback(
-    async (sessionId: string, sessionOverride?: SessionResponse) => {
-      if (!config || !token) {
-        return;
-      }
-      const session = sessionOverride ?? (await getSession(config.api.base_url, token, sessionId));
-      const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
-      setEvents(seedSessionEvents(session, historyEvents));
-      return { session, historyEvents };
-    },
-    [config, token]
-  );
 
   const handleSelectSession = async (sessionId: string): Promise<void> => {
     if (!config || !token) {

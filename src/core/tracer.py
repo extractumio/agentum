@@ -57,6 +57,7 @@ from .output import (
     wrap_text,
 )
 from .schemas import get_model_context_size
+from .structured_output import parse_structured_output
 
 
 # Type aliases for backward compatibility
@@ -2401,11 +2402,25 @@ class EventingTracer(TracerBase):
 
     def on_message(self, text: str, is_partial: bool = False) -> None:
         self._tracer.on_message(text, is_partial=is_partial)
+        structured_fields = None
+        structured_status = None
+        structured_error = None
+
+        if not is_partial:
+            fields, body = parse_structured_output(text)
+            if fields:
+                structured_fields = fields
+                structured_status = fields.get("status")
+                structured_error = fields.get("error")
+                text = body
         self.emit_event(
             "message",
             {
                 "text": text,
                 "is_partial": is_partial,
+                "structured_fields": structured_fields,
+                "structured_status": structured_status,
+                "structured_error": structured_error,
             },
         )
 

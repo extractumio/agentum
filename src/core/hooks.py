@@ -323,6 +323,7 @@ def create_permission_hook(
                     tool_call=f"{tool_name}(dangerouslyDisableSandbox=True)",
                     message=security_msg,
                     is_security_violation=True,
+                    interrupt=True,
                 )
 
             if trace_processor and hasattr(trace_processor, "set_permission_denied"):
@@ -382,6 +383,7 @@ def create_permission_hook(
                 tool_call=tool_call,
                 message=denial_msg,
                 is_security_violation=False,
+                interrupt=should_interrupt,
             )
 
         if should_interrupt:

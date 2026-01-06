@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
@@ -605,6 +606,7 @@ async def get_result(
     result_files: set[str] = set()
     status_value = "FAILED"
     error_message = ""
+    structured_status: Optional[str] = None
 
     for event in events:
         if event.get("type") == "message":
@@ -615,6 +617,14 @@ async def get_result(
             else:
                 final_message = "".join(message_buffer) + text
                 message_buffer = []
+            if structured_status is None:
+                structured_status = data.get("structured_status")
+                if structured_status:
+                    structured_status = str(structured_status).upper()
+            if not error_message:
+                structured_error = data.get("structured_error")
+                if structured_error:
+                    error_message = str(structured_error)
 
         if event.get("type") == "error":
             error_message = str(event.get("data", {}).get("message", ""))
@@ -660,7 +670,7 @@ async def get_result(
 
     return ResultResponse(
         session_id=session_id,
-        status=status_value,
+        status=structured_status or status_value,
         error=error_message,
         comments="",
         output=final_message,

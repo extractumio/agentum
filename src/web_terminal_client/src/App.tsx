@@ -31,6 +31,9 @@ type ConversationItem =
       status?: ResultStatus;
       comments?: string;
       files?: string[];
+      structuredStatus?: ResultStatus;
+      structuredError?: string;
+      structuredFields?: Record<string, string>;
     }
   | {
       type: 'output';
@@ -66,6 +69,7 @@ const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
   running: 'Running',
   complete: 'Complete',
+  partial: 'Partial',
   failed: 'Failed',
   cancelled: 'Cancelled',
 };
@@ -74,6 +78,7 @@ const STATUS_CLASS: Record<string, string> = {
   idle: 'status-idle',
   running: 'status-running',
   complete: 'status-complete',
+  partial: 'status-partial',
   failed: 'status-failed',
   cancelled: 'status-cancelled',
 };
@@ -123,6 +128,76 @@ function normalizeStatus(value: string): string {
     return 'partial';
   }
   return statusValue || 'idle';
+}
+
+type StructuredMessage = {
+  body: string;
+  fields: Record<string, string>;
+  status?: ResultStatus;
+  error?: string;
+};
+
+function coerceStructuredFields(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) {
+    return null;
+  }
+  const fields: Record<string, string> = {};
+  entries.forEach(([key, fieldValue]) => {
+    if (typeof fieldValue === 'string') {
+      fields[key.toLowerCase()] = fieldValue;
+    }
+  });
+  return Object.keys(fields).length > 0 ? fields : null;
+}
+
+function parseStructuredMessage(text: string): StructuredMessage {
+  if (!text || !text.startsWith('---')) {
+    return { body: text, fields: {} };
+  }
+  const lines = text.split('\n');
+  if (lines.length < 3 || lines[0].trim() !== '---') {
+    return { body: text, fields: {} };
+  }
+  let endIndex = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i].trim() === '---') {
+      endIndex = i;
+      break;
+    }
+  }
+  if (endIndex === -1) {
+    return { body: text, fields: {} };
+  }
+  const fields: Record<string, string> = {};
+  lines.slice(1, endIndex).forEach((line) => {
+    if (!line.trim()) {
+      return;
+    }
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex === -1) {
+      return;
+    }
+    const key = line.slice(0, separatorIndex).trim().toLowerCase();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (key) {
+      fields[key] = value;
+    }
+  });
+
+  let body = lines.slice(endIndex + 1).join('\n');
+  if (body.startsWith('\n')) {
+    body = body.slice(1);
+  }
+
+  const statusRaw = fields.status;
+  const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+  const error = fields.error ?? undefined;
+
+  return { body, fields, status, error };
 }
 
 function formatDuration(durationMs?: number | null): string {
@@ -758,6 +833,8 @@ function AgentMessageBlock({
   toolExpanded,
   onToggleTool,
   status,
+  structuredStatus,
+  structuredError,
   comments,
   commentsExpanded,
   onToggleComments,
@@ -772,6 +849,8 @@ function AgentMessageBlock({
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
   status?: string;
+  structuredStatus?: ResultStatus;
+  structuredError?: string;
   comments?: string;
   commentsExpanded?: boolean;
   onToggleComments?: () => void;
@@ -783,6 +862,7 @@ function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
+  const structuredStatusLabel = structuredStatus ? getStatusLabel(structuredStatus) : '';
 
   return (
     <div className={`message-block agent-message ${statusClass}`}>
@@ -798,6 +878,16 @@ function AgentMessageBlock({
             {!content && !isTerminalStatus && <AgentSpinner />}
             {!content && isTerminalStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
+            )}
+            {(structuredStatusLabel || structuredError) && (
+              <div className="agent-structured-meta">
+                {structuredStatusLabel && (
+                  <div className="agent-structured-status">Status: {structuredStatusLabel}</div>
+                )}
+                {structuredError && (
+                  <div className="agent-structured-error">Error: {structuredError}</div>
+                )}
+              </div>
             )}
             {todos && todos.length > 0 && (
               <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
@@ -1790,6 +1880,7 @@ export default function App(): JSX.Element {
         case 'message': {
           const text = String(event.data.text ?? '');
           const isPartial = Boolean(event.data.is_partial);
+          const eventStructuredFields = coerceStructuredFields(event.data.structured_fields);
 
           if (isPartial) {
             streamBuffer += text;
@@ -1811,9 +1902,31 @@ export default function App(): JSX.Element {
 
           const finalText = `${streamBuffer}${text}`.trim();
           streamBuffer = '';
+          const structuredInfo = eventStructuredFields
+            ? {
+                body: finalText,
+                fields: eventStructuredFields,
+                status: (() => {
+                  const statusRaw = typeof event.data.structured_status === 'string'
+                    ? event.data.structured_status
+                    : eventStructuredFields.status;
+                  return statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+                })(),
+                error: (() => {
+                  const errorRaw = typeof event.data.structured_error === 'string'
+                    ? event.data.structured_error
+                    : eventStructuredFields.error;
+                  return errorRaw ?? undefined;
+                })(),
+              }
+            : parseStructuredMessage(finalText);
+          const bodyText = structuredInfo.body;
 
           if (currentStreamMessage) {
-            currentStreamMessage.content = finalText;
+            currentStreamMessage.content = bodyText;
+            currentStreamMessage.structuredStatus = structuredInfo.status;
+            currentStreamMessage.structuredError = structuredInfo.error;
+            currentStreamMessage.structuredFields = structuredInfo.fields;
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
           } else {
@@ -1821,8 +1934,11 @@ export default function App(): JSX.Element {
               type: 'agent_message',
               id: `agent-${items.length}`,
               time: formatTimestamp(event.timestamp),
-              content: finalText,
+              content: bodyText,
               toolCalls: pendingTools,
+              structuredStatus: structuredInfo.status,
+              structuredError: structuredInfo.error,
+              structuredFields: structuredInfo.fields,
             };
             items.push(agentMessage);
             lastAgentMessage = agentMessage;
@@ -1845,7 +1961,7 @@ export default function App(): JSX.Element {
           attachFilesToMessage(lastAgentMessage);
 
           if (lastAgentMessage) {
-            lastAgentMessage.status = statusValue;
+            lastAgentMessage.status = lastAgentMessage.structuredStatus ?? statusValue;
           }
           break;
         }
@@ -2242,6 +2358,8 @@ export default function App(): JSX.Element {
                       toolExpanded={expandedTools}
                       onToggleTool={toggleTool}
                       status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
+                      structuredStatus={item.structuredStatus}
+                      structuredError={item.structuredError}
                       comments={item.comments}
                       commentsExpanded={expandedComments.has(item.id)}
                       onToggleComments={() => toggleComments(item.id)}

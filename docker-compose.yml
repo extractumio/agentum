@@ -48,6 +48,18 @@ services:
       - "${AGENTUM_WEB_PORT:-50080}:50080"
     depends_on:
       - agentum-api
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    ports:
+      - "127.0.0.1:46379:6379"
 
 volumes:
   web_node_modules:

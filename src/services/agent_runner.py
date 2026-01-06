@@ -227,6 +227,9 @@ class AgentRunner:
                 additional_dirs=params.additional_dirs or [],
                 enable_skills=params.enable_skills,
                 enable_file_checkpointing=params.enable_file_checkpointing,
+                max_buffer_size=params.max_buffer_size,
+                output_format=params.output_format,
+                include_partial_messages=params.include_partial_messages,
                 tracer=tracer,
             )
 

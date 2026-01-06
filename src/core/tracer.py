@@ -2295,8 +2295,20 @@ class EventingTracer(TracerBase):
         self._event_sink = event_sink
         self._session_id = session_id
         self._sequence = initial_sequence
+        self._stream_header_buffer = ""
+        self._stream_header_expected: Optional[bool] = None
+        self._stream_structured_fields: Optional[dict[str, str]] = None
+        self._stream_structured_status: Optional[str] = None
+        self._stream_structured_error: Optional[str] = None
+        self._stream_full_text = ""
+        self._stream_active = False
 
-    def emit_event(self, event_type: str, data: dict[str, Any]) -> None:
+    def emit_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        persist_event: bool = True
+    ) -> None:
         """Emit a structured event to the queue."""
         if self._event_queue is None:
             return
@@ -2315,7 +2327,7 @@ class EventingTracer(TracerBase):
         except RuntimeError:
             loop = None
 
-        if self._event_sink is not None:
+        if self._event_sink is not None and persist_event:
             self._event_sink(event)
 
         if loop and loop.is_running():
@@ -2401,28 +2413,139 @@ class EventingTracer(TracerBase):
         self.emit_event("thinking", {"text": thinking_text})
 
     def on_message(self, text: str, is_partial: bool = False) -> None:
-        self._tracer.on_message(text, is_partial=is_partial)
+        if is_partial:
+            self._stream_active = True
+            body_text = self._consume_stream_text(text)
+            if not body_text:
+                return
+            self._stream_full_text += body_text
+            self._tracer.on_message(body_text, is_partial=True)
+            self.emit_event(
+                "message",
+                {
+                    "text": body_text,
+                    "is_partial": True,
+                    "structured_fields": None,
+                    "structured_status": None,
+                    "structured_error": None,
+                },
+                persist_event=False,
+            )
+            return
+
+        if self._stream_active:
+            body_text = self._consume_stream_text(text) if text else ""
+            if not body_text and self._stream_header_expected is None and self._stream_header_buffer:
+                body_text = self._stream_header_buffer
+                self._stream_header_buffer = ""
+                self._stream_header_expected = False
+            if body_text:
+                self._stream_full_text += body_text
+
+            structured_fields = self._stream_structured_fields
+            structured_status = self._stream_structured_status
+            structured_error = self._stream_structured_error
+            full_text = self._stream_full_text
+            self._tracer.on_message(full_text, is_partial=False)
+            self.emit_event(
+                "message",
+                {
+                    "text": body_text,
+                    "full_text": full_text,
+                    "is_partial": False,
+                    "structured_fields": structured_fields,
+                    "structured_status": structured_status,
+                    "structured_error": structured_error,
+                },
+            )
+            self._reset_stream_state()
+            return
+
+        self._tracer.on_message(text, is_partial=False)
         structured_fields = None
         structured_status = None
         structured_error = None
 
-        if not is_partial:
-            fields, body = parse_structured_output(text)
-            if fields:
-                structured_fields = fields
-                structured_status = fields.get("status")
-                structured_error = fields.get("error")
-                text = body
+        fields, body = parse_structured_output(text)
+        if fields:
+            structured_fields = fields
+            structured_status = fields.get("status")
+            structured_error = fields.get("error")
+            text = body
+
         self.emit_event(
             "message",
             {
                 "text": text,
-                "is_partial": is_partial,
+                "is_partial": False,
                 "structured_fields": structured_fields,
                 "structured_status": structured_status,
                 "structured_error": structured_error,
             },
         )
+
+    def _reset_stream_state(self) -> None:
+        self._stream_header_buffer = ""
+        self._stream_header_expected = None
+        self._stream_structured_fields = None
+        self._stream_structured_status = None
+        self._stream_structured_error = None
+        self._stream_full_text = ""
+        self._stream_active = False
+
+    def _consume_stream_text(self, text: str) -> str:
+        if self._stream_header_expected is None:
+            self._stream_header_buffer += text
+            if len(self._stream_header_buffer) < 3:
+                return ""
+            if not self._stream_header_buffer.startswith("---"):
+                output = self._stream_header_buffer
+                self._stream_header_buffer = ""
+                self._stream_header_expected = False
+                return output
+            self._stream_header_expected = True
+            return self._extract_header_body()
+
+        if self._stream_header_expected:
+            self._stream_header_buffer += text
+            return self._extract_header_body()
+
+        return text
+
+    def _extract_header_body(self) -> str:
+        lines = self._stream_header_buffer.splitlines(keepends=True)
+        if not lines:
+            return ""
+
+        header_end_index = None
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                header_end_index = index
+                break
+
+        if header_end_index is None:
+            return ""
+
+        header_lines = lines[1:header_end_index]
+        fields: dict[str, str] = {}
+        for line in header_lines:
+            line_value = line.strip()
+            if not line_value or ":" not in line_value:
+                continue
+            key, value = line_value.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key:
+                fields[key] = value
+
+        self._stream_structured_fields = fields or None
+        self._stream_structured_status = fields.get("status") if fields else None
+        self._stream_structured_error = fields.get("error") if fields else None
+        self._stream_header_expected = False
+
+        body = "".join(lines[header_end_index + 1:])
+        self._stream_header_buffer = ""
+        return body
 
     def on_metrics_update(self, metrics: dict[str, Any]) -> None:
         if hasattr(self._tracer, "on_metrics_update"):

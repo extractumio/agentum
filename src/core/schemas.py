@@ -426,6 +426,9 @@ class TaskExecutionParams:
     additional_dirs: list[str] = field(default_factory=list)
     enable_skills: Optional[bool] = None
     enable_file_checkpointing: Optional[bool] = None
+    max_buffer_size: Optional[int] = None
+    output_format: Optional[str] = None
+    include_partial_messages: Optional[bool] = None
 
     # Tracer (CLI: ExecutionTracer, HTTP: BackendConsoleTracer)
     tracer: Optional[Any] = None  # Type: TracerBase (Any to avoid circular import)

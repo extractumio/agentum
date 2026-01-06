@@ -85,6 +85,8 @@ class TraceProcessor:
         self._cumulative_cost_usd: Optional[float] = None
         self._cumulative_turns: Optional[int] = None
         self._cumulative_tokens: Optional[int] = None
+        self._stream_has_text = False
+        self._skip_next_assistant_message = False
 
     def set_task(self, task: str) -> None:
         """
@@ -197,6 +199,9 @@ class TraceProcessor:
                 error_type="assistant_error"
             )
             return
+        if self._skip_next_assistant_message:
+            self._skip_next_assistant_message = False
+            return
 
         for block in msg.content:
             self._process_content_block(block)
@@ -297,6 +302,7 @@ class TraceProcessor:
         usage = None
 
         if event_type == "message_start":
+            self._stream_has_text = False
             message = raw_event.get("message", {})
             if isinstance(message, dict):
                 usage = message.get("usage")
@@ -304,8 +310,27 @@ class TraceProcessor:
             usage = raw_event.get("usage")
         elif event_type == "message_stop":
             usage = raw_event.get("usage")
+            if self._stream_has_text:
+                self.tracer.on_message("", is_partial=False)
+                self._skip_next_assistant_message = True
+                self._stream_has_text = False
         else:
             usage = raw_event.get("usage")
+
+        if event_type == "content_block_start":
+            content_block = raw_event.get("content_block", {})
+            if isinstance(content_block, dict) and content_block.get("type") == "text":
+                text = content_block.get("text")
+                if isinstance(text, str) and text:
+                    self._stream_has_text = True
+                    self.tracer.on_message(text, is_partial=True)
+        elif event_type == "content_block_delta":
+            delta = raw_event.get("delta", {})
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str) and text:
+                    self._stream_has_text = True
+                    self.tracer.on_message(text, is_partial=True)
 
         if isinstance(usage, dict):
             self._apply_usage_update(usage)

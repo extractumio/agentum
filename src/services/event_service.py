@@ -37,7 +37,12 @@ async def record_event(event: dict[str, Any]) -> None:
     if timestamp is None:
         timestamp = datetime.utcnow()
 
-    payload = event.get("data", {})
+    payload = dict(event.get("data", {}))
+    if event.get("type") == "message" and payload.get("is_partial"):
+        return
+    if event.get("type") == "message" and "full_text" in payload:
+        payload["text"] = payload.get("full_text") or payload.get("text")
+        payload.pop("full_text", None)
     async with AsyncSessionLocal() as db:
         db_event = Event(
             session_id=session_id,

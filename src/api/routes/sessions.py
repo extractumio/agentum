@@ -15,7 +15,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
 from ...services.agent_runner import agent_runner, TaskParams
+from ...services import event_service
 from ...services.auth_service import auth_service
 from ...services.session_service import session_service
 from ..deps import get_current_user_id
@@ -324,7 +325,10 @@ async def start_task(
 @router.get("/{session_id}/events")
 async def stream_events(
     session_id: str,
-    token: str = Query(...),
+    token: str | None = Query(default=None),
+    after: int | None = Query(default=None),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
@@ -332,6 +336,15 @@ async def stream_events(
 
     Note: token is passed via query parameter to support EventSource.
     """
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing access token",
+        )
+
     user_id = auth_service.validate_token(token)
     if not user_id:
         raise HTTPException(
@@ -351,7 +364,7 @@ async def stream_events(
             detail=f"Session not found: {session_id}",
         )
 
-    queue = agent_runner.get_or_create_event_queue(session_id)
+    queue = await agent_runner.subscribe(session_id)
 
     async def event_generator():
         """
@@ -363,8 +376,28 @@ async def stream_events(
         - Error events if the agent fails before sending events
         - Graceful completion when agent finishes
         """
-        completion_event_sent = False
         try:
+            last_sequence = after or 0
+            if last_event_id:
+                try:
+                    last_sequence = int(last_event_id)
+                except ValueError:
+                    last_sequence = after or 0
+
+            # Replay missed events from persistence
+            replay_events = await event_service.list_events(
+                session_id=session_id,
+                after_sequence=last_sequence,
+                limit=2000,
+            )
+            for event in replay_events:
+                payload = json.dumps(event, default=str)
+                yield f"id: {event.get('sequence')}\n"
+                yield f"data: {payload}\n\n"
+                last_sequence = event.get("sequence", last_sequence)
+                if event.get("type") in ("agent_complete", "error", "cancelled"):
+                    return
+
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -373,25 +406,10 @@ async def stream_events(
 
                     # Check if task finished while waiting
                     if not agent_runner.is_running(session_id) and queue.empty():
-                        # Task ended - check if we need to send a synthetic completion
-                        if not completion_event_sent:
-                            result = agent_runner.get_result(session_id)
-                            if result and result.get("status") == "failed":
-                                # Send error event for failed task
-                                error_event = {
-                                    "type": "error",
-                                    "data": {
-                                        "message": result.get("error", "Task failed"),
-                                        "error_type": "execution_error",
-                                    },
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "sequence": 9999,
-                                }
-                                payload = json.dumps(error_event, default=str)
-                                yield f"id: 9999\n"
-                                yield f"data: {payload}\n\n"
-                                completion_event_sent = True
                         break
+                    continue
+
+                if event.get("sequence", 0) <= last_sequence:
                     continue
 
                 payload = json.dumps(event, default=str)
@@ -401,8 +419,8 @@ async def stream_events(
 
                 event_type = event.get("type")
                 if event_type in ("agent_complete", "error", "cancelled"):
-                    completion_event_sent = True
                     break
+                last_sequence = event.get("sequence", last_sequence)
 
         except Exception as e:
             # Send error event if SSE streaming fails
@@ -421,8 +439,7 @@ async def stream_events(
             yield f"data: {payload}\n\n"
 
         finally:
-            if not agent_runner.is_running(session_id):
-                agent_runner.clear_event_queue(session_id)
+            await agent_runner.unsubscribe(session_id, queue)
 
     return StreamingResponse(
         event_generator(),
@@ -434,6 +451,44 @@ async def stream_events(
             "Content-Type": "text/event-stream; charset=utf-8",
         },
     )
+
+
+@router.get("/{session_id}/events/history")
+async def list_events(
+    session_id: str,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    after: int | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    List persisted events for a session.
+
+    This endpoint powers polling fallback and session replay.
+    """
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+
+    user_id = auth_service.validate_token(token) if token else None
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    session = await session_service.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    return await event_service.list_events(session_id=session_id, after_sequence=after)
 
 
 # =============================================================================
@@ -512,7 +567,7 @@ async def get_result(
     """
     Get task result.
 
-    Returns the output.yaml content and execution metrics for a completed session.
+    Returns a synthesized summary from persisted events and execution metrics.
     Includes token usage from the file-based session info.
     """
     session = await session_service.get_session(
@@ -527,8 +582,38 @@ async def get_result(
             detail=f"Session not found: {session_id}",
         )
 
-    # Get output from file-based storage
-    output = session_service.get_session_output(session_id)
+    events = await event_service.list_events(session_id=session_id, after_sequence=None, limit=5000)
+
+    message_buffer: list[str] = []
+    final_message: str = ""
+    result_files: set[str] = set()
+    status_value = "FAILED"
+    error_message = ""
+
+    for event in events:
+        if event.get("type") == "message":
+            data = event.get("data", {})
+            text = str(data.get("text", ""))
+            if data.get("is_partial"):
+                message_buffer.append(text)
+            else:
+                final_message = "".join(message_buffer) + text
+                message_buffer = []
+
+        if event.get("type") == "error":
+            error_message = str(event.get("data", {}).get("message", ""))
+
+        if event.get("type") == "agent_complete":
+            status_value = str(event.get("data", {}).get("status", status_value))
+
+        if event.get("type") in ("tool_start", "tool_complete"):
+            data = event.get("data", {})
+            tool_input = data.get("tool_input", {})
+            if isinstance(tool_input, dict):
+                for key in ("file_path", "path", "target_path", "dest_path"):
+                    path_value = tool_input.get(key)
+                    if isinstance(path_value, str) and not path_value.startswith(("/", "~")):
+                        result_files.add(path_value)
 
     # Get session info for token usage data
     session_info = session_service.get_session_info(session_id)
@@ -559,11 +644,11 @@ async def get_result(
 
     return ResultResponse(
         session_id=session_id,
-        status=output.get("status", "FAILED"),
-        error=output.get("error", ""),
-        comments=output.get("comments", ""),
-        output=output.get("output", ""),
-        result_files=output.get("result_files", []),
+        status=status_value,
+        error=error_message,
+        comments="",
+        output=final_message,
+        result_files=sorted(result_files),
         metrics=metrics,
     )
 

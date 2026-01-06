@@ -7,7 +7,6 @@ export type SSEEventType =
   | 'message'
   | 'error'
   | 'agent_complete'
-  | 'output_display'
   | 'profile_switch'
   | 'hook_triggered'
   | 'conversation_turn'

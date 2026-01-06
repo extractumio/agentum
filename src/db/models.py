@@ -73,3 +73,28 @@ class Session(Base):
     # Relationship to user
     user: Mapped["User"] = relationship("User", back_populates="sessions")
 
+    # Relationship to events
+    events: Mapped[list["Event"]] = relationship(
+        "Event", back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class Event(Base):
+    """
+    Persisted SSE events for session replay and recovery.
+
+    Stores structured events emitted by the tracer so clients can
+    resume streams and load full history.
+    """
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("sessions.id"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, index=True)
+    event_type: Mapped[str] = mapped_column(String(50))
+    data: Mapped[str] = mapped_column(Text)
+    timestamp: Mapped[datetime] = mapped_column(DateTime)
+
+    session: Mapped["Session"] = relationship("Session", back_populates="events")

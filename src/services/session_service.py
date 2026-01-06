@@ -218,18 +218,6 @@ class SessionService:
             cancel_requested=True,
         )
 
-    def get_session_output(self, session_id: str) -> dict:
-        """
-        Get the output.yaml content for a session.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            Parsed output.yaml as a dictionary.
-        """
-        return self._session_manager.parse_output(session_id)
-
     def get_session_file(self, session_id: str, file_path: str) -> Path:
         """
         Resolve a workspace file path for a session.

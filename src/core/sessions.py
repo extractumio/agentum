@@ -4,7 +4,6 @@ Session management for Agentum.
 Handles session creation, persistence, and resumption.
 Each session has an isolated workspace with:
 - skills/ - On-demand copied skills from global skills library
-- output.yaml - Session-specific output (YAML format)
 """
 import json
 import logging
@@ -14,13 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
 from .exceptions import SessionError
 from .schemas import (
     Checkpoint,
     CheckpointType,
-    OutputSchema,
     SessionInfo,
     TaskStatus,
     TokenUsage,
@@ -36,7 +32,7 @@ class SessionManager:
     Sessions are stored in the sessions directory and include:
     - Session metadata (session_info.json)
     - Agent logs (agent.jsonl)
-    - Output files (output.yaml)
+    - Output files created by the agent in workspace
     """
 
     def __init__(self, sessions_dir: Path) -> None:
@@ -106,18 +102,6 @@ class SessionManager:
             Path to the agent.jsonl file.
         """
         return self.get_session_dir(session_id) / "agent.jsonl"
-
-    def get_output_file(self, session_id: str) -> Path:
-        """
-        Get the output file path for a session.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            Path to the output.yaml file.
-        """
-        return self.get_workspace_dir(session_id) / "output.yaml"
 
     def get_workspace_dir(self, session_id: str) -> Path:
         """
@@ -218,7 +202,7 @@ class SessionManager:
         Remove the skills folder from a session's workspace.
 
         Called after agent run completes to clean up copied skills.
-        The output.yaml and other workspace files are preserved.
+        Workspace files are preserved.
 
         Args:
             session_id: The session ID.
@@ -565,32 +549,6 @@ class SessionManager:
                     continue
 
         return sorted(sessions, key=lambda s: s.created_at, reverse=True)
-
-    def parse_output(self, session_id: str) -> dict:
-        """
-        Parse the output.yaml from a session.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            Parsed output as a dictionary with all schema fields.
-        """
-        output_file = self.get_output_file(session_id)
-        if output_file.exists():
-            try:
-                data = yaml.safe_load(output_file.read_text())
-                if data is None:
-                    data = {}
-                # Ensure all fields are present with defaults
-                output = OutputSchema.create_empty(session_id=session_id)
-                return output.model_copy(update=data).model_dump()
-            except yaml.YAMLError as e:
-                logger.warning(f"Failed to parse output.yaml for session {session_id}: {e}")
-        else:
-            logger.debug(f"No output.yaml found for session {session_id}")
-        # Return default output with all fields (status=FAILED)
-        return OutputSchema.create_empty(session_id=session_id).model_dump()
 
 
 def generate_session_id() -> str:

@@ -121,8 +121,8 @@ const sampleMessages = [
     content: {
       index: 4,
       tool: 'Write',
-      file_path: './output.yaml',
-      preview: 'session_id: ""\nstatus: "FAILED"\nerror: "Cannot fetch external URLs..."\ncomments: ""\noutput: ""',
+      file_path: './report.md',
+      preview: '# Report\n\nUnable to fetch external URLs due to sandbox restrictions.',
     }
   },
   {

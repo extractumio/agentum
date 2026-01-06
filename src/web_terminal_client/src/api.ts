@@ -2,6 +2,7 @@ import type {
   ResultResponse,
   SessionListResponse,
   SessionResponse,
+  SSEEvent,
   TaskStartedResponse,
   TokenResponse,
 } from './types';
@@ -89,6 +90,21 @@ export async function getResult(
   sessionId: string
 ): Promise<ResultResponse> {
   return apiRequest<ResultResponse>(baseUrl, `/api/v1/sessions/${sessionId}/result`, {}, token);
+}
+
+export async function getSessionEvents(
+  baseUrl: string,
+  token: string,
+  sessionId: string,
+  after?: number
+): Promise<SSEEvent[]> {
+  const params = new URLSearchParams();
+  if (after !== undefined) {
+    params.set('after', String(after));
+  }
+  const query = params.toString();
+  const path = `/api/v1/sessions/${sessionId}/events/history${query ? `?${query}` : ''}`;
+  return apiRequest<SSEEvent[]>(baseUrl, path, {}, token);
 }
 
 export async function continueTask(

@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+logger = logging.getLogger(__name__)
+
 from .constants import (
     AnsiColors,
     BoxChars,
@@ -237,14 +239,14 @@ class TracerBase(ABC):
         status: Optional[str] = None
     ) -> None:
         """
-        Called after output.yaml is parsed to display the structured result.
+        Called after a structured result is available for display.
 
         Args:
-            output: The output text from output.yaml.
+            output: The output text.
             error: Error message if any.
             comments: Additional comments.
             result_files: List of result file paths.
-            status: The status from output.yaml.
+            status: The status for the result.
         """
         pass
 
@@ -1546,7 +1548,7 @@ class ExecutionTracer(TracerBase):
         status: Optional[str] = None
     ) -> None:
         """
-        Display the parsed output.yaml content in a styled box.
+        Display a structured output summary in a styled box.
 
         Uses the shared print_output_box function for consistent formatting
         across CLI and HTTP client output.
@@ -2279,10 +2281,15 @@ class EventingTracer(TracerBase):
         self,
         tracer: TracerBase,
         event_queue: Optional[asyncio.Queue] = None,
+        event_sink: Optional[callable] = None,
+        session_id: Optional[str] = None,
+        initial_sequence: int = 0,
     ) -> None:
         self._tracer = tracer
         self._event_queue = event_queue
-        self._sequence = 0
+        self._event_sink = event_sink
+        self._session_id = session_id
+        self._sequence = initial_sequence
 
     def emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a structured event to the queue."""
@@ -2295,6 +2302,7 @@ class EventingTracer(TracerBase):
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sequence": self._sequence,
+            "session_id": self._session_id or data.get("session_id"),
         }
 
         try:
@@ -2302,13 +2310,16 @@ class EventingTracer(TracerBase):
         except RuntimeError:
             loop = None
 
+        if self._event_sink is not None:
+            self._event_sink(event)
+
         if loop and loop.is_running():
             loop.create_task(self._event_queue.put(event))
         else:
             try:
                 self._event_queue.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                logger.warning("Event queue full; dropping event %s", event_type)
 
     def on_agent_start(
         self,
@@ -2462,16 +2473,6 @@ class EventingTracer(TracerBase):
             comments=comments,
             result_files=result_files,
             status=status,
-        )
-        self.emit_event(
-            "output_display",
-            {
-                "output": output,
-                "error": error,
-                "comments": comments,
-                "result_files": result_files,
-                "status": status,
-            },
         )
 
     def on_profile_switch(

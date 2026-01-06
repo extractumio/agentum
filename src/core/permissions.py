@@ -36,15 +36,6 @@ from .permission_config import (
     get_safe_tools,
 )
 
-# Import system tools check function (path configured in entry point agent.py)
-# Note: agentum module is in tools/ directory, added to sys.path at runtime
-try:
-    from agentum.system_write_output import is_system_tool  # type: ignore[import-not-found]
-except ImportError:
-    # Fallback if tools not installed - no system tools available
-    def is_system_tool(tool_name: str) -> bool:
-        return False
-
 logger = logging.getLogger(__name__)
 
 
@@ -63,9 +54,6 @@ class PermissionDenial:
 class PermissionDenialTracker:
     """
     Tracks permission denials during agent execution.
-
-    Use this to capture denial information so output.yaml can be
-    written with proper error details when the agent is interrupted.
     """
     denials: list[PermissionDenial] = field(default_factory=list)
     _interrupted: bool = False
@@ -108,45 +96,6 @@ class PermissionDenialTracker:
     def last_denial(self) -> Optional[PermissionDenial]:
         """Get the most recent denial, if any."""
         return self.denials[-1] if self.denials else None
-
-    def get_error_output(self) -> dict[str, Any]:
-        """
-        Generate output.yaml content for permission denial.
-
-        Returns:
-            Dictionary suitable for writing to output.yaml.
-        """
-        denial = self.last_denial
-        if denial is None:
-            return {
-                "status": "FAILED",
-                "error": "Unknown error - agent interrupted",
-                "output": None,
-            }
-
-        if denial.is_security_violation:
-            status = "FAILED"
-            error = f"Security violation: {denial.message}"
-        else:
-            status = "FAILED"
-            error = f"Permission denied for {denial.tool_name}: {denial.message}"
-
-        # Build detailed output with all denial info
-        details = []
-        for d in self.denials:
-            details.append(f"- {d.tool_name}: {d.tool_call}")
-
-        details_str = "\n".join(details)
-        output = (
-            f"Agent execution was interrupted due to permission denial. "
-            f"Denied operations:\n{details_str}"
-        )
-
-        return {
-            "status": status,
-            "error": error,
-            "output": output,
-        }
 
     def clear(self) -> None:
         """Clear all recorded denials."""
@@ -429,19 +378,10 @@ def create_permission_callback(
         Permission callback with rule enforcement and actionable guidance.
 
         Uses smart interrupt logic:
-        - System tools: always allowed (cannot be disabled)
         - Security violations: immediate interrupt
         - Regular denials: allow learning, interrupt after max_denials_before_interrupt
         """
         logger.info(f"PERMISSION CHECK: {tool_name} with input: {tool_input}")
-
-        # SYSTEM TOOLS: Always allow - these cannot be disabled via permissions
-        # This ensures the agent can always write output.yaml for reporting
-        if is_system_tool(tool_name):
-            logger.info(f"PERMISSION ALLOW: {tool_name} is a system tool (always allowed)")
-            if on_permission_check:
-                on_permission_check(tool_name, "allow")
-            return PermissionResultAllow(behavior="allow")
 
         # SECURITY: Always deny attempts to bypass sandbox - immediate interrupt
         if tool_input.get("dangerouslyDisableSandbox"):

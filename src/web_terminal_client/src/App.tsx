@@ -1508,6 +1508,13 @@ export default function App(): JSX.Element {
               }
             : null
         );
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: normalizedStatus }
+              : session
+          )
+        );
 
         refreshSessions();
         if (currentSession) {
@@ -1800,6 +1807,7 @@ export default function App(): JSX.Element {
     let currentStreamMessage: ConversationItem | null = null;
     let streamBuffer = '';
     let lastAgentMessage: ConversationItem | null = null;
+    let streamMessageSeeded = false;
 
     const fileToolPattern = /(write|edit|save|apply|move|copy)/i;
 
@@ -1813,16 +1821,34 @@ export default function App(): JSX.Element {
       return undefined;
     };
 
+    const reuseLastAgentMessage = (): ConversationItem | null => {
+      if (!lastAgentMessage) {
+        return null;
+      }
+      if (lastAgentMessage.content || lastAgentMessage.status) {
+        return null;
+      }
+      if (lastAgentMessage.toolCalls.length === 0 && !streamMessageSeeded) {
+        return null;
+      }
+      return lastAgentMessage;
+    };
+
     const flushPendingTools = (timestamp?: string) => {
       if (pendingTools.length > 0) {
-        const toolMessage: ConversationItem = {
+        const existing = reuseLastAgentMessage();
+        const toolMessage: ConversationItem = existing ?? {
           type: 'agent_message',
           id: `agent-auto-${items.length}`,
           time: formatTimestamp(timestamp),
           content: '',
           toolCalls: pendingTools,
         };
-        items.push(toolMessage);
+        if (!existing) {
+          items.push(toolMessage);
+        } else {
+          toolMessage.toolCalls = pendingTools;
+        }
         lastAgentMessage = toolMessage;
         pendingTools = [];
       }
@@ -1852,6 +1878,7 @@ export default function App(): JSX.Element {
             };
             items.push(currentStreamMessage);
             pendingTools = [];
+            streamMessageSeeded = true;
           }
           break;
         }
@@ -1918,14 +1945,19 @@ export default function App(): JSX.Element {
           if (isPartial) {
             streamBuffer += text;
             if (!currentStreamMessage) {
-              currentStreamMessage = {
+              const existing = reuseLastAgentMessage();
+              currentStreamMessage = existing ?? {
                 type: 'agent_message',
                 id: `agent-${items.length}`,
                 time: formatTimestamp(event.timestamp),
                 content: streamBuffer,
                 toolCalls: pendingTools,
               };
-              items.push(currentStreamMessage);
+              if (!existing) {
+                items.push(currentStreamMessage);
+              } else {
+                currentStreamMessage.toolCalls = pendingTools;
+              }
               pendingTools = [];
             } else {
               currentStreamMessage.content = streamBuffer;
@@ -1971,18 +2003,24 @@ export default function App(): JSX.Element {
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
           } else if (bodyText || pendingTools.length > 0) {
+            const existing = reuseLastAgentMessage();
             const agentMessage: ConversationItem = {
               type: 'agent_message',
-              id: `agent-${items.length}`,
-              time: formatTimestamp(event.timestamp),
+              id: existing?.id ?? `agent-${items.length}`,
+              time: existing?.time ?? formatTimestamp(event.timestamp),
               content: bodyText,
-              toolCalls: pendingTools,
+              toolCalls: existing?.toolCalls ?? pendingTools,
               structuredStatus: structuredInfo.status,
               structuredError: structuredInfo.error,
               structuredFields: structuredInfo.fields,
             };
-            items.push(agentMessage);
-            lastAgentMessage = agentMessage;
+            if (existing) {
+              Object.assign(existing, agentMessage);
+              lastAgentMessage = existing;
+            } else {
+              items.push(agentMessage);
+              lastAgentMessage = agentMessage;
+            }
           }
 
           pendingTools = [];

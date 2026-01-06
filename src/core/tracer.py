@@ -2303,6 +2303,8 @@ class EventingTracer(TracerBase):
         self._stream_structured_error: Optional[str] = None
         self._stream_full_text = ""
         self._stream_active = False
+        self._last_stream_full_text = ""
+        self._suppress_next_message = False
 
     def emit_event(
         self,
@@ -2449,6 +2451,9 @@ class EventingTracer(TracerBase):
             structured_status = self._stream_structured_status
             structured_error = self._stream_structured_error
             full_text = self._stream_full_text
+            if not body_text and not full_text:
+                self._reset_stream_state()
+                return
             self._tracer.on_message(full_text, is_partial=False)
             self.emit_event(
                 "message",
@@ -2461,8 +2466,18 @@ class EventingTracer(TracerBase):
                     "structured_error": structured_error,
                 },
             )
+            self._last_stream_full_text = full_text
+            self._suppress_next_message = bool(full_text.strip())
             self._reset_stream_state()
             return
+
+        if self._suppress_next_message:
+            if text.strip() == self._last_stream_full_text.strip():
+                self._suppress_next_message = False
+                self._last_stream_full_text = ""
+                return
+            self._suppress_next_message = False
+            self._last_stream_full_text = ""
 
         self._tracer.on_message(text, is_partial=False)
         structured_fields = None

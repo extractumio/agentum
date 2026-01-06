@@ -791,38 +791,44 @@ function AgentMessageBlock({
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
       </div>
-      <div className="message-content md-container">
-        {content ? renderMarkdown(content) : null}
-        {!content && !isTerminalStatus && <AgentSpinner />}
-        {!content && isTerminalStatus && (
-          <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
-        )}
-        {todos && todos.length > 0 && (
-          <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
-        )}
-      </div>
-      {toolCalls.length > 0 && (
-        <div className="tool-call-section">
-          <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
-          {toolCalls.map((tool, index) => (
-            <ToolCallBlock
-              key={tool.id}
-              tool={tool}
-              expanded={toolExpanded.has(tool.id)}
-              onToggle={() => onToggleTool(tool.id)}
-              isLast={index === toolCalls.length - 1}
-            />
-          ))}
+      <div className="message-body">
+        <div className="message-column-left">
+          <div className="message-content md-container">
+            {content ? renderMarkdown(content) : null}
+            {!content && !isTerminalStatus && <AgentSpinner />}
+            {!content && isTerminalStatus && (
+              <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
+            )}
+            {todos && todos.length > 0 && (
+              <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
+            )}
+          </div>
         </div>
-      )}
-      <ResultSection
-        comments={comments}
-        commentsExpanded={commentsExpanded}
-        onToggleComments={onToggleComments}
-        files={files}
-        filesExpanded={filesExpanded}
-        onToggleFiles={onToggleFiles}
-      />
+        <div className="message-column-right">
+          {toolCalls.length > 0 && (
+            <div className="tool-call-section">
+              <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+              {toolCalls.map((tool, index) => (
+                <ToolCallBlock
+                  key={tool.id}
+                  tool={tool}
+                  expanded={toolExpanded.has(tool.id)}
+                  onToggle={() => onToggleTool(tool.id)}
+                  isLast={index === toolCalls.length - 1}
+                />
+              ))}
+            </div>
+          )}
+          <ResultSection
+            comments={comments}
+            commentsExpanded={commentsExpanded}
+            onToggleComments={onToggleComments}
+            files={files}
+            filesExpanded={filesExpanded}
+            onToggleFiles={onToggleFiles}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -861,24 +867,30 @@ function OutputBlock({
         <span className="message-sender">OUTPUT</span>
         <span className="message-time">@ {time}</span>
       </div>
-      <div className="message-content md-container">
-        {output
-          ? (
-              <div className="output-part">
-                {renderMarkdown(output)}
-              </div>
-            )
-          : 'No output yet.'}
+      <div className="message-body">
+        <div className="message-column-left">
+          <div className="message-content md-container">
+            {output
+              ? (
+                  <div className="output-part">
+                    {renderMarkdown(output)}
+                  </div>
+                )
+              : 'No output yet.'}
+          </div>
+        </div>
+        <div className="message-column-right">
+          <ResultSection
+            comments={comments}
+            commentsExpanded={commentsExpanded}
+            onToggleComments={onToggleComments}
+            files={files}
+            filesExpanded={filesExpanded}
+            onToggleFiles={onToggleFiles}
+            onFileAction={onFileAction}
+          />
+        </div>
       </div>
-      <ResultSection
-        comments={comments}
-        commentsExpanded={commentsExpanded}
-        onToggleComments={onToggleComments}
-        files={files}
-        filesExpanded={filesExpanded}
-        onToggleFiles={onToggleFiles}
-        onFileAction={onFileAction}
-      />
       {error && <div className="output-error">{error}</div>}
     </div>
   );

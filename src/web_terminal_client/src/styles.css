@@ -1346,6 +1346,7 @@ body,
   flex-direction: column;
   gap: 4px;
   padding-left: 4px;
+  margin-top: 10px;
 }
 
 .todo-progress-done {

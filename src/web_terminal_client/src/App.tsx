@@ -1910,28 +1910,85 @@ export default function App(): JSX.Element {
 
   const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
 
-  const lastAgentMessageId = useMemo(() => {
-    for (let i = conversation.length - 1; i >= 0; i -= 1) {
-      const item = conversation[i];
-      if (item.type === 'agent_message') {
-        return item.id;
-      }
-    }
-    return null;
-  }, [conversation]);
+  const todosByAgentId = useMemo(() => {
+    const todosMap = new Map<
+      string,
+      { todos: TodoItem[]; status: ResultStatus | undefined }
+    >();
+    const userIndices = conversation
+      .map((item, index) => (item.type === 'user' ? index : -1))
+      .filter((index) => index >= 0);
 
-  const latestTodos = useMemo(() => {
-    for (let i = conversation.length - 1; i >= 0; i -= 1) {
-      const item = conversation[i];
-      if (item.type === 'agent_message') {
-        const todos = extractTodos(item.toolCalls);
-        if (todos && todos.length > 0) {
-          return todos;
+    const segmentStarts = userIndices.length > 0 ? userIndices : [-1];
+
+    segmentStarts.forEach((userIndex, segmentIndex) => {
+      const start = userIndex + 1;
+      const end = segmentIndex + 1 < segmentStarts.length
+        ? segmentStarts[segmentIndex + 1]
+        : conversation.length;
+      if (start >= end) {
+        return;
+      }
+
+      let todos: TodoItem[] | null = null;
+      let firstTodoIndex = -1;
+      const agentIndices: number[] = [];
+      let lastAgentIndex = -1;
+
+      for (let i = start; i < end; i += 1) {
+        const item = conversation[i];
+        if (item.type === 'agent_message') {
+          agentIndices.push(i);
+          lastAgentIndex = i;
+          const foundTodos = extractTodos(item.toolCalls);
+          if (foundTodos && foundTodos.length > 0) {
+            todos = foundTodos;
+            if (firstTodoIndex === -1) {
+              firstTodoIndex = i;
+            }
+          }
         }
       }
-    }
-    return null;
-  }, [conversation]);
+
+      if (!todos || agentIndices.length === 0) {
+        return;
+      }
+
+      let terminalStatus: ResultStatus | undefined;
+      const lastSegmentItem = conversation[end - 1];
+      if (lastSegmentItem?.type === 'output') {
+        terminalStatus = lastSegmentItem.status;
+      } else if (lastAgentIndex >= 0) {
+        const lastAgent = conversation[lastAgentIndex];
+        if (lastAgent.type === 'agent_message') {
+          terminalStatus = lastAgent.status as ResultStatus | undefined;
+        }
+      }
+      if (!terminalStatus && end === conversation.length && status !== 'running') {
+        terminalStatus = normalizeStatus(status) as ResultStatus;
+      }
+
+      const isTerminal = terminalStatus && terminalStatus !== 'running';
+
+      agentIndices.forEach((agentIndex) => {
+        if (agentIndex < firstTodoIndex) {
+          return;
+        }
+        if (isTerminal && agentIndex !== lastAgentIndex) {
+          return;
+        }
+        const agentItem = conversation[agentIndex];
+        if (agentItem.type === 'agent_message') {
+          todosMap.set(agentItem.id, {
+            todos,
+            status: terminalStatus,
+          });
+        }
+      });
+    });
+
+    return todosMap;
+  }, [conversation, status]);
 
   const sessionFiles = useMemo(() => {
     const seen = new Set<string>();
@@ -2167,7 +2224,8 @@ export default function App(): JSX.Element {
                     .slice(index + 1)
                     .every((i) => i.type !== 'agent_message');
                   const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
-                  const todos = item.id === lastAgentMessageId ? latestTodos : null;
+                  const todoPayload = todosByAgentId.get(item.id);
+                  const todos = todoPayload?.todos ?? null;
                   return (
                     <AgentMessageBlock
                       key={item.id}
@@ -2177,7 +2235,7 @@ export default function App(): JSX.Element {
                       todos={todos ?? undefined}
                       toolExpanded={expandedTools}
                       onToggleTool={toggleTool}
-                      status={messageStatus}
+                      status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
                       comments={item.comments}
                       commentsExpanded={expandedComments.has(item.id)}
                       onToggleComments={() => toggleComments(item.id)}

@@ -150,6 +150,9 @@ body,
 .session-current-id {
   color: var(--color-text-bright);
   font-size: 12px;
+  display: inline-block;
+  min-width: 12ch;
+  text-align: left;
 }
 
 .session-new-button {
@@ -396,7 +399,6 @@ body,
 
 .result-section {
   margin-top: 8px;
-  padding-left: 12px;
   padding-bottom: 10px;
 }
 
@@ -547,6 +549,23 @@ body,
   white-space: pre-wrap;
 }
 
+.message-body {
+  display: flex;
+  gap: 12px;
+}
+
+.message-column-left {
+  flex: 0 0 60%;
+  max-width: 60%;
+}
+
+.message-column-right {
+  flex: 0 0 40%;
+  max-width: 40%;
+  border-left: 1px solid var(--color-border);
+  padding-left: 12px;
+}
+
 .agent-placeholder {
   color: var(--color-dim);
 }
@@ -575,7 +594,6 @@ body,
 
 .tool-call-section {
   margin-top: 8px;
-  padding-left: 12px;
   padding-bottom: 10px;
 }
 
@@ -1291,7 +1309,6 @@ body,
 
 .status-spinner {
   display: inline-block;
-  animation: spin 1s linear infinite;
 }
 
 .status-running {
@@ -1328,6 +1345,55 @@ body,
   line-height: 1.6;
 }
 
+.agent-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-status-indicator {
+  color: var(--color-red);
+  font-weight: 600;
+}
+
+.todo-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 4px;
+  margin-top: 10px;
+}
+
+.todo-progress-done {
+  opacity: 0.6;
+}
+
+.todo-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  color: var(--color-dim);
+  font-size: 13px;
+}
+
+.todo-bullet {
+  color: var(--color-cyan);
+}
+
+.todo-cancelled .todo-bullet {
+  color: var(--color-red);
+}
+
+.todo-text.todo-active {
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.todo-text.todo-completed {
+  text-decoration: line-through;
+  color: var(--color-dim);
+}
+
 .md-h1 {
   font-size: 1.4em;
   font-weight: 700;
@@ -1346,6 +1412,38 @@ body,
   font-size: 1.1em;
   font-weight: 600;
   margin: 10px 0 6px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 0.95em;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--color-border);
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.md-table th {
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 600;
+  text-align: left;
+}
+
+.md-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.md-image {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  margin: 8px 0;
 }
 
 .md-hr {

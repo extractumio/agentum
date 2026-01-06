@@ -56,6 +56,12 @@ type ToolCallView = {
   suggestion?: string;
 };
 
+type TodoItem = {
+  content: string;
+  status: string;
+  activeForm?: string;
+};
+
 const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
   running: 'Running',
@@ -149,6 +155,20 @@ function renderMarkdown(text: string): JSX.Element[] {
   let inCodeBlock = false;
   let codeLines: string[] = [];
 
+  const isTableSeparator = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const normalized = trimmed.startsWith('|') ? trimmed : `|${trimmed}`;
+    return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(normalized);
+  };
+
+  const splitTableRow = (line: string): string[] => {
+    const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return trimmed.split('|').map((cell) => cell.trim());
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
@@ -173,6 +193,40 @@ function renderMarkdown(text: string): JSX.Element[] {
     }
 
     let element: JSX.Element;
+
+    if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const headerCells = splitTableRow(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes('|')) {
+        rows.push(splitTableRow(lines[i]));
+        i += 1;
+      }
+      i -= 1;
+
+      element = (
+        <table key={`table-${i}`} className="md-table">
+          <thead>
+            <tr>
+              {headerCells.map((cell, idx) => (
+                <th key={`th-${idx}`}>{renderInlineMarkdown(cell)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={`tr-${rowIndex}`}>
+                {row.map((cell, cellIndex) => (
+                  <td key={`td-${rowIndex}-${cellIndex}`}>{renderInlineMarkdown(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+      elements.push(element);
+      continue;
+    }
 
     if (line.startsWith('### ')) {
       element = (
@@ -237,7 +291,7 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
   const result: (string | JSX.Element)[] = [];
   let key = 0;
 
-  const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  const regex = /(!\[(.*?)\]\(([^)]+)\)|\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
   let lastIndex = 0;
   let match;
 
@@ -246,9 +300,28 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
       result.push(text.slice(lastIndex, match.index));
     }
 
-    const [fullMatch, , bold, italic, code, linkText, linkUrl] = match;
+    const [
+      fullMatch,
+      ,
+      imageAlt,
+      imageUrl,
+      bold,
+      italic,
+      code,
+      linkText,
+      linkUrl,
+    ] = match;
 
-    if (bold) {
+    if (imageUrl) {
+      result.push(
+        <img
+          key={key++}
+          src={imageUrl}
+          alt={imageAlt ?? ''}
+          className="md-image"
+        />
+      );
+    } else if (bold) {
       result.push(
         <strong key={key++} className="md-bold">
           {bold}
@@ -296,6 +369,22 @@ function getLastServerSequence(events: TerminalEvent[]): number | null {
     return null;
   }
   return Math.max(...sequences);
+}
+
+function seedSessionEvents(session: SessionResponse, historyEvents: TerminalEvent[]): TerminalEvent[] {
+  const hasUserMessage = historyEvents.some((event) => event.type === 'user_message');
+  if (hasUserMessage || !session.task) {
+    return historyEvents;
+  }
+  return [
+    {
+      type: 'user_message',
+      data: { text: session.task },
+      timestamp: session.created_at ?? new Date().toISOString(),
+      sequence: 0,
+    },
+    ...historyEvents,
+  ];
 }
 
 function extractFilePaths(toolInput: unknown): string[] {
@@ -356,6 +445,68 @@ function formatToolName(name: string): string {
   return name;
 }
 
+function getStatusLabel(status?: string): string {
+  if (!status) {
+    return '';
+  }
+  return STATUS_LABELS[status] ?? status;
+}
+
+function extractTodos(toolCalls: ToolCallView[]): TodoItem[] | null {
+  const todoTool = [...toolCalls].reverse().find((tool) => tool.tool === 'TodoWrite' && tool.input);
+  if (!todoTool) {
+    return null;
+  }
+
+  let input: unknown = todoTool.input;
+  if (typeof input === 'string') {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const rawTodos = (input as { todos?: unknown }).todos;
+  if (!Array.isArray(rawTodos)) {
+    return null;
+  }
+
+  return rawTodos
+    .map((todo) => {
+      if (!todo || typeof todo !== 'object') {
+        return null;
+      }
+      const item = todo as { content?: unknown; status?: unknown; activeForm?: unknown };
+      if (typeof item.content !== 'string' || typeof item.status !== 'string') {
+        return null;
+      }
+      return {
+        content: item.content,
+        status: item.status,
+        activeForm: typeof item.activeForm === 'string' ? item.activeForm : undefined,
+      };
+    })
+    .filter((item): item is TodoItem => Boolean(item));
+}
+
+function useSpinnerFrame(intervalMs: number = 80): number {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setFrame((prev) => (prev + 1) % SPINNER_FRAMES.length);
+    }, intervalMs);
+    return () => clearInterval(interval);
+  }, [intervalMs]);
+
+  return frame;
+}
+
 function ToolTag({ type, count, showSymbol = true }: { type: string; count?: number; showSymbol?: boolean }): JSX.Element {
   const colorClass = TOOL_COLOR_CLASS[type] ?? 'tool-read';
   const symbol = TOOL_SYMBOL[type] ?? TOOL_SYMBOL.Read;
@@ -375,20 +526,67 @@ function ToolTag({ type, count, showSymbol = true }: { type: string; count?: num
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 function AgentSpinner(): JSX.Element {
-  const [frame, setFrame] = useState(0);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setFrame((prev) => (prev + 1) % SPINNER_FRAMES.length);
-    }, 80);
-    return () => clearInterval(interval);
-  }, []);
+  const frame = useSpinnerFrame();
 
   return (
     <span className="agent-spinner">
       <span className="agent-spinner-char">{SPINNER_FRAMES[frame]}</span>
       <span className="agent-spinner-label">processing...</span>
     </span>
+  );
+}
+
+function StatusSpinner(): JSX.Element {
+  const frame = useSpinnerFrame();
+  return <span className="status-spinner">{SPINNER_FRAMES[frame]}</span>;
+}
+
+function TodoProgressList({
+  todos,
+  overallStatus,
+}: {
+  todos: TodoItem[];
+  overallStatus: ResultStatus | undefined;
+}): JSX.Element {
+  const isRunning = overallStatus === 'running' || !overallStatus;
+  const isCancelled = overallStatus === 'cancelled';
+  const isFailed = overallStatus === 'failed';
+  const isDone = !isRunning;
+  const frame = useSpinnerFrame();
+
+  return (
+    <div className={`todo-progress${isDone ? ' todo-progress-done' : ''}`}>
+      {todos.map((todo, index) => {
+        const status = todo.status?.toLowerCase?.() ?? 'pending';
+        const isActive = status === 'in_progress' && isRunning;
+        const isCompleted = isDone || status === 'completed';
+        const label = isActive && todo.activeForm ? todo.activeForm : todo.content;
+        const showCancel = (isCancelled || isFailed) && status === 'in_progress';
+        const bullet = showCancel
+          ? '✗'
+          : isActive
+            ? SPINNER_FRAMES[frame]
+            : isCompleted
+              ? '✓'
+              : '•';
+
+        return (
+          <div
+            key={`${todo.content}-${index}`}
+            className={`todo-item todo-${status}${showCancel ? ' todo-cancelled' : ''}`}
+          >
+            <span className="todo-bullet">
+              {bullet}
+            </span>
+            <span
+              className={`todo-text${isActive ? ' todo-active' : ''}${isCompleted ? ' todo-completed' : ''}`}
+            >
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -556,6 +754,7 @@ function AgentMessageBlock({
   time,
   content,
   toolCalls,
+  todos,
   toolExpanded,
   onToggleTool,
   status,
@@ -569,6 +768,7 @@ function AgentMessageBlock({
   time: string;
   content: string;
   toolCalls: ToolCallView[];
+  todos?: TodoItem[];
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
   status?: string;
@@ -580,6 +780,9 @@ function AgentMessageBlock({
   onToggleFiles?: () => void;
 }): JSX.Element {
   const statusClass = status ? `agent-status-${status}` : '';
+  const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
+  const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
+  const statusLabel = getStatusLabel(normalizedStatus);
 
   return (
     <div className={`message-block agent-message ${statusClass}`}>
@@ -588,31 +791,44 @@ function AgentMessageBlock({
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
       </div>
-      <div className="message-content md-container">
-        {content ? renderMarkdown(content) : <AgentSpinner />}
-      </div>
-      {toolCalls.length > 0 && (
-        <div className="tool-call-section">
-          <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
-          {toolCalls.map((tool, index) => (
-            <ToolCallBlock
-              key={tool.id}
-              tool={tool}
-              expanded={toolExpanded.has(tool.id)}
-              onToggle={() => onToggleTool(tool.id)}
-              isLast={index === toolCalls.length - 1}
-            />
-          ))}
+      <div className="message-body">
+        <div className="message-column-left">
+          <div className="message-content md-container">
+            {content ? renderMarkdown(content) : null}
+            {!content && !isTerminalStatus && <AgentSpinner />}
+            {!content && isTerminalStatus && (
+              <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
+            )}
+            {todos && todos.length > 0 && (
+              <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
+            )}
+          </div>
         </div>
-      )}
-      <ResultSection
-        comments={comments}
-        commentsExpanded={commentsExpanded}
-        onToggleComments={onToggleComments}
-        files={files}
-        filesExpanded={filesExpanded}
-        onToggleFiles={onToggleFiles}
-      />
+        <div className="message-column-right">
+          {toolCalls.length > 0 && (
+            <div className="tool-call-section">
+              <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+              {toolCalls.map((tool, index) => (
+                <ToolCallBlock
+                  key={tool.id}
+                  tool={tool}
+                  expanded={toolExpanded.has(tool.id)}
+                  onToggle={() => onToggleTool(tool.id)}
+                  isLast={index === toolCalls.length - 1}
+                />
+              ))}
+            </div>
+          )}
+          <ResultSection
+            comments={comments}
+            commentsExpanded={commentsExpanded}
+            onToggleComments={onToggleComments}
+            files={files}
+            filesExpanded={filesExpanded}
+            onToggleFiles={onToggleFiles}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -651,24 +867,30 @@ function OutputBlock({
         <span className="message-sender">OUTPUT</span>
         <span className="message-time">@ {time}</span>
       </div>
-      <div className="message-content md-container">
-        {output
-          ? (
-              <div className="output-part">
-                {renderMarkdown(output)}
-              </div>
-            )
-          : 'No output yet.'}
+      <div className="message-body">
+        <div className="message-column-left">
+          <div className="message-content md-container">
+            {output
+              ? (
+                  <div className="output-part">
+                    {renderMarkdown(output)}
+                  </div>
+                )
+              : 'No output yet.'}
+          </div>
+        </div>
+        <div className="message-column-right">
+          <ResultSection
+            comments={comments}
+            commentsExpanded={commentsExpanded}
+            onToggleComments={onToggleComments}
+            files={files}
+            filesExpanded={filesExpanded}
+            onToggleFiles={onToggleFiles}
+            onFileAction={onFileAction}
+          />
+        </div>
       </div>
-      <ResultSection
-        comments={comments}
-        commentsExpanded={commentsExpanded}
-        onToggleComments={onToggleComments}
-        files={files}
-        filesExpanded={filesExpanded}
-        onToggleFiles={onToggleFiles}
-        onFileAction={onFileAction}
-      />
       {error && <div className="output-error">{error}</div>}
     </div>
   );
@@ -960,10 +1182,15 @@ function StatusFooter({
         <span className={`status-state ${statusClass}`}>
           {isRunning ? (
             <>
-              <span className="status-spinner">◐</span> Running...
+              <StatusSpinner /> Running...
             </>
           ) : (
-            <>{statusLabel === 'Idle' ? '● Idle' : statusLabel}</>
+            <>
+              {statusLabel === 'Idle' && '● Idle'}
+              {statusLabel === 'Cancelled' && '✗ Cancelled'}
+              {statusLabel === 'Failed' && '✗ Failed'}
+              {statusLabel !== 'Idle' && statusLabel !== 'Cancelled' && statusLabel !== 'Failed' && statusLabel}
+            </>
           )}
         </span>
       </div>
@@ -1062,6 +1289,14 @@ export default function App(): JSX.Element {
   const appendEvent = useCallback(
     (event: TerminalEvent) => {
       setEvents((prev) => {
+        if (event.type === 'user_message') {
+          const last = prev[prev.length - 1];
+          const lastText = (last?.data as { text?: unknown } | undefined)?.text;
+          const nextText = (event.data as { text?: unknown } | undefined)?.text;
+          if (last?.type === 'user_message' && lastText === nextText) {
+            return prev;
+          }
+        }
         const next = [...prev, event];
         const maxLines = config?.ui.max_output_lines ?? 1000;
         if (next.length > maxLines) {
@@ -1071,6 +1306,19 @@ export default function App(): JSX.Element {
       });
     },
     [config]
+  );
+
+  const syncSessionEvents = useCallback(
+    async (sessionId: string, sessionOverride?: SessionResponse) => {
+      if (!config || !token) {
+        return;
+      }
+      const session = sessionOverride ?? (await getSession(config.api.base_url, token, sessionId));
+      const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
+      setEvents(seedSessionEvents(session, historyEvents));
+      return { session, historyEvents };
+    },
+    [config, token]
   );
 
   const handleEvent = useCallback(
@@ -1129,14 +1377,18 @@ export default function App(): JSX.Element {
           ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
           : 0;
         const newTokensOut = usage?.output_tokens ?? 0;
+        const cumulativeTurns = Number(event.data.cumulative_turns ?? event.data.num_turns ?? 0);
+        const cumulativeCost = Number(event.data.cumulative_cost_usd ?? event.data.total_cost_usd ?? 0);
 
         setStats((prev) => ({
           ...prev,
-          turns: prev.turns + Number(event.data.num_turns ?? 0),
+          turns: cumulativeTurns || prev.turns + Number(event.data.num_turns ?? 0),
           durationMs: prev.durationMs + Number(event.data.duration_ms ?? 0),
-          cost: prev.cost + Number(event.data.total_cost_usd ?? 0),
-          tokensIn: prev.tokensIn + newTokensIn,
-          tokensOut: prev.tokensOut + newTokensOut,
+          cost: event.data.total_cost_usd !== undefined
+            ? cumulativeCost || Number(event.data.total_cost_usd ?? 0)
+            : prev.cost,
+          tokensIn: usage ? newTokensIn : prev.tokensIn,
+          tokensOut: usage ? newTokensOut : prev.tokensOut,
         }));
         setStatus(normalizedStatus);
 
@@ -1152,6 +1404,9 @@ export default function App(): JSX.Element {
         );
 
         refreshSessions();
+        if (currentSession) {
+          void syncSessionEvents(currentSession.id, currentSession);
+        }
       }
 
       if (event.type === 'cancelled') {
@@ -1166,14 +1421,31 @@ export default function App(): JSX.Element {
             : null
         );
         refreshSessions();
+        if (currentSession) {
+          void syncSessionEvents(currentSession.id, currentSession);
+        }
+      }
+
+      if (event.type === 'metrics_update') {
+        setStats((prev) => ({
+          ...prev,
+          turns: Number(event.data.turns ?? prev.turns),
+          tokensIn: Number(event.data.tokens_in ?? prev.tokensIn),
+          tokensOut: Number(event.data.tokens_out ?? prev.tokensOut),
+          cost: event.data.total_cost_usd !== undefined ? Number(event.data.total_cost_usd) : prev.cost,
+          model: String(event.data.model ?? prev.model ?? ''),
+        }));
       }
 
       if (event.type === 'error') {
         setStatus('failed');
         setError(String(event.data.message ?? 'Unknown error'));
+        if (currentSession) {
+          void syncSessionEvents(currentSession.id, currentSession);
+        }
       }
     },
-    [appendEvent, refreshSessions]
+    [appendEvent, currentSession, refreshSessions, syncSessionEvents]
   );
 
   const startSSE = useCallback(
@@ -1334,19 +1606,7 @@ export default function App(): JSX.Element {
 
       const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
       const lastSequence = getLastServerSequence(historyEvents);
-      const hasUserMessage = historyEvents.some((event) => event.type === 'user_message');
-      const seededEvents = hasUserMessage || !session.task
-        ? historyEvents
-        : [
-            {
-              type: 'user_message',
-              data: { text: session.task },
-              timestamp: session.created_at ?? new Date().toISOString(),
-              sequence: 0,
-            },
-            ...historyEvents,
-          ];
-      setEvents(seededEvents);
+      setEvents(seedSessionEvents(session, historyEvents));
 
       const lastCompletion = [...historyEvents].reverse().find((event) => event.type === 'agent_complete');
       if (lastCompletion) {
@@ -1371,6 +1631,18 @@ export default function App(): JSX.Element {
           tokensOut,
           model: String(lastCompletion.data.model ?? session.model ?? ''),
         });
+      } else {
+        const lastMetrics = [...historyEvents].reverse().find((event) => event.type === 'metrics_update');
+        if (lastMetrics) {
+          setStats((prev) => ({
+            ...prev,
+            turns: Number(lastMetrics.data.turns ?? prev.turns),
+            tokensIn: Number(lastMetrics.data.tokens_in ?? prev.tokensIn),
+            tokensOut: Number(lastMetrics.data.tokens_out ?? prev.tokensOut),
+            cost: lastMetrics.data.total_cost_usd !== undefined ? Number(lastMetrics.data.total_cost_usd) : prev.cost,
+            model: String(lastMetrics.data.model ?? session.model ?? prev.model ?? ''),
+          }));
+        }
       }
 
       setStatus(normalizeStatus(session.status));
@@ -1650,6 +1922,80 @@ export default function App(): JSX.Element {
 
   const outputItems = useMemo(() => conversation.filter((item) => item.type === 'output'), [conversation]);
 
+  const todosByAgentId = useMemo(() => {
+    const todosMap = new Map<
+      string,
+      { todos: TodoItem[]; status: ResultStatus | undefined }
+    >();
+    const userIndices = conversation
+      .map((item, index) => (item.type === 'user' ? index : -1))
+      .filter((index) => index >= 0);
+
+    const segmentStarts = userIndices.length > 0 ? userIndices : [-1];
+
+    segmentStarts.forEach((userIndex, segmentIndex) => {
+      const start = userIndex + 1;
+      const end = segmentIndex + 1 < segmentStarts.length
+        ? segmentStarts[segmentIndex + 1]
+        : conversation.length;
+      if (start >= end) {
+        return;
+      }
+
+      let todos: TodoItem[] | null = null;
+      let firstTodoIndex = -1;
+      const agentIndices: number[] = [];
+      let lastAgentIndex = -1;
+
+      for (let i = start; i < end; i += 1) {
+        const item = conversation[i];
+        if (item.type === 'agent_message') {
+          agentIndices.push(i);
+          lastAgentIndex = i;
+          const foundTodos = extractTodos(item.toolCalls);
+          if (foundTodos && foundTodos.length > 0) {
+            todos = foundTodos;
+            if (firstTodoIndex === -1) {
+              firstTodoIndex = i;
+            }
+          }
+        }
+      }
+
+      if (!todos || agentIndices.length === 0 || lastAgentIndex < 0) {
+        return;
+      }
+
+      let terminalStatus: ResultStatus | undefined;
+      const lastSegmentItem = conversation[end - 1];
+      if (lastSegmentItem?.type === 'output') {
+        terminalStatus = lastSegmentItem.status;
+      } else if (lastAgentIndex >= 0) {
+        const lastAgent = conversation[lastAgentIndex];
+        if (lastAgent.type === 'agent_message') {
+          terminalStatus = lastAgent.status as ResultStatus | undefined;
+        }
+      }
+      if (!terminalStatus && end === conversation.length && status !== 'running') {
+        terminalStatus = normalizeStatus(status) as ResultStatus;
+      }
+
+      const targetIndex = lastAgentIndex;
+      if (targetIndex < firstTodoIndex) {
+        return;
+      }
+      const agentItem = conversation[targetIndex];
+      if (agentItem.type === 'agent_message') {
+        todosMap.set(agentItem.id, {
+          todos,
+          status: terminalStatus,
+        });
+      }
+    });
+
+    return todosMap;
+  }, [conversation, status]);
+
   const sessionFiles = useMemo(() => {
     const seen = new Set<string>();
     const files: string[] = [];
@@ -1884,15 +2230,18 @@ export default function App(): JSX.Element {
                     .slice(index + 1)
                     .every((i) => i.type !== 'agent_message');
                   const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
+                  const todoPayload = todosByAgentId.get(item.id);
+                  const todos = todoPayload?.todos ?? null;
                   return (
                     <AgentMessageBlock
                       key={item.id}
                       time={item.time}
                       content={item.content}
                       toolCalls={item.toolCalls}
+                      todos={todos ?? undefined}
                       toolExpanded={expandedTools}
                       onToggleTool={toggleTool}
-                      status={messageStatus}
+                      status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
                       comments={item.comments}
                       commentsExpanded={expandedComments.has(item.id)}
                       onToggleComments={() => toggleComments(item.id)}

@@ -61,6 +61,18 @@ def session_to_response(session) -> SessionResponse:
         cancel_requested=session.cancel_requested,
     )
 
+async def record_user_message_event(session_id: str, text: str) -> None:
+    last_sequence = await event_service.get_last_sequence(session_id)
+    event = {
+        "type": "user_message",
+        "data": {"text": text, "session_id": session_id},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sequence": last_sequence + 1,
+        "session_id": session_id,
+    }
+    await event_service.record_event(event)
+    await agent_runner.publish_event(session_id, event)
+
 
 def build_task_params(
     session_id: str,
@@ -136,6 +148,8 @@ async def run_task(
         fork_session=request.fork_session,
         config=request.config,
     )
+
+    await record_user_message_event(session.id, request.task)
 
     # Start the agent in background
     await agent_runner.start_task(params)
@@ -299,6 +313,8 @@ async def start_task(
         fork_session=request.fork_session,
         config=request.config,
     )
+
+    await record_user_message_event(session_id, task_to_run)
 
     # Start the agent in background
     await agent_runner.start_task(params)

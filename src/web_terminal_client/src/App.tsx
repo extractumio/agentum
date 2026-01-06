@@ -1883,6 +1883,12 @@ export default function App(): JSX.Element {
           break;
         }
         case 'user_message': {
+          pendingTools = [];
+          pendingFiles = new Set();
+          currentStreamMessage = null;
+          streamBuffer = '';
+          lastAgentMessage = null;
+          streamMessageSeeded = false;
           const content = String(event.data.text ?? '');
           items.push({
             type: 'user',

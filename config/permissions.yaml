@@ -72,6 +72,42 @@ session_workspace:
     - Write(./skills/**)
     - Edit(./skills/**)
     - MultiEdit(./skills/**)
+    # Disallow absolute paths and parent traversal outside workspace
+    - Read(/**)
+    - Write(/**)
+    - Edit(/**)
+    - MultiEdit(/**)
+    - Glob(/**)
+    - Grep(/**)
+    - LS(/**)
+    - Read(../**)
+    - Write(../**)
+    - Edit(../**)
+    - MultiEdit(../**)
+    - Glob(../**)
+    - Grep(../**)
+    - LS(../**)
+    # Block high-risk or introspection Bash commands via SDK permissions
+    - Bash(kill *)
+    - Bash(killall *)
+    - Bash(pkill *)
+    - Bash(shutdown *)
+    - Bash(reboot *)
+    - Bash(poweroff *)
+    - Bash(halt *)
+    - Bash(systemctl *)
+    - Bash(service *)
+    - Bash(mount *)
+    - Bash(umount *)
+    - Bash(chroot *)
+    - Bash(iptables *)
+    - Bash(nft *)
+    - Bash(netstat *)
+    - Bash(ss *)
+    - Bash(lsof *)
+    - Bash(ps *)
+    - Bash(top *)
+    - Bash(htop *)
 
   allowed_dirs:
     - "{workspace}"
@@ -110,9 +146,9 @@ sandbox:
       mode: rw
   dynamic_mounts: []
   network:
-    enabled: false
+    enabled: true
     allowed_domains: []
-    allow_localhost: false
+    allow_localhost: true
   environment:
     home: "/workspace"
     path: "/usr/bin:/bin"

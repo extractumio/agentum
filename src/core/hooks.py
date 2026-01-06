@@ -21,6 +21,7 @@ Usage:
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -592,12 +593,37 @@ def create_dangerous_command_hook(
         Async hook callback function.
     """
     patterns = blocked_patterns or [
-        "rm -rf /",
-        "rm -rf /*",
-        "mkfs",
-        "> /dev/",
-        "dd if=",
-        ":(){:|:&};:",  # Fork bomb
+        r"\brm\s+-rf\s+/(?:\s|$)",
+        r"\brm\s+-rf\s+/\*(?:\s|$)",
+        r"\bmkfs\b",
+        r">\s*/dev/",
+        r"\bdd\s+if=",
+        r":\(\)\s*\{\s*:\|\:&\s*\};:",  # Fork bomb
+        r"\bkill\b",
+        r"\bpkill\b",
+        r"\bkillall\b",
+        r"\bshutdown\b",
+        r"\breboot\b",
+        r"\bpoweroff\b",
+        r"\bhalt\b",
+        r"\binit\b",
+        r"\btelinit\b",
+        r"\bsystemctl\b",
+        r"\bservice\b",
+        r"\bmount\b",
+        r"\bumount\b",
+        r"\bchroot\b",
+        r"\biptables\b",
+        r"\bufw\b",
+        r"\bnft\b",
+        r"\bss\b",
+        r"\bnetstat\b",
+        r"\blsof\b",
+        r"\bps\b",
+        r"\btop\b",
+        r"\bhtop\b",
+        r"/proc/",
+        r"/sys/",
     ]
 
     async def dangerous_command_hook(
@@ -614,7 +640,7 @@ def create_dangerous_command_hook(
         command = input_data.get("tool_input", {}).get("command", "")
 
         for pattern in patterns:
-            if pattern in command:
+            if re.search(pattern, command, flags=re.IGNORECASE):
                 logger.warning(f"Blocked dangerous command: {command[:50]}...")
                 return HookResult(
                     permission_decision="deny",
@@ -625,6 +651,53 @@ def create_dangerous_command_hook(
         return {}  # Allow
 
     return dangerous_command_hook
+
+
+def create_absolute_path_block_hook() -> HookCallback:
+    """
+    Create a PreToolUse hook that blocks absolute or parent-traversal paths.
+
+    This enforces the "relative paths only" policy for file tools by denying
+    any tool input that uses absolute paths or attempts to escape the workspace
+    via ".." segments.
+    """
+
+    async def absolute_path_block_hook(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any
+    ) -> dict[str, Any]:
+        tool_name = input_data.get("tool_name", "")
+        tool_input = input_data.get("tool_input", {})
+
+        if tool_name not in TOOL_PARAM_MAP:
+            return {}
+
+        param_keys = TOOL_PARAM_MAP[tool_name]
+        for key in param_keys:
+            if key not in tool_input or not isinstance(tool_input[key], str):
+                continue
+            path_str = tool_input[key]
+            if not path_str:
+                continue
+            path = Path(path_str)
+            if path.is_absolute() or ".." in path.parts:
+                logger.warning(
+                    "Blocked absolute or parent-traversal path: %s",
+                    path_str,
+                )
+                return HookResult(
+                    permission_decision="deny",
+                    permission_reason=(
+                        "Absolute paths and parent traversal are prohibited. "
+                        "Use paths relative to the workspace."
+                    ),
+                    interrupt=True,
+                ).to_sdk_response("PreToolUse")
+
+        return {}
+
+    return absolute_path_block_hook
 
 
 def create_sandbox_execution_hook(
@@ -676,9 +749,13 @@ def create_sandbox_execution_hook(
 
         # Wrap the command in bubblewrap
         # The SDK will execute this wrapped command instead of the original
+        allow_network = bool(
+            getattr(sandbox_executor.config, "network", None)
+            and sandbox_executor.config.network.enabled
+        )
         wrapped_command = sandbox_executor.wrap_shell_command(
             original_command,
-            allow_network=False,
+            allow_network=allow_network,
         )
 
         logger.info("SANDBOX HOOK: Wrapping command in bwrap")

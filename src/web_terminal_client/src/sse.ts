@@ -10,14 +10,15 @@ export function connectSSE(
   token: string,
   onEvent: (event: SSEEvent) => void,
   onError: (error: Error) => void,
-  onReconnecting?: (attempt: number) => void
+  onReconnecting?: (attempt: number) => void,
+  initialLastEventId?: string | number | null
 ): () => void {
   let source: EventSource | null = null;
   let reconnectAttempts = 0;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
   let isClosed = false;
-  let lastEventId: string | null = null;
+  let lastEventId: string | null = initialLastEventId ? String(initialLastEventId) : null;
 
   function buildUrl(): string {
     const params = new URLSearchParams({ token });
@@ -75,7 +76,7 @@ export function connectSSE(
     source.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data) as SSEEvent;
-        lastEventId = event.lastEventId;
+        lastEventId = event.lastEventId || String(parsed.sequence ?? lastEventId ?? '');
         onEvent(parsed);
         
         // Stop reconnecting on terminal events

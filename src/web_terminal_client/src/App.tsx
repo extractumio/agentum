@@ -288,6 +288,16 @@ function isSafeRelativePath(path: string): boolean {
   return Boolean(path && !path.startsWith('/') && !path.startsWith('~') && !path.includes('..'));
 }
 
+function getLastServerSequence(events: TerminalEvent[]): number | null {
+  const sequences = events
+    .filter((event) => event.type !== 'user_message' && Number.isFinite(event.sequence))
+    .map((event) => event.sequence);
+  if (sequences.length === 0) {
+    return null;
+  }
+  return Math.max(...sequences);
+}
+
 function extractFilePaths(toolInput: unknown): string[] {
   if (!toolInput || typeof toolInput !== 'object') {
     return [];
@@ -1167,7 +1177,7 @@ export default function App(): JSX.Element {
   );
 
   const startSSE = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, lastSequence?: number | null) => {
       if (!config || !token) {
         return;
       }
@@ -1191,7 +1201,8 @@ export default function App(): JSX.Element {
         (attempt) => {
           setReconnecting(true);
           setError(`Connection lost. Reconnecting (attempt ${attempt})...`);
-        }
+        },
+        lastSequence ?? null
       );
     },
     [config, token, handleEvent]
@@ -1239,7 +1250,8 @@ export default function App(): JSX.Element {
 
         setInputValue('');
         setAttachedFiles([]);
-        startSSE(currentSession.id);
+        const lastSequence = getLastServerSequence(events);
+        startSSE(currentSession.id, lastSequence);
         refreshSessions();
       } catch (err) {
         setStatus('failed');
@@ -1277,7 +1289,7 @@ export default function App(): JSX.Element {
         });
         setInputValue('');
         setAttachedFiles([]);
-        startSSE(sessionId);
+        startSSE(sessionId, null);
         refreshSessions();
       } catch (err) {
         setStatus('failed');
@@ -1321,6 +1333,7 @@ export default function App(): JSX.Element {
       setCurrentSession(session);
 
       const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
+      const lastSequence = getLastServerSequence(historyEvents);
       const hasUserMessage = historyEvents.some((event) => event.type === 'user_message');
       const seededEvents = hasUserMessage || !session.task
         ? historyEvents
@@ -1363,7 +1376,7 @@ export default function App(): JSX.Element {
       setStatus(normalizeStatus(session.status));
 
       if (session.status === 'running') {
-        startSSE(sessionId);
+        startSSE(sessionId, lastSequence);
       }
     } catch (err) {
       setError(`Failed to load session: ${(err as Error).message}`);

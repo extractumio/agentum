@@ -19,6 +19,10 @@ error: <empty or concise error description>
 ```
 - The header must be the very first content in the response.
 - Always include `status` and `error`. Use an empty value for `error` when there is no error.
+- Status definitions:
+  - COMPLETE: The request ran and finished without errors or blocks.
+  - PARTIAL: The agent is still processing and intends to continue.
+  - FAILED: The agent could not execute the intended action or provide the requested output.
 - You may add additional `key: value` lines between the header delimiters for extra flags.
 - After the closing `---`, include the normal response body in the requested format.
 

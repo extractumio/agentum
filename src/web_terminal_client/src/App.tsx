@@ -862,7 +862,7 @@ function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
-  const structuredStatusLabel = structuredStatus ? getStatusLabel(structuredStatus) : '';
+  const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
 
   return (
     <div className={`message-block agent-message ${statusClass}`}>
@@ -879,9 +879,9 @@ function AgentMessageBlock({
             {!content && isTerminalStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
-            {(structuredStatusLabel || structuredError) && (
+            {((structuredStatusLabel && structuredStatus === 'failed') || structuredError) && (
               <div className="agent-structured-meta">
-                {structuredStatusLabel && (
+                {structuredStatusLabel && structuredStatus === 'failed' && (
                   <div className="agent-structured-status">Status: {structuredStatusLabel}</div>
                 )}
                 {structuredError && (

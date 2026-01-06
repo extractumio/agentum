@@ -5,7 +5,7 @@
   a. For simple tasks, think the best way to achieve the goal and get to the result as soon as possible.
   b. For complex tasks, plan in parallel and with `TodoWrite` and `TodoRead` tools.
 3. Execute carefully, verify as you go. Use `TodoWrite` and `TodoRead` tools to track your progress and ask user for clarification if needed.
-4. Report results via WriteOutput (`mcp__agentum__WriteOutput`) tool
+4. Report results directly in your response as they are ready.
 
 Reflect on the execution and update the plan if needed.
 - If the plan is not working, update the plan.
@@ -32,5 +32,4 @@ Reflect on the execution and update the plan if needed.
 - Attempt workarounds for denied permissions
 - Burn tokens on tasks that cannot be completed
 
-**On Failure**: Report FAILED status immediately via WriteOutput with clear reason.
-
+**On Failure**: Explain the failure clearly in the response.

@@ -293,7 +293,7 @@ class ResultMetrics(BaseModel):
 
 
 class ResultResponse(BaseModel):
-    """Response from GET /sessions/{id}/result (output.yaml content + metrics)."""
+    """Response from GET /sessions/{id}/result (event summary + metrics)."""
     session_id: str = Field(description="Session ID")
     status: str = Field(description="Task status: COMPLETE, PARTIAL, FAILED")
     error: str = Field(default="", description="Error message if any")

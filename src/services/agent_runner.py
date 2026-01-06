@@ -16,6 +16,8 @@ from ..core.schemas import TaskExecutionParams
 from ..core.task_runner import execute_agent_task
 from ..core.tracer import BackendConsoleTracer, EventingTracer
 from ..db.database import AsyncSessionLocal
+from ..services import event_service
+from ..services.event_stream import EventHub, EventSinkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +74,8 @@ class AgentRunner:
         """Initialize the agent runner."""
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._cancel_flags: dict[str, bool] = {}
-        self._event_queues: dict[str, asyncio.Queue] = {}
         self._results: dict[str, dict[str, Any]] = {}
+        self._event_hub = EventHub()
 
     async def _update_session_status(
         self,
@@ -134,7 +136,6 @@ class AgentRunner:
 
         # Initialize cancel flag and event queue
         self._cancel_flags[session_id] = False
-        self._event_queues.setdefault(session_id, asyncio.Queue())
 
         # Start the background task
         task_coro = self._run_agent(params)
@@ -156,39 +157,52 @@ class AgentRunner:
         """
         session_id = params.session_id
         tracer: Optional[EventingTracer] = None
-        event_queue = self._event_queues.get(session_id)
+
+        event_queue = EventSinkQueue(self._event_hub, session_id)
+        last_sequence = await event_service.get_last_sequence(session_id)
 
         def emit_error_event(message: str, error_type: str = "server_error") -> None:
             """Helper to emit error event even if tracer creation failed."""
-            if tracer is not None:
-                tracer.emit_event("error", {
+            error_event = {
+                "type": "error",
+                "data": {
                     "message": message,
                     "error_type": error_type,
                     "session_id": session_id,
-                })
-            elif event_queue is not None:
-                # Fallback: put error directly in queue
-                import asyncio
-                from datetime import datetime, timezone
-                error_event = {
-                    "type": "error",
-                    "data": {
-                        "message": message,
-                        "error_type": error_type,
-                        "session_id": session_id,
-                    },
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "sequence": 9999,  # High sequence for late events
-                }
-                try:
-                    event_queue.put_nowait(error_event)
-                except asyncio.QueueFull:
-                    logger.warning(f"Event queue full, could not send error: {message}")
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "sequence": last_sequence + 1,
+                "session_id": session_id,
+            }
+            if tracer is not None:
+                tracer.emit_event("error", error_event["data"])
+                return
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+
+            loop.create_task(event_service.record_event(error_event))
+            loop.create_task(self._event_hub.publish(session_id, error_event))
 
         try:
             # Create tracer early for error reporting
             base_tracer = BackendConsoleTracer(session_id=session_id)
-            tracer = EventingTracer(base_tracer, event_queue=event_queue)
+            def record_event(event: dict[str, Any]) -> None:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+                loop.create_task(event_service.record_event(event))
+
+            tracer = EventingTracer(
+                base_tracer,
+                event_queue=event_queue,
+                event_sink=record_event,
+                session_id=session_id,
+                initial_sequence=last_sequence,
+            )
 
             # Determine working directory
             if params.working_dir:
@@ -284,7 +298,7 @@ class AgentRunner:
             # Cleanup
             self._running_tasks.pop(session_id, None)
             self._cancel_flags.pop(session_id, None)
-            # Keep event queue until client disconnects
+            # Subscribers handle their own cleanup
 
     async def cancel_task(self, session_id: str) -> bool:
         """
@@ -339,39 +353,16 @@ class AgentRunner:
         return self._cancel_flags.get(session_id, False)
 
     def get_event_queue(self, session_id: str) -> Optional[asyncio.Queue]:
-        """
-        Get the SSE event queue for a session.
+        """Deprecated: event queues are managed per-subscriber."""
+        return None
 
-        Args:
-            session_id: The session ID.
+    async def subscribe(self, session_id: str) -> asyncio.Queue:
+        """Subscribe to events for a session."""
+        return await self._event_hub.subscribe(session_id)
 
-        Returns:
-            The event queue, or None if not found.
-        """
-        return self._event_queues.get(session_id)
-
-    def get_or_create_event_queue(self, session_id: str) -> asyncio.Queue:
-        """
-        Get or create the SSE event queue for a session.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            The event queue.
-        """
-        if session_id not in self._event_queues:
-            self._event_queues[session_id] = asyncio.Queue()
-        return self._event_queues[session_id]
-
-    def clear_event_queue(self, session_id: str) -> None:
-        """
-        Remove the event queue for a session.
-
-        Args:
-            session_id: The session ID.
-        """
-        self._event_queues.pop(session_id, None)
+    async def unsubscribe(self, session_id: str, queue: asyncio.Queue) -> None:
+        """Unsubscribe from events for a session."""
+        await self._event_hub.unsubscribe(session_id, queue)
 
     def get_result(self, session_id: str) -> Optional[dict]:
         """
@@ -392,7 +383,6 @@ class AgentRunner:
         Args:
             session_id: The session ID.
         """
-        self._event_queues.pop(session_id, None)
         self._results.pop(session_id, None)
 
 

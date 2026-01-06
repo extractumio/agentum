@@ -7,11 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
-
-import json
-import yaml
-from pydantic import BaseModel, Field, field_validator
+from typing import TYPE_CHECKING, Any, Optional
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from .tracer import TracerBase
@@ -84,133 +81,6 @@ class TaskStatus(StrEnum):
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
     ERROR = "ERROR"
-
-
-class OutputSchema(BaseModel):
-    """
-    Strict output schema for agent task results.
-
-    All fields must be present in the output.yaml file.
-    Fields without values should be empty strings.
-    """
-    session_id: str = Field(
-        default="",
-        description="""
-Session ID for tracking and resuming.
-Provided by the system."""
-    )
-    status: Literal["COMPLETE", "PARTIAL", "FAILED"] = Field(
-        default="FAILED",
-        description="""
-Task completion status:
-- COMPLETE: Task completed fully as requested
-- PARTIAL: Task partially completed; some aspects could not be done
-- FAILED: Task could not be completed"""
-    )
-    error: str = Field(
-        default="",
-        description="""
-Error message if status is PARTIAL or FAILED.
-Empty string if no error occurred."""
-    )
-    comments: str = Field(
-        default="",
-        description="""
-Optional comments to the user explaining PARTIAL or FAILED status.
-Empty string if no additional comments needed."""
-    )
-    output: str = Field(
-        default="",
-        description="""
-Result data of the task in the format requested by the user.
-Empty string if no text output to report."""
-    )
-    result_files: list[str] = Field(
-        default_factory=list,
-        description="""
-List of generated files with relative paths to the working folder.
-Each path must start with "./". Empty list if no files were generated."""
-    )
-
-    @field_validator("result_files", mode="before")
-    @classmethod
-    def parse_result_files(cls, v):
-        """Parse result_files from string if LLM passes JSON string instead of list."""
-        if v is None:
-            return []
-        if isinstance(v, str):
-            # Handle JSON string like "[]" or '["./file.txt"]'
-            v = v.strip()
-            if v == "" or v == "[]":
-                return []
-            try:
-                parsed = json.loads(v)
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-            # If not valid JSON, return empty list
-            return []
-        return v
-
-    @classmethod
-    def get_yaml_schema_example(cls) -> str:
-        """
-        Generate a YAML schema example string for template injection.
-
-        Returns:
-            YAML string showing the schema structure with descriptions.
-        """
-        schema_lines = [
-            "session_id: \"<session_id>\"  # Provided by system, do not modify",
-            "status: \"COMPLETE\" | \"PARTIAL\" | \"FAILED\"",
-            "error: \"Error message if status is PARTIAL or FAILED, empty string otherwise\"",
-            "comments: \"Optional comments explaining PARTIAL or FAILED status, empty string otherwise\"",
-            "output: \"Result data as text, empty string if no text output\"",
-            "result_files:  # List of generated files (relative paths starting with \"./\"), empty list if none",
-            "  - \"./path/to/file1.ext\"",
-            "  - \"./path/to/file2.ext\"",
-        ]
-        return "\n".join(schema_lines)
-
-    @classmethod
-    def create_empty(cls, session_id: str = "") -> "OutputSchema":
-        """
-        Create an empty OutputSchema with default values.
-
-        Args:
-            session_id: The session ID to include.
-
-        Returns:
-            OutputSchema with all fields set to defaults.
-        """
-        return cls(session_id=session_id)
-
-    def to_yaml(self) -> str:
-        """
-        Serialize to YAML string.
-
-        Returns:
-            YAML representation of the output.
-        """
-        data = self.model_dump()
-        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-    @classmethod
-    def from_yaml(cls, yaml_str: str) -> "OutputSchema":
-        """
-        Parse from YAML string.
-
-        Args:
-            yaml_str: YAML string to parse.
-
-        Returns:
-            OutputSchema instance.
-        """
-        data = yaml.safe_load(yaml_str)
-        if data is None:
-            data = {}
-        return cls(**data)
 
 
 # Model context window sizes (in tokens)

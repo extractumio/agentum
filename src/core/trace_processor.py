@@ -16,11 +16,7 @@ Usage:
         async for message in client.receive_response():
             processor.process_message(message)
 """
-import json
-import re
 from typing import Any, Optional, Union
-
-import yaml
 from claude_agent_sdk import (
     AssistantMessage,
     HookContext,
@@ -76,7 +72,6 @@ class TraceProcessor:
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._initialized = False
         self._task: Optional[str] = None
-        self._output_status: Optional[str] = None  # Status from output.yaml Write
         self._model: Optional[str] = None  # Model used in this session
         self._permission_denied: bool = False  # Set when permission denial interrupts
         # Cumulative stats (set externally when resuming a session)
@@ -213,9 +208,6 @@ class TraceProcessor:
                 "name": block.name,
                 "input": block.input,
             }
-            # Track status from Write tool calls to output.yaml
-            self._track_output_status(block.name, block.input)
-
             self.tracer.on_tool_start(
                 tool_name=block.name,
                 tool_input=block.input,
@@ -252,9 +244,6 @@ class TraceProcessor:
                 "name": block["name"],
                 "input": block["input"],
             }
-            # Track status from Write tool calls to output.yaml
-            self._track_output_status(block["name"], block["input"])
-
             self.tracer.on_tool_start(
                 tool_name=block["name"],
                 tool_input=block["input"],
@@ -287,133 +276,7 @@ class TraceProcessor:
 
     def _handle_result_message(self, msg: ResultMessage) -> None:
         """Handle final result with metrics and usage."""
-        # The SDK emits ResultMessage before the agent writes and the runtime parses
-        # `output.yaml`. The UI expects the final output (`output_display`) to precede
-        # terminal completion (`agent_complete`) so the stream can close cleanly.
-        #
-        # Completion is emitted by the agent runtime after `output_display`.
         _ = msg
-
-    def _determine_status(self, msg: ResultMessage) -> str:
-        """
-        Determine the final status from the result message.
-
-        Checks in order:
-        1. Permission denial (agent interrupted by permission callback)
-        2. SDK-level errors (msg.is_error)
-        3. Status tracked from Write tool calls to output.yaml
-        4. Status patterns in the result text
-
-        Args:
-            msg: The ResultMessage from the SDK.
-
-        Returns:
-            Status string: "COMPLETE", "PARTIAL", or "FAILED".
-        """
-        # If permission was denied, report failed
-        if self._permission_denied:
-            return "FAILED"
-
-        # If there's an SDK-level error, report it
-        if msg.is_error:
-            return msg.subtype.upper() if msg.subtype else "FAILED"
-
-        # Check if we tracked a status from output.yaml Write
-        if self._output_status:
-            status_upper = self._output_status.upper()
-            if status_upper in ("FAILED", "PARTIAL"):
-                return status_upper
-
-        # Fallback: check if the result text contains a non-COMPLETE status
-        if msg.result:
-            status = self._extract_status_from_result(msg.result)
-            if status:
-                status_upper = status.upper()
-                if status_upper in ("FAILED", "PARTIAL"):
-                    return status_upper
-
-        return "COMPLETE"
-
-    def _extract_status_from_result(self, result: str) -> Optional[str]:
-        """
-        Extract status field from result if it contains JSON.
-
-        Looks for patterns like status: FAILED in the result text,
-        which may appear when the agent writes output.yaml.
-
-        Args:
-            result: The result text from the agent.
-
-        Returns:
-            The status value if found, None otherwise.
-        """
-        if not result:
-            return None
-
-        # Try to find JSON with status field in the result
-        # Pattern: "status": "VALUE" (case insensitive)
-        status_pattern = r'"status"\s*:\s*"([^"]+)"'
-        match = re.search(status_pattern, result, re.IGNORECASE)
-        if match:
-            return match.group(1)
-
-        # Try parsing as JSON if it looks like JSON
-        result_stripped = result.strip()
-        if result_stripped.startswith('{') and result_stripped.endswith('}'):
-            try:
-                data = json.loads(result_stripped)
-                if isinstance(data, dict) and "status" in data:
-                    return str(data["status"])
-            except json.JSONDecodeError:
-                pass
-
-        return None
-
-    def _track_output_status(self, tool_name: str, tool_input: Any) -> None:
-        """
-        Track status from Write tool calls to output.yaml.
-
-        When the agent writes to output.yaml (or uses WriteOutput),
-        extract the status
-        from the content to determine final success/failure.
-
-        Args:
-            tool_name: Name of the tool being called.
-            tool_input: Input parameters for the tool.
-        """
-        if not isinstance(tool_input, dict):
-            return
-
-        if "WriteOutput" in tool_name or "write_output" in tool_name:
-            status_value = tool_input.get("status")
-            if status_value:
-                self._output_status = str(status_value)
-            return
-
-        if tool_name != "Write":
-            return
-
-        # Check if writing to output.yaml
-        file_path = tool_input.get("file_path", "")
-        if not file_path.endswith("output.yaml"):
-            return
-
-        # Extract status from content
-        content = tool_input.get("content", "")
-        if not content:
-            return
-
-        # Try to parse the content as YAML
-        try:
-            data = yaml.safe_load(content)
-            if isinstance(data, dict) and "status" in data:
-                self._output_status = str(data["status"])
-        except Exception:
-            # Try regex pattern match for YAML (status: "VALUE" or status: VALUE)
-            status_pattern = r'status:\s*["\']?([^"\'\n]+)["\']?'
-            match = re.search(status_pattern, content, re.IGNORECASE)
-            if match:
-                self._output_status = match.group(1).strip()
 
     def _handle_stream_event(self, event: StreamEvent) -> None:
         """Handle low-level stream events."""

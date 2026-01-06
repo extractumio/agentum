@@ -4,14 +4,14 @@ import {
   cancelSession,
   continueTask,
   fetchToken,
-  getResult,
   getSession,
+  getSessionEvents,
   listSessions,
   runTask,
 } from './api';
 import { loadConfig } from './config';
 import { connectSSE } from './sse';
-import type { AppConfig, ResultResponse, SessionResponse, TerminalEvent } from './types';
+import type { AppConfig, SessionResponse, TerminalEvent } from './types';
 
 type ResultStatus = 'complete' | 'partial' | 'failed' | 'running';
 
@@ -284,100 +284,23 @@ function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
   return result.length > 0 ? result : [text];
 }
 
-function formatTokens(result?: ResultResponse | null): { input: number; output: number; total: number } {
-  const usage = result?.metrics?.usage;
-  if (!usage) {
-    return { input: 0, output: 0, total: 0 };
-  }
-  const input = usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
-  const output = usage.output_tokens;
-  return { input, output, total: input + output };
+function isSafeRelativePath(path: string): boolean {
+  return Boolean(path && !path.startsWith('/') && !path.startsWith('~') && !path.includes('..'));
 }
 
-function parseResultFiles(files: unknown): string[] {
-  if (Array.isArray(files)) {
-    return files.map(String);
+function extractFilePaths(toolInput: unknown): string[] {
+  if (!toolInput || typeof toolInput !== 'object') {
+    return [];
   }
-  if (typeof files === 'string') {
-    try {
-      const parsed = JSON.parse(files);
-      if (Array.isArray(parsed)) {
-        return parsed.map(String);
-      }
-    } catch {
-      const trimmed = files.trim();
-      if (trimmed) {
-        return [trimmed];
-      }
+  const input = toolInput as Record<string, unknown>;
+  const paths: string[] = [];
+  ['file_path', 'path', 'target_path', 'dest_path'].forEach((key) => {
+    const value = input[key];
+    if (typeof value === 'string' && isSafeRelativePath(value)) {
+      paths.push(value);
     }
-  }
-  return [];
-}
-
-function buildSyntheticEvents(session: SessionResponse, result?: ResultResponse | null): TerminalEvent[] {
-  const now = new Date().toISOString();
-  const events: TerminalEvent[] = [];
-
-  if (session.task) {
-    events.push({
-      type: 'user_message',
-      data: { text: session.task },
-      timestamp: now,
-      sequence: 0,
-    });
-  }
-
-  events.push({
-    type: 'agent_start',
-    data: {
-      session_id: session.id,
-      model: session.model ?? 'unknown',
-      tools: [],
-      task: session.task ?? '',
-    },
-    timestamp: now,
-    sequence: 1,
   });
-
-  if (result) {
-    // Create a message event with output text so output_display can attach files to it
-    events.push({
-      type: 'message',
-      data: {
-        text: result.output || 'Task completed.',
-      },
-      timestamp: now,
-      sequence: 2,
-    });
-    events.push({
-      type: 'output_display',
-      data: {
-        output: result.output,
-        error: result.error,
-        comments: result.comments,
-        result_files: result.result_files,
-        status: result.status,
-      },
-      timestamp: now,
-      sequence: 3,
-    });
-    events.push({
-      type: 'agent_complete',
-      data: {
-        status: result.status,
-        num_turns: result.metrics?.num_turns ?? session.num_turns,
-        duration_ms: result.metrics?.duration_ms ?? session.duration_ms ?? 0,
-        total_cost_usd: result.metrics?.total_cost_usd ?? session.total_cost_usd ?? 0,
-        session_id: session.id,
-        usage: result.metrics?.usage ?? null,
-        model: result.metrics?.model ?? session.model,
-      },
-      timestamp: now,
-      sequence: 4,
-    });
-  }
-
-  return events;
+  return paths;
 }
 
 function formatToolInput(input: unknown): string {
@@ -1239,23 +1162,6 @@ export default function App(): JSX.Element {
         setStatus('failed');
         setError(String(event.data.message ?? 'Unknown error'));
       }
-
-      if (event.type === 'output_display') {
-        const statusValue = String(event.data.status ?? '');
-        if (statusValue) {
-          const normalized = normalizeStatus(statusValue);
-          setStatus(normalized);
-          setCurrentSession((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  status: normalized,
-                  completed_at: new Date().toISOString(),
-                }
-              : null
-          );
-        }
-      }
     },
     [appendEvent, refreshSessions]
   );
@@ -1414,22 +1320,31 @@ export default function App(): JSX.Element {
       const session = await getSession(config.api.base_url, token, sessionId);
       setCurrentSession(session);
 
-      let result: ResultResponse | null = null;
-      if (session.status !== 'running') {
-        result = await getResult(config.api.base_url, token, sessionId);
-      }
+      const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
+      setEvents(historyEvents);
 
-      setEvents(buildSyntheticEvents(session, result));
-
-      if (result?.metrics) {
-        const tokens = formatTokens(result);
+      const lastCompletion = [...historyEvents].reverse().find((event) => event.type === 'agent_complete');
+      if (lastCompletion) {
+        const usage = (lastCompletion.data.usage ?? null) as
+          | {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+            }
+          | null;
+        const tokensIn =
+          (usage?.input_tokens ?? 0) +
+          (usage?.cache_creation_input_tokens ?? 0) +
+          (usage?.cache_read_input_tokens ?? 0);
+        const tokensOut = usage?.output_tokens ?? 0;
         setStats({
-          turns: result.metrics.num_turns,
-          cost: result.metrics.total_cost_usd ?? 0,
-          durationMs: result.metrics.duration_ms ?? 0,
-          tokensIn: tokens.input,
-          tokensOut: tokens.output,
-          model: result.metrics.model ?? session.model ?? '',
+          turns: Number(lastCompletion.data.num_turns ?? session.num_turns),
+          cost: Number(lastCompletion.data.total_cost_usd ?? session.total_cost_usd ?? 0),
+          durationMs: Number(lastCompletion.data.duration_ms ?? session.duration_ms ?? 0),
+          tokensIn,
+          tokensOut,
+          model: String(lastCompletion.data.model ?? session.model ?? ''),
         });
       }
 
@@ -1465,25 +1380,25 @@ export default function App(): JSX.Element {
   };
 
   const conversation = useMemo<ConversationItem[]>(() => {
-    // Sort events by timestamp to ensure chronological display order.
-    // This handles cases where events arrive out of order (e.g., output_display
-    // arriving after user sends a new message during session continuation).
     const sortedEvents = [...events].sort((a, b) => {
-      const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-      const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-      if (timeA !== timeB) {
-        return timeA - timeB;
-      }
-      // If timestamps are equal, preserve original order by sequence
       const seqA = a.sequence ?? 0;
       const seqB = b.sequence ?? 0;
-      return seqA - seqB;
+      if (seqA !== seqB) {
+        return seqA - seqB;
+      }
+      const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return timeA - timeB;
     });
 
     const items: ConversationItem[] = [];
     let pendingTools: ToolCallView[] = [];
-    let pendingResult: { comments?: string; files?: string[]; status?: ResultStatus } = {};
-    let pendingResultAttached = false;
+    let pendingFiles = new Set<string>();
+    let currentStreamMessage: ConversationItem | null = null;
+    let streamBuffer = '';
+    let lastAgentMessage: ConversationItem | null = null;
+
+    const fileToolPattern = /(write|edit|save|apply|move|copy)/i;
 
     const findOpenTool = (toolName: string): ToolCallView | undefined => {
       for (let i = pendingTools.length - 1; i >= 0; i -= 1) {
@@ -1508,27 +1423,13 @@ export default function App(): JSX.Element {
       }
     };
 
-    const attachResultToAgent = (result: { comments?: string; files?: string[]; status?: ResultStatus }): boolean => {
-      const { comments, files, status } = result;
-      if (!comments && (!files || files.length === 0)) {
-        return false;
+    const attachFilesToMessage = (message: ConversationItem | null) => {
+      if (!message || pendingFiles.size === 0) {
+        return;
       }
-      for (let i = items.length - 1; i >= 0; i -= 1) {
-        const item = items[i];
-        if (item.type === 'agent_message') {
-          if (comments) {
-            item.comments = comments;
-          }
-          if (files && files.length > 0) {
-            item.files = files;
-          }
-          if (status) {
-            item.status = status;
-          }
-          return true;
-        }
-      }
-      return false;
+      const files = Array.from(pendingFiles);
+      message.files = files;
+      pendingFiles = new Set();
     };
 
     let toolIdCounter = 0;
@@ -1558,31 +1459,16 @@ export default function App(): JSX.Element {
         case 'tool_start': {
           const toolName = String(event.data.tool_name ?? 'Tool');
           const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
-          const isWriteOutputTool = toolName.includes('WriteOutput') || toolName.includes('write_output');
-          
-          if (!isWriteOutputTool) {
-            pendingTools.push({
-              id: `tool-${toolIdCounter++}`,
-              tool: toolName,
-              time: formatTimestamp(event.timestamp),
-              status: 'running',
-              input: toolInput ?? '',
-            });
-          }
-          
-          if (isWriteOutputTool) {
-            if (toolInput) {
-              const comments = String(toolInput.comments ?? '').trim();
-              const files = parseResultFiles(toolInput.result_files);
-              const statusRaw = String(toolInput.status ?? '').trim();
-              const statusValue = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-              pendingResult = {
-                comments: comments || undefined,
-                files: files.length > 0 ? files : undefined,
-                status: statusValue,
-              };
-              pendingResultAttached = false;
-            }
+          pendingTools.push({
+            id: `tool-${toolIdCounter++}`,
+            tool: toolName,
+            time: formatTimestamp(event.timestamp),
+            status: 'running',
+            input: toolInput ?? '',
+          });
+
+          if (toolInput && fileToolPattern.test(toolName)) {
+            extractFilePaths(toolInput).forEach((path) => pendingFiles.add(path));
           }
           break;
         }
@@ -1605,71 +1491,103 @@ export default function App(): JSX.Element {
           break;
         }
         case 'message': {
-          const text = String(event.data.text ?? '').trim();
-          const agentMessage: ConversationItem = {
-            type: 'agent_message',
-            id: `agent-${items.length}`,
-            time: formatTimestamp(event.timestamp),
-            content: text,
-            toolCalls: pendingTools,
-          };
+          const text = String(event.data.text ?? '');
+          const isPartial = Boolean(event.data.is_partial);
 
-          if (!pendingResultAttached) {
-            if (pendingResult.comments) {
-              agentMessage.comments = pendingResult.comments;
+          if (isPartial) {
+            streamBuffer += text;
+            if (!currentStreamMessage) {
+              currentStreamMessage = {
+                type: 'agent_message',
+                id: `agent-${items.length}`,
+                time: formatTimestamp(event.timestamp),
+                content: streamBuffer,
+                toolCalls: pendingTools,
+              };
+              items.push(currentStreamMessage);
+              pendingTools = [];
+            } else {
+              currentStreamMessage.content = streamBuffer;
             }
-            if (pendingResult.files) {
-              agentMessage.files = pendingResult.files;
-            }
-            if (pendingResult.status) {
-              agentMessage.status = pendingResult.status;
-            }
-            pendingResultAttached = true;
+            break;
           }
 
-          items.push(agentMessage);
+          const finalText = `${streamBuffer}${text}`.trim();
+          streamBuffer = '';
+
+          if (currentStreamMessage) {
+            currentStreamMessage.content = finalText;
+            lastAgentMessage = currentStreamMessage;
+            currentStreamMessage = null;
+          } else {
+            const agentMessage: ConversationItem = {
+              type: 'agent_message',
+              id: `agent-${items.length}`,
+              time: formatTimestamp(event.timestamp),
+              content: finalText,
+              toolCalls: pendingTools,
+            };
+            items.push(agentMessage);
+            lastAgentMessage = agentMessage;
+          }
+
           pendingTools = [];
+          attachFilesToMessage(lastAgentMessage);
           break;
         }
-        case 'output_display': {
-          if (pendingTools.length > 0) {
-            flushPendingTools(event.timestamp);
-          }
-          const output = String(event.data.output ?? '').trim();
-          const comments = String(event.data.comments ?? '').trim();
-          const errorText = String(event.data.error ?? '').trim();
-          const files = parseResultFiles(event.data.result_files);
+        case 'agent_complete': {
           const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as ResultStatus;
 
-          const resultPayload = {
-            comments: comments || undefined,
-            files: files.length > 0 ? files : undefined,
-            status: statusValue,
-          };
-
-          const attached = attachResultToAgent(resultPayload);
-          if (!attached && (comments || files.length > 0)) {
-            items.push({
-              type: 'agent_message',
-              id: `agent-output-${items.length}`,
-              time: formatTimestamp(event.timestamp),
-              content: output || 'Task completed.',
-              toolCalls: [],
-              comments: comments || undefined,
-              files: files.length > 0 ? files : undefined,
-              status: statusValue,
-            });
+          if (currentStreamMessage) {
+            currentStreamMessage.content = streamBuffer.trim();
+            lastAgentMessage = currentStreamMessage;
+            currentStreamMessage = null;
+            streamBuffer = '';
           }
 
+          attachFilesToMessage(lastAgentMessage);
+
+          if (lastAgentMessage) {
+            lastAgentMessage.status = statusValue;
+          }
+
+          const outputText = lastAgentMessage?.content?.trim() || 'Task completed.';
           items.push({
             type: 'output',
             id: `output-${items.length}`,
             time: formatTimestamp(event.timestamp),
-            output,
-            comments: comments || undefined,
-            files,
+            output: outputText,
+            comments: undefined,
+            files: lastAgentMessage?.files ?? [],
             status: statusValue,
-            error: errorText || undefined,
+          });
+          break;
+        }
+        case 'error': {
+          const outputText = lastAgentMessage?.content?.trim() || 'Task failed.';
+          items.push({
+            type: 'output',
+            id: `output-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            output: outputText,
+            comments: undefined,
+            files: lastAgentMessage?.files ?? [],
+            status: 'failed',
+            error: String(event.data.message ?? 'Unknown error'),
+          });
+          break;
+        }
+        case 'cancelled': {
+          const outputText = lastAgentMessage?.content?.trim() || 'Task cancelled.';
+          items.push({
+            type: 'output',
+            id: `output-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            output: outputText,
+            comments: undefined,
+            files: lastAgentMessage?.files ?? [],
+            status: 'failed',
+            error: 'Task was cancelled.',
           });
           break;
         }
@@ -1680,10 +1598,6 @@ export default function App(): JSX.Element {
 
     if (pendingTools.length > 0) {
       flushPendingTools();
-    }
-
-    if (!pendingResultAttached) {
-      attachResultToAgent(pendingResult);
     }
 
     return items;
@@ -1766,6 +1680,10 @@ export default function App(): JSX.Element {
 
   const handleFileAction = async (filePath: string, mode: 'view' | 'download') => {
     if (!config || !token || !currentSession) {
+      return;
+    }
+    if (!isSafeRelativePath(filePath)) {
+      setError('Refusing to open unsafe file path.');
       return;
     }
 

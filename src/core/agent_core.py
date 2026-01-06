@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
-import yaml
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -40,7 +39,6 @@ from .schemas import (
     Checkpoint,
     CheckpointType,
     LLMMetrics,
-    OutputSchema,
     SessionInfo,
     TaskStatus,
     TokenUsage,
@@ -62,25 +60,9 @@ _tools_dir = str(AGENT_DIR / "tools")
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-# Import system tools (path now guaranteed by above)
-# Note: agentum module is in tools/ directory, added to sys.path at runtime
-try:
-    from agentum.system_write_output import (  # type: ignore[import-not-found]
-        SYSTEM_TOOLS,
-        create_agentum_mcp_server,
-    )
-    SYSTEM_TOOLS_AVAILABLE = True
-except ImportError as _import_err:
-    SYSTEM_TOOLS_AVAILABLE = False
-    SYSTEM_TOOLS: list[str] = []
-    create_agentum_mcp_server = None
-    # Log warning - this should never happen if tools/ exists
-    import warnings
-    warnings.warn(
-        f"Failed to import agentum.system_write_output: {_import_err}. "
-        f"MCP system tools will not be available. "
-        f"Expected path: {_tools_dir}/agentum/system_write_output/"
-    )
+SYSTEM_TOOLS_AVAILABLE = False
+SYSTEM_TOOLS: list[str] = []
+create_agentum_mcp_server = None
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +266,7 @@ class ClaudeAgent:
         else:
             self._tracer = tracer
 
-        # Track permission denials for proper output generation on interruption
+        # Track permission denials for interruption handling
         self._denial_tracker = PermissionDenialTracker()
         self._sandbox_system_message: Optional[str] = None
 
@@ -349,7 +331,7 @@ class ClaudeAgent:
         Clean up session resources after agent run completes.
 
         Removes copied skills from workspace to save disk space.
-        The output.yaml and session metadata are preserved.
+        Session metadata is preserved.
 
         Args:
             session_id: The session ID to clean up.
@@ -360,64 +342,6 @@ class ClaudeAgent:
         # Clear session context from permission manager
         if self._permission_manager is not None:
             self._permission_manager.clear_session_context()
-
-    def _write_error_output(
-        self,
-        session_id: str,
-        error_msg: str
-    ) -> None:
-        """
-        Write output.yaml with error information when agent is interrupted.
-
-        Ensures proper output format is maintained even when the agent
-        is forcibly stopped due to permission denials or other errors.
-
-        Args:
-            session_id: The session ID.
-            error_msg: The error message to include.
-        """
-        output_file = self._session_manager.get_output_file(session_id)
-
-        # Check if output.yaml already exists (agent may have written it)
-        if output_file.exists():
-            try:
-                existing = yaml.safe_load(output_file.read_text())
-                if existing is None:
-                    existing = {}
-                # If agent already wrote a valid output, don't overwrite
-                if existing.get("status") in ("COMPLETE", "SUCCESS", "PARTIAL"):
-                    return
-            except (yaml.YAMLError, IOError):
-                pass  # File is invalid/unreadable, we'll overwrite it
-
-        # Generate output from denial tracker if available
-        if self._denial_tracker.was_interrupted:
-            denial_output = self._denial_tracker.get_error_output()
-            output = OutputSchema(
-                session_id=session_id,
-                status="FAILED",
-                error=denial_output.get("error", ""),
-                comments=denial_output.get("comments", ""),
-                output=denial_output.get("output", ""),
-            )
-        else:
-            output = OutputSchema(
-                session_id=session_id,
-                status="FAILED",
-                error=error_msg,
-                comments="",
-                output="Agent execution was interrupted before completion.",
-            )
-
-        # Ensure output directory exists
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write the output file
-        try:
-            output_file.write_text(output.to_yaml())
-            logger.info(f"Wrote error output to {output_file}")
-        except IOError as e:
-            logger.error(f"Failed to write error output: {e}")
 
     def _build_options(
         self,
@@ -506,7 +430,7 @@ class ClaudeAgent:
         logger.info(f"SANDBOX: Profile allowed_dirs={add_dirs}")
 
         # Use workspace subdirectory as cwd to prevent reading session logs
-        # The workspace only contains files the agent should access (output.yaml)
+        # The workspace only contains files the agent should access
         workspace_dir = self._session_manager.get_workspace_dir(
             session_info.session_id
         )
@@ -524,7 +448,7 @@ class ClaudeAgent:
 
         # Create permission callback using the permission manager
         # Pass tracer's on_permission_check for tracing (if available)
-        # Pass denial tracker to record denials for output generation
+        # Pass denial tracker to record denials
         # Pass trace_processor so permission denial shows FAILED status
         # Pass sandbox_executor to wrap Bash commands in bubblewrap
         on_permission_check = (
@@ -548,26 +472,7 @@ class ClaudeAgent:
         # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
         session_dir = self._session_manager.get_session_dir(session_info.session_id)
 
-        # Build MCP servers dict - always include system tools
         mcp_servers: dict[str, Any] = {}
-
-        # Add Agentum MCP server (cannot be disabled via permissions)
-        if SYSTEM_TOOLS_AVAILABLE and create_agentum_mcp_server is not None:
-            agentum_server = create_agentum_mcp_server(
-                workspace_path=workspace_dir,
-                session_id=session_info.session_id,
-            )
-            mcp_servers["agentum"] = agentum_server
-
-            # Add all system tools to allowed_tools (pre-approved, bypass permission check)
-            for tool_name in SYSTEM_TOOLS:
-                if tool_name not in allowed_tools:
-                    allowed_tools.append(tool_name)
-
-            logger.info(
-                f"SYSTEM TOOLS: Registered Agentum MCP server "
-                f"(tools={SYSTEM_TOOLS})"
-            )
 
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
@@ -635,15 +540,10 @@ class ClaudeAgent:
         workspace_dir = self._session_manager.get_workspace_dir(
             session_info.session_id
         )
-        output_file = self._session_manager.get_output_file(
-            session_info.session_id
-        )
-
         try:
             user_prompt = _jinja_env.get_template("user.j2").render(
                 task=task,
                 working_dir=self._config.working_dir or str(workspace_dir),
-                output_file=str(output_file),
                 **params,
             )
         except Exception as e:
@@ -964,8 +864,6 @@ class ClaudeAgent:
                 "role_content": role_content,
                 # Permissions
                 "permissions": permissions_data,
-                # Output
-                "output_yaml_schema": OutputSchema.get_yaml_schema_example(),
                 # Skills
                 "enable_skills": self._config.enable_skills,
                 "skills_content": skills_content,
@@ -1040,7 +938,6 @@ class ClaudeAgent:
                 denial = self._denial_tracker.last_denial
                 error_msg = denial.message if denial else "Permission denied"
                 self._tracer.on_error(error_msg, error_type="permission_denied")
-                self._write_error_output(session_info.session_id, error_msg)
                 self._cleanup_session(session_info.session_id)
 
                 # Extract metrics even for failed runs
@@ -1058,17 +955,7 @@ class ClaudeAgent:
                         model=self._config.model,
                     )
 
-                output = self._denial_tracker.get_error_output()
-
-                # Display the error output
-                self._tracer.on_output_display(
-                    output=output.get("output"),
-                    error=output.get("error"),
-                    status="FAILED"
-                )
-
-                # Emit completion after output_display so the UI can close the stream
-                # deterministically and render the final output.
+                # Emit completion so the UI can close the stream deterministically.
                 if result:
                     self._tracer.on_agent_complete(
                         status="FAILED",
@@ -1090,8 +977,7 @@ class ClaudeAgent:
 
                 return AgentResult(
                     status=TaskStatus.FAILED,
-                    output=output.get("output"),
-                    error=output.get("error"),
+                    error=error_msg,
                     metrics=LLMMetrics(
                         model=self._config.model,
                         duration_ms=result.duration_ms if result else 0,
@@ -1123,24 +1009,9 @@ class ClaudeAgent:
                     model=self._config.model,
                 )
 
-            output = self._session_manager.parse_output(session_info.session_id)
+            raw_status = "COMPLETE"
 
-            # Normalize status - agent might write "SUCCESS" but enum expects "COMPLETE"
-            raw_status = output.get("status", "COMPLETE").upper()
-            if raw_status == "SUCCESS" or raw_status == "DONE":
-                raw_status = "COMPLETE"
-
-            # Display the parsed output.yaml content in the tracer
-            self._tracer.on_output_display(
-                output=output.get("output"),
-                error=output.get("error"),
-                comments=output.get("comments"),
-                result_files=output.get("result_files", []),
-                status=raw_status
-            )
-
-            # Emit completion after output_display so the UI can render final output
-            # before treating the stream as terminal.
+            # Emit completion so the UI can close the stream cleanly.
             if result:
                 self._tracer.on_agent_complete(
                     status=raw_status,
@@ -1162,10 +1033,7 @@ class ClaudeAgent:
 
             return AgentResult(
                 status=TaskStatus(raw_status),
-                output=output.get("output"),
-                error=output.get("error"),
-                comments=output.get("comments"),
-                result_files=output.get("result_files", []),
+                output=result.result if result else None,
                 metrics=LLMMetrics(
                     model=self._config.model,
                     duration_ms=result.duration_ms,
@@ -1179,7 +1047,6 @@ class ClaudeAgent:
 
         except AgentError as e:
             self._tracer.on_error(str(e), error_type="agent_error")
-            self._write_error_output(session_info.session_id, str(e))
             self._cleanup_session(session_info.session_id)
             self._session_manager.update_session(
                 session_info, status=TaskStatus.FAILED
@@ -1188,7 +1055,6 @@ class ClaudeAgent:
         except asyncio.TimeoutError:
             error_msg = f"Timed out after {self._config.timeout_seconds}s"
             self._tracer.on_error(error_msg, error_type="timeout")
-            self._write_error_output(session_info.session_id, error_msg)
             self._cleanup_session(session_info.session_id)
             self._session_manager.update_session(
                 session_info, status=TaskStatus.FAILED
@@ -1196,7 +1062,6 @@ class ClaudeAgent:
             raise AgentError(error_msg)
         except Exception as e:
             self._tracer.on_error(str(e), error_type="error")
-            self._write_error_output(session_info.session_id, str(e))
             self._cleanup_session(session_info.session_id)
             self._session_manager.update_session(
                 session_info, status=TaskStatus.ERROR

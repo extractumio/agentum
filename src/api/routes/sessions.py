@@ -46,8 +46,19 @@ from ..models import (
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
-def session_to_response(session) -> SessionResponse:
-    """Convert a database Session to SessionResponse."""
+def session_to_response(session, resumable: bool | None = None) -> SessionResponse:
+    """
+    Convert a database Session to SessionResponse.
+
+    Args:
+        session: Database session object.
+        resumable: Optional override for resumability. If None, determined from session_info.
+    """
+    # Determine resumability if not explicitly provided
+    if resumable is None and session.status == "cancelled":
+        session_info = session_service.get_session_info(session.id)
+        resumable = bool(session_info.get("resume_id"))
+
     return SessionResponse(
         id=session.id,
         status=session.status,
@@ -60,6 +71,7 @@ def session_to_response(session) -> SessionResponse:
         duration_ms=session.duration_ms,
         total_cost_usd=session.total_cost_usd,
         cancel_requested=session.cancel_requested,
+        resumable=resumable,
     )
 
 async def record_user_message_event(session_id: str, text: str) -> None:
@@ -73,6 +85,65 @@ async def record_user_message_event(session_id: str, text: str) -> None:
     }
     await event_service.record_event(event)
     await agent_runner.publish_event(session_id, event)
+
+
+async def build_resume_context(session_id: str) -> tuple[str | None, bool]:
+    """
+    Build resume context for a cancelled session.
+
+    Analyzes previous events to determine:
+    - Whether session is resumable (has agent_start event)
+    - What todo state was at cancellation
+
+    Returns:
+        Tuple of (context_string, is_resumable).
+        context_string is None if session is not resumable.
+    """
+    events = await event_service.list_events(session_id)
+    if not events:
+        return None, False
+
+    # Check for agent_start event (indicates Claude session was established)
+    has_agent_start = any(e.get("type") == "agent_start" for e in events)
+    if not has_agent_start:
+        return None, False
+
+    # Find latest todo_update events to extract todo state
+    todos: list[dict] = []
+    for event in reversed(events):
+        if event.get("type") == "todo_update":
+            data = event.get("data", {})
+            if "todos" in data:
+                todos = data["todos"]
+                break
+
+    # Build context
+    context_lines = ["[RESUME CONTEXT]"]
+    context_lines.append("Previous execution was cancelled by user.")
+
+    if todos:
+        context_lines.append("")
+        context_lines.append("Todo state at cancellation:")
+        for todo in todos:
+            status_icon = {
+                "completed": "✓",
+                "in_progress": "→",
+                "pending": "○",
+                "cancelled": "✗",
+            }.get(todo.get("status", "pending"), "○")
+            content = todo.get("content", "Unknown")
+            context_lines.append(f"  {status_icon} {content} [{todo.get('status', 'pending')}]")
+
+        # Identify interrupted task
+        in_progress = [t for t in todos if t.get("status") == "in_progress"]
+        if in_progress:
+            context_lines.append("")
+            context_lines.append("Note: Task(s) marked in_progress were interrupted and may be incomplete.")
+
+    context_lines.append("[END RESUME CONTEXT]")
+    context_lines.append("")
+
+    return "\n".join(context_lines), True
 
 
 def build_task_params(
@@ -315,6 +386,23 @@ async def start_task(
             # This session has history, resume from itself
             resume_from = session_id
 
+    # Check if resuming a cancelled session and build resume context
+    is_resumable = True
+    if session.status == "cancelled" and resume_from:
+        resume_context, is_resumable = await build_resume_context(session_id)
+
+        if not is_resumable:
+            # Session was cancelled before agent_start - not resumable
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session cannot be resumed. It was cancelled before the agent could start. "
+                       "Please create a new session with the same task.",
+            )
+
+        if resume_context:
+            # Prepend resume context to help agent understand the state
+            task_to_run = f"{resume_context}\n{task_to_run}"
+
     # Build task parameters
     params = build_task_params(
         session_id=session_id,
@@ -402,6 +490,14 @@ async def stream_events(
         - Heartbeats during idle periods
         - Error events if the agent fails before sending events
         - Graceful completion when agent finishes
+
+        Event Delivery Guarantee:
+        The EventingTracer awaits DB persistence before publishing to EventHub.
+        This ensures that any event published is already in the database.
+        Therefore:
+        1. Subscribe to EventHub first (catches future events)
+        2. Replay from DB (catches all past events, including those just published)
+        No race condition possible - events are either in the queue or in the DB.
         """
         try:
             last_sequence = after or 0

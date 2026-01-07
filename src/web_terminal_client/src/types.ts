@@ -40,6 +40,7 @@ export interface SessionResponse {
   duration_ms?: number | null;
   total_cost_usd?: number | null;
   cancel_requested: boolean;
+  resumable?: boolean;
 }
 
 export interface SessionListResponse {

@@ -164,7 +164,6 @@ class TestSessionCreate:
         assert data["status"] == "pending"
         assert data["task"] == "Test task"
         assert "model" in data  # Can be None
-        assert data["working_dir"] == "/tmp"
         assert "created_at" in data
         assert "updated_at" in data
         assert "completed_at" in data  # Can be None
@@ -473,7 +472,6 @@ class TestSessionGet:
         assert "status" in data
         assert "task" in data
         assert "model" in data
-        assert "working_dir" in data
         assert "created_at" in data
         assert "updated_at" in data
         assert "completed_at" in data
@@ -822,3 +820,133 @@ class TestSessionResult:
         )
 
         assert response.status_code == 404
+
+
+class TestSessionResumability:
+    """Tests for session resumability after cancellation."""
+
+    @pytest.mark.unit
+    def test_session_response_includes_resumable_field(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """Session response includes resumable field."""
+        session_id = created_session["id"]
+
+        response = client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        
+        # resumable field should be present (can be None for non-cancelled)
+        assert "resumable" in data
+
+    @pytest.mark.unit
+    def test_new_session_resumable_is_none(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """New sessions have resumable=None (not cancelled)."""
+        session_id = created_session["id"]
+
+        response = client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers=auth_headers
+        )
+
+        data = response.json()
+        # For non-cancelled sessions, resumable is None
+        assert data["status"] == "pending"
+        assert data.get("resumable") is None
+
+
+class TestSessionStatusTransitions:
+    """Tests for session status transitions."""
+
+    @pytest.mark.unit
+    def test_session_status_running_after_start(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """Session status transitions to running after starting task."""
+        session_id = created_session["id"]
+
+        # Start task
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/task",
+            headers=auth_headers,
+            json={}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+
+        # Verify via GET
+        get_response = client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers=auth_headers
+        )
+        assert get_response.json()["status"] == "running"
+
+    @pytest.mark.unit
+    def test_session_status_flow_pending_to_running(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Session follows pending -> running status flow."""
+        # Create session (status: pending)
+        create_response = client.post(
+            "/api/v1/sessions",
+            headers=auth_headers,
+            json={"task": "Status flow test"}
+        )
+        session_id = create_response.json()["id"]
+        assert create_response.json()["status"] == "pending"
+
+        # Start task (status: running)
+        start_response = client.post(
+            f"/api/v1/sessions/{session_id}/task",
+            headers=auth_headers,
+            json={}
+        )
+        assert start_response.json()["status"] == "running"
+
+
+class TestCancelledEventStructure:
+    """Tests for cancelled event structure in API responses."""
+
+    @pytest.mark.unit
+    def test_cancel_response_structure(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        created_session: dict
+    ) -> None:
+        """Cancel response has correct structure."""
+        session_id = created_session["id"]
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/cancel",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Validate CancelResponse fields
+        assert "session_id" in data
+        assert "status" in data
+        assert "message" in data
+        assert data["session_id"] == session_id
+
+

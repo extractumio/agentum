@@ -218,6 +218,10 @@ class SessionResponse(BaseModel):
         default=False,
         description="Whether cancellation was requested"
     )
+    resumable: Optional[bool] = Field(
+        default=None,
+        description="Whether session can be resumed (has established Claude session)"
+    )
 
 
 class SessionListResponse(BaseModel):

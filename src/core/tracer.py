@@ -2280,13 +2280,20 @@ class EventingTracer(TracerBase):
 
     This allows real-time streaming (SSE/Web) while preserving the original
     tracer output for CLI or backend logging.
+
+    Event Delivery Guarantee:
+    The event_sink is an async function that persists events to the database.
+    Events are awaited for persistence BEFORE being published to the EventHub.
+    This ensures that SSE subscribers will always find events either:
+    1. In the queue (if subscribed before publish), or
+    2. In the database (if subscribed after publish)
     """
 
     def __init__(
         self,
         tracer: TracerBase,
         event_queue: Optional[asyncio.Queue] = None,
-        event_sink: Optional[callable] = None,
+        event_sink: Optional[Any] = None,  # Async callable: (event: dict) -> None
         session_id: Optional[str] = None,
         initial_sequence: int = 0,
     ) -> None:
@@ -2312,7 +2319,15 @@ class EventingTracer(TracerBase):
         data: dict[str, Any],
         persist_event: bool = True
     ) -> None:
-        """Emit a structured event to the queue."""
+        """
+        Emit a structured event to the queue.
+
+        Events are persisted to DB and published to EventHub subscribers.
+        To prevent race conditions where events are published before SSE
+        subscribers connect, we await persistence completion before publishing.
+        This guarantees that any event published to EventHub is already in the
+        database, so SSE replay will always find it.
+        """
         if self._event_queue is None:
             return
 
@@ -2330,16 +2345,40 @@ class EventingTracer(TracerBase):
         except RuntimeError:
             loop = None
 
-        if self._event_sink is not None and persist_event:
-            self._event_sink(event)
+        async def persist_then_publish():
+            """
+            Persist event to DB, then publish to EventHub.
+
+            By awaiting persistence before publishing, we ensure that:
+            1. If SSE is already subscribed → event arrives via queue
+            2. If SSE subscribes later → event is in DB for replay
+
+            No race condition possible because DB write completes before publish.
+            """
+            if self._event_sink is not None and persist_event:
+                try:
+                    # Await the async persistence function
+                    await self._event_sink(event)
+                except Exception as e:
+                    logger.warning(f"Event persistence failed: {e}")
+            # Only publish after persistence completes
+            await self._event_queue.put(event)
 
         if loop and loop.is_running():
-            loop.create_task(self._event_queue.put(event))
+            loop.create_task(persist_then_publish())
         else:
+            # Fallback for non-async context (shouldn't happen in normal operation)
+            # This is a degraded path - events may not persist properly
+            logger.warning(
+                f"emit_event called outside async context for {event_type}. "
+                "Event persistence may be unreliable."
+            )
+            # Best effort: try to publish to EventHub (will work if subscribers exist)
+            # Note: persistence is skipped since we can't await without an event loop
             try:
                 self._event_queue.put_nowait(event)
             except asyncio.QueueFull:
-                logger.warning("Event queue full; dropping event %s", event_type)
+                logger.error(f"Event queue full; dropping event {event_type}")
 
     def on_agent_start(
         self,

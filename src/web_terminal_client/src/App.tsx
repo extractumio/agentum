@@ -13,7 +13,7 @@ import { loadConfig } from './config';
 import { connectSSE } from './sse';
 import type { AppConfig, SessionResponse, TerminalEvent } from './types';
 
-type ResultStatus = 'complete' | 'partial' | 'failed' | 'running';
+type ResultStatus = 'complete' | 'partial' | 'failed' | 'running' | 'cancelled';
 
 type ConversationItem =
   | {
@@ -108,6 +108,7 @@ const OUTPUT_STATUS_CLASS: Record<string, string> = {
   partial: 'output-status-partial',
   failed: 'output-status-failed',
   running: 'output-status-running',
+  cancelled: 'output-status-cancelled',
 };
 
 function normalizeStatus(value: string): string {
@@ -1524,12 +1525,15 @@ export default function App(): JSX.Element {
 
       if (event.type === 'cancelled') {
         setStatus('cancelled');
+        // Check if session is resumable (has resume_id established)
+        const resumable = Boolean(event.data?.resumable);
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: 'cancelled',
                 completed_at: new Date().toISOString(),
+                resumable,
               }
             : null
         );
@@ -1609,9 +1613,17 @@ export default function App(): JSX.Element {
       sequence: Date.now(),
     };
 
-    const shouldContinue = currentSession && currentSession.status !== 'running';
+    // Check if we can continue the session:
+    // - Session exists and is not running
+    // - If cancelled, it must be resumable (has resume_id from agent_start)
+    const canContinue = currentSession && currentSession.status !== 'running';
+    const isCancelledNotResumable =
+      currentSession?.status === 'cancelled' && currentSession.resumable === false;
 
-    if (shouldContinue) {
+    // If session was cancelled before agent_start, we can't resume - start fresh
+    const shouldContinue = canContinue && !isCancelledNotResumable;
+
+    if (shouldContinue && currentSession) {
       // Close old SSE connection before appending user event to prevent
       // late-arriving events from previous request appearing after the new message
       if (cleanupRef.current) {
@@ -1640,7 +1652,18 @@ export default function App(): JSX.Element {
         refreshSessions();
       } catch (err) {
         setStatus('failed');
-        setError(`Failed to continue task: ${(err as Error).message}`);
+        // Provide helpful error message for non-resumable sessions
+        const errorMessage = (err as Error).message;
+        if (errorMessage.includes('cannot be resumed')) {
+          setError(
+            'Session cannot be resumed. The agent was cancelled before it could start. ' +
+              'Your next message will start a new session.'
+          );
+          // Mark session as not resumable for future attempts
+          setCurrentSession((prev) => (prev ? { ...prev, resumable: false } : null));
+        } else {
+          setError(`Failed to continue task: ${errorMessage}`);
+        }
       }
     } else {
       setEvents([userEvent]);
@@ -2090,7 +2113,7 @@ export default function App(): JSX.Element {
             output: outputText,
             comments: undefined,
             files: lastAgentMessage?.files ?? [],
-            status: 'failed',
+            status: 'cancelled',
             error: 'Task was cancelled.',
           });
           break;

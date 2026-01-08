@@ -155,9 +155,10 @@ class TestSessionServiceQuery:
         """Returns None for non-existent session."""
         service, user_id = session_service_with_user
 
+        # Use a valid format session ID that doesn't exist
         session = await service.get_session(
             db=test_session,
-            session_id="nonexistent",
+            session_id="20250101_000000_deadbeef",
             user_id=user_id
         )
 
@@ -397,18 +398,18 @@ class TestSessionServiceOutput:
         test_session: AsyncSession,
         session_service_with_user: tuple[SessionService, str]
     ) -> None:
-        """Get output returns default when no output.yaml exists."""
+        """Get session info returns data for new session."""
         service, user_id = session_service_with_user
 
         session = await service.create_session(
             db=test_session, user_id=user_id, task="Output test"
         )
 
-        output = service.get_session_output(session.id)
+        # Use get_session_info instead of removed get_session_output
+        info = service.get_session_info(session.id)
 
-        # Should return default empty output
-        assert isinstance(output, dict)
-        assert "status" in output
+        # Should return session info dict
+        assert isinstance(info, dict)
 
     @pytest.mark.integration
     @pytest.mark.asyncio

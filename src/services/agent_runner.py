@@ -161,45 +161,64 @@ class AgentRunner:
         event_queue = EventSinkQueue(self._event_hub, session_id)
         last_sequence = await event_service.get_last_sequence(session_id)
 
-        def emit_error_event(message: str, error_type: str = "server_error") -> None:
-            """Helper to emit error event even if tracer creation failed."""
-            error_event = {
-                "type": "error",
-                "data": {
-                    "message": message,
-                    "error_type": error_type,
-                    "session_id": session_id,
-                },
+        def emit_event(event_type: str, data: dict[str, Any]) -> None:
+            """Helper to emit an event even if tracer creation failed."""
+            event = {
+                "type": event_type,
+                "data": data,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "sequence": last_sequence + 1,
                 "session_id": session_id,
             }
             if tracer is not None:
-                tracer.emit_event("error", error_event["data"])
+                tracer.emit_event(event_type, data)
                 return
 
+            # Fallback when tracer is not available (e.g., tracer creation failed)
+            # Use persist-then-publish pattern to prevent race conditions
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return
 
-            loop.create_task(event_service.record_event(error_event))
-            loop.create_task(self._event_hub.publish(session_id, error_event))
+            async def persist_then_publish():
+                """Persist event to DB, then publish to EventHub."""
+                await event_service.record_event(event)
+                await self._event_hub.publish(session_id, event)
+
+            loop.create_task(persist_then_publish())
+
+        def emit_error_event(message: str, error_type: str = "server_error") -> None:
+            """Helper to emit error event even if tracer creation failed."""
+            emit_event("error", {
+                "message": message,
+                "error_type": error_type,
+                "session_id": session_id,
+            })
+
+        def emit_cancelled_event(
+            message: str = "Task was cancelled",
+            resumable: bool = False
+        ) -> None:
+            """Emit a cancelled event to properly signal task cancellation."""
+            emit_event("cancelled", {
+                "message": message,
+                "session_id": session_id,
+                "resumable": resumable,
+            })
 
         try:
             # Create tracer early for error reporting
             base_tracer = BackendConsoleTracer(session_id=session_id)
-            def record_event(event: dict[str, Any]) -> None:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    return
-                loop.create_task(event_service.record_event(event))
+
+            async def persist_event(event: dict[str, Any]) -> None:
+                """Persist event to database. Returns when persistence is complete."""
+                await event_service.record_event(event)
 
             tracer = EventingTracer(
                 base_tracer,
                 event_queue=event_queue,
-                event_sink=record_event,
+                event_sink=persist_event,
                 session_id=session_id,
                 initial_sequence=last_sequence,
             )
@@ -227,6 +246,9 @@ class AgentRunner:
                 additional_dirs=params.additional_dirs or [],
                 enable_skills=params.enable_skills,
                 enable_file_checkpointing=params.enable_file_checkpointing,
+                max_buffer_size=params.max_buffer_size,
+                output_format=params.output_format,
+                include_partial_messages=params.include_partial_messages,
                 tracer=tracer,
             )
 
@@ -261,11 +283,31 @@ class AgentRunner:
 
         except asyncio.CancelledError:
             logger.info(f"Agent cancelled for session: {session_id}")
+
+            # Check if session has agent_start event (Claude session was established)
+            # This determines if the session can be resumed.
+            # We check the database rather than session_info.json because the
+            # resume_id may not have been written yet (race condition with async event recording)
+            has_resume_id = False
+            try:
+                events = await event_service.list_events(session_id, limit=50)
+                has_resume_id = any(
+                    e.get("type") == "agent_start" and e.get("data", {}).get("session_id")
+                    for e in events
+                )
+            except Exception as e:
+                logger.warning(f"Failed to check agent_start for {session_id}: {e}")
+                # Fall back to session_info check
+                from ..services.session_service import session_service
+                session_info = session_service.get_session_info(session_id)
+                has_resume_id = bool(session_info.get("resume_id"))
+
             self._results[session_id] = {
                 "status": "cancelled",
                 "error": "Task was cancelled",
+                "resumable": has_resume_id,
             }
-            emit_error_event("Task was cancelled", "cancelled")
+            emit_cancelled_event("Task was cancelled", resumable=has_resume_id)
             await self._update_session_status(session_id, "cancelled")
             raise
 

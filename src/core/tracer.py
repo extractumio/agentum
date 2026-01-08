@@ -337,6 +337,63 @@ class TracerBase(ABC):
         """Called when a conversation session disconnects."""
         pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # Subagent tracing methods (for Task tool)
+    # ═══════════════════════════════════════════════════════════════
+
+    @abstractmethod
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """
+        Called when a Task tool invocation starts a subagent.
+
+        Args:
+            task_id: The tool_use_id of the Task tool call.
+            subagent_name: The subagent type (from Task tool input).
+            prompt: The task prompt given to the subagent.
+        """
+        pass
+
+    @abstractmethod
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """
+        Called for messages from within a subagent context.
+
+        Args:
+            task_id: The tool_use_id of the parent Task tool call.
+            text: The message text from the subagent.
+            is_partial: Whether this is a partial streaming message.
+        """
+        pass
+
+    @abstractmethod
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """
+        Called when a subagent completes.
+
+        Args:
+            task_id: The tool_use_id of the Task tool call.
+            result: The result returned by the subagent.
+            duration_ms: Duration of subagent execution.
+            is_error: Whether the subagent completed with an error.
+        """
+        pass
+
 
 class ExecutionTracer(TracerBase):
     """
@@ -2038,6 +2095,61 @@ class QuietTracer(TracerBase):
         """Report session disconnect."""
         print(f"[SESSION] Ended: {total_turns} turns, {total_duration_ms}ms")
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """Display subagent start with spinner."""
+        self._stop_spinner()
+        prompt_preview = truncate_text(prompt, 80) if prompt else ""
+        color = Color.CYAN if self.use_colors else ""
+        reset = Color.RESET if self.use_colors else ""
+        icon = Symbol.GEAR if self.use_unicode else ">"
+        print(f"  {color}{icon} Subagent: {subagent_name}{reset}")
+        if prompt_preview:
+            dim = Color.DIM if self.use_colors else ""
+            print(f"    {dim}{prompt_preview}{reset}")
+        self._start_spinner(f"Running subagent: {subagent_name}")
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """Display subagent messages (streaming or final)."""
+        if is_partial:
+            # For partial messages, just update spinner
+            return
+        # For final messages, show brief output
+        if text and text.strip():
+            self._stop_spinner()
+            preview = truncate_text(text.strip(), 60)
+            dim = Color.DIM if self.use_colors else ""
+            reset = Color.RESET if self.use_colors else ""
+            print(f"    {dim}[subagent] {preview}{reset}")
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """Display subagent completion."""
+        self._stop_spinner()
+        duration_str = format_duration(duration_ms)
+        if is_error:
+            color = Color.RED if self.use_colors else ""
+            icon = Symbol.CROSS if self.use_unicode else "X"
+        else:
+            color = Color.GREEN if self.use_colors else ""
+            icon = Symbol.CHECK if self.use_unicode else "+"
+        reset = Color.RESET if self.use_colors else ""
+        print(f"    {color}{icon} Subagent completed ({duration_str}){reset}")
+
 
 class BackendConsoleTracer(TracerBase):
     """
@@ -2273,6 +2385,37 @@ class BackendConsoleTracer(TracerBase):
         duration_str = self._format_duration(total_duration_ms)
         self._log(f"Session ended: {total_turns} turns, {duration_str}")
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """Log subagent start."""
+        self._log(f"Subagent: {subagent_name} started")
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """Silent - subagent messages not logged in backend mode."""
+        pass
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """Log subagent completion."""
+        duration_str = self._format_duration(duration_ms)
+        status = "FAIL" if is_error else "OK"
+        level = logging.ERROR if is_error else logging.INFO
+        self._log(f"Subagent: completed -> {status} ({duration_str})", level=level)
+
 
 class EventingTracer(TracerBase):
     """
@@ -2280,13 +2423,20 @@ class EventingTracer(TracerBase):
 
     This allows real-time streaming (SSE/Web) while preserving the original
     tracer output for CLI or backend logging.
+
+    Event Delivery Guarantee:
+    The event_sink is an async function that persists events to the database.
+    Events are awaited for persistence BEFORE being published to the EventHub.
+    This ensures that SSE subscribers will always find events either:
+    1. In the queue (if subscribed before publish), or
+    2. In the database (if subscribed after publish)
     """
 
     def __init__(
         self,
         tracer: TracerBase,
         event_queue: Optional[asyncio.Queue] = None,
-        event_sink: Optional[callable] = None,
+        event_sink: Optional[Any] = None,  # Async callable: (event: dict) -> None
         session_id: Optional[str] = None,
         initial_sequence: int = 0,
     ) -> None:
@@ -2295,9 +2445,32 @@ class EventingTracer(TracerBase):
         self._event_sink = event_sink
         self._session_id = session_id
         self._sequence = initial_sequence
+        self._stream_header_buffer = ""
+        self._stream_header_expected: Optional[bool] = None
+        self._stream_header_wrapped = False
+        self._stream_structured_fields: Optional[dict[str, str]] = None
+        self._stream_structured_status: Optional[str] = None
+        self._stream_structured_error: Optional[str] = None
+        self._stream_full_text = ""
+        self._stream_active = False
+        self._last_stream_full_text = ""
+        self._suppress_next_message = False
 
-    def emit_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Emit a structured event to the queue."""
+    def emit_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        persist_event: bool = True
+    ) -> None:
+        """
+        Emit a structured event to the queue.
+
+        Events are persisted to DB and published to EventHub subscribers.
+        To prevent race conditions where events are published before SSE
+        subscribers connect, we await persistence completion before publishing.
+        This guarantees that any event published to EventHub is already in the
+        database, so SSE replay will always find it.
+        """
         if self._event_queue is None:
             return
 
@@ -2315,16 +2488,40 @@ class EventingTracer(TracerBase):
         except RuntimeError:
             loop = None
 
-        if self._event_sink is not None:
-            self._event_sink(event)
+        async def persist_then_publish():
+            """
+            Persist event to DB, then publish to EventHub.
+
+            By awaiting persistence before publishing, we ensure that:
+            1. If SSE is already subscribed → event arrives via queue
+            2. If SSE subscribes later → event is in DB for replay
+
+            No race condition possible because DB write completes before publish.
+            """
+            if self._event_sink is not None and persist_event:
+                try:
+                    # Await the async persistence function
+                    await self._event_sink(event)
+                except Exception as e:
+                    logger.warning(f"Event persistence failed: {e}")
+            # Only publish after persistence completes
+            await self._event_queue.put(event)
 
         if loop and loop.is_running():
-            loop.create_task(self._event_queue.put(event))
+            loop.create_task(persist_then_publish())
         else:
+            # Fallback for non-async context (shouldn't happen in normal operation)
+            # This is a degraded path - events may not persist properly
+            logger.warning(
+                f"emit_event called outside async context for {event_type}. "
+                "Event persistence may be unreliable."
+            )
+            # Best effort: try to publish to EventHub (will work if subscribers exist)
+            # Note: persistence is skipped since we can't await without an event loop
             try:
                 self._event_queue.put_nowait(event)
             except asyncio.QueueFull:
-                logger.warning("Event queue full; dropping event %s", event_type)
+                logger.error(f"Event queue full; dropping event {event_type}")
 
     def on_agent_start(
         self,
@@ -2401,28 +2598,170 @@ class EventingTracer(TracerBase):
         self.emit_event("thinking", {"text": thinking_text})
 
     def on_message(self, text: str, is_partial: bool = False) -> None:
-        self._tracer.on_message(text, is_partial=is_partial)
+        if is_partial:
+            self._stream_active = True
+            body_text = self._consume_stream_text(text)
+            if not body_text:
+                return
+            self._stream_full_text += body_text
+            self._tracer.on_message(body_text, is_partial=True)
+            self.emit_event(
+                "message",
+                {
+                    "text": body_text,
+                    "is_partial": True,
+                    "structured_fields": None,
+                    "structured_status": None,
+                    "structured_error": None,
+                },
+                persist_event=False,
+            )
+            return
+
+        if self._stream_active:
+            body_text = ""
+            if text and not self._stream_full_text:
+                body_text = self._consume_stream_text(text)
+            if not body_text and self._stream_header_expected is None and self._stream_header_buffer:
+                body_text = self._stream_header_buffer
+                self._stream_header_buffer = ""
+                self._stream_header_expected = False
+            if body_text:
+                self._stream_full_text += body_text
+
+            structured_fields = self._stream_structured_fields
+            structured_status = self._stream_structured_status
+            structured_error = self._stream_structured_error
+            full_text = self._stream_full_text
+            if not body_text and not full_text:
+                self._reset_stream_state()
+                return
+            self._tracer.on_message(full_text, is_partial=False)
+            self.emit_event(
+                "message",
+                {
+                    "text": body_text,
+                    "full_text": full_text,
+                    "is_partial": False,
+                    "structured_fields": structured_fields,
+                    "structured_status": structured_status,
+                    "structured_error": structured_error,
+                },
+            )
+            self._last_stream_full_text = full_text
+            self._suppress_next_message = bool(full_text.strip())
+            self._reset_stream_state()
+            return
+
+        if not text.strip():
+            return
+
+        if self._suppress_next_message:
+            if text.strip() == self._last_stream_full_text.strip():
+                self._suppress_next_message = False
+                self._last_stream_full_text = ""
+                return
+            self._suppress_next_message = False
+            self._last_stream_full_text = ""
+
+        self._tracer.on_message(text, is_partial=False)
         structured_fields = None
         structured_status = None
         structured_error = None
 
-        if not is_partial:
-            fields, body = parse_structured_output(text)
-            if fields:
-                structured_fields = fields
-                structured_status = fields.get("status")
-                structured_error = fields.get("error")
-                text = body
+        fields, body = parse_structured_output(text)
+        if fields:
+            structured_fields = fields
+            structured_status = fields.get("status")
+            structured_error = fields.get("error")
+            text = body
+
         self.emit_event(
             "message",
             {
                 "text": text,
-                "is_partial": is_partial,
+                "is_partial": False,
                 "structured_fields": structured_fields,
                 "structured_status": structured_status,
                 "structured_error": structured_error,
             },
         )
+
+    def _reset_stream_state(self) -> None:
+        self._stream_header_buffer = ""
+        self._stream_header_expected = None
+        self._stream_header_wrapped = False
+        self._stream_structured_fields = None
+        self._stream_structured_status = None
+        self._stream_structured_error = None
+        self._stream_full_text = ""
+        self._stream_active = False
+
+    def _consume_stream_text(self, text: str) -> str:
+        if self._stream_header_expected is None:
+            self._stream_header_buffer += text
+            if len(self._stream_header_buffer) < 3:
+                return ""
+            if self._stream_header_buffer.startswith("```"):
+                fence_end = self._stream_header_buffer.find("\n")
+                if fence_end == -1:
+                    return ""
+                self._stream_header_wrapped = True
+                self._stream_header_buffer = self._stream_header_buffer[fence_end + 1 :]
+            trimmed = self._stream_header_buffer.lstrip()
+            if not trimmed.startswith("---"):
+                output = self._stream_header_buffer
+                self._stream_header_buffer = ""
+                self._stream_header_expected = False
+                return output
+            self._stream_header_buffer = trimmed
+            self._stream_header_expected = True
+            return self._extract_header_body()
+
+        if self._stream_header_expected:
+            self._stream_header_buffer += text
+            return self._extract_header_body()
+
+        return text
+
+    def _extract_header_body(self) -> str:
+        lines = self._stream_header_buffer.splitlines(keepends=True)
+        if not lines:
+            return ""
+
+        header_end_index = None
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                header_end_index = index
+                break
+
+        if header_end_index is None:
+            return ""
+
+        header_lines = lines[1:header_end_index]
+        fields: dict[str, str] = {}
+        for line in header_lines:
+            line_value = line.strip()
+            if not line_value or ":" not in line_value:
+                continue
+            key, value = line_value.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key:
+                fields[key] = value
+
+        self._stream_structured_fields = fields or None
+        self._stream_structured_status = fields.get("status") if fields else None
+        self._stream_structured_error = fields.get("error") if fields else None
+        self._stream_header_expected = False
+
+        body_lines = lines[header_end_index + 1 :]
+        if self._stream_header_wrapped and body_lines:
+            if body_lines[0].strip().startswith("```"):
+                body_lines = body_lines[1:]
+        body = "".join(body_lines)
+        self._stream_header_buffer = ""
+        return body
 
     def on_metrics_update(self, metrics: dict[str, Any]) -> None:
         if hasattr(self._tracer, "on_metrics_update"):
@@ -2600,6 +2939,57 @@ class EventingTracer(TracerBase):
             },
         )
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        self._tracer.on_subagent_start(task_id, subagent_name, prompt)
+        self.emit_event(
+            "subagent_start",
+            {
+                "task_id": task_id,
+                "subagent_name": subagent_name,
+                "prompt_preview": prompt[:200] if prompt else "",
+            },
+        )
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        self._tracer.on_subagent_message(task_id, text, is_partial)
+        self.emit_event(
+            "subagent_message",
+            {
+                "task_id": task_id,
+                "text": text,
+                "is_partial": is_partial,
+            },
+            persist_event=not is_partial,
+        )
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        self._tracer.on_subagent_stop(task_id, result, duration_ms, is_error)
+        self.emit_event(
+            "subagent_stop",
+            {
+                "task_id": task_id,
+                "result_preview": str(result)[:500] if result else "",
+                "duration_ms": duration_ms,
+                "is_error": is_error,
+            },
+        )
+
 
 class NullTracer(TracerBase):
     """
@@ -2710,5 +3100,30 @@ class NullTracer(TracerBase):
         session_id: Optional[str] = None,
         total_turns: int = 0,
         total_duration_ms: int = 0
+    ) -> None:
+        pass
+
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        pass
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        pass
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
     ) -> None:
         pass

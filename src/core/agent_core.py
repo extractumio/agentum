@@ -502,6 +502,9 @@ class ClaudeAgent:
             resume=resume_id,  # Claude's session ID for resumption
             fork_session=fork_session,  # Fork instead of continue when resuming
             enable_file_checkpointing=self._config.enable_file_checkpointing,
+            max_buffer_size=self._config.max_buffer_size,
+            output_format=self._config.output_format,
+            include_partial_messages=self._config.include_partial_messages,
         )
 
     def _build_user_prompt(

@@ -648,7 +648,8 @@ class TestAgentExecution:
                 f"Unexpected output status: {output_status}"
 
         # Verify session completed or at least ran
-        assert final_status in ("completed", "running", "pending"), \
+        # Note: both "complete" and "completed" are valid completion statuses
+        assert final_status in ("completed", "complete", "running", "pending"), \
             f"Session ended with unexpected status: {final_status}"
 
         # Verify result contains session info

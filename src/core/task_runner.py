@@ -95,6 +95,15 @@ async def execute_agent_task(
         params.enable_file_checkpointing if params.enable_file_checkpointing is not None
         else config_data["enable_file_checkpointing"]
     )
+    max_buffer_size = (
+        params.max_buffer_size if params.max_buffer_size is not None
+        else config_data.get("max_buffer_size")
+    )
+    output_format = params.output_format or config_data.get("output_format")
+    include_partial_messages = (
+        params.include_partial_messages if params.include_partial_messages is not None
+        else config_data.get("include_partial_messages", False)
+    )
 
     logger.info(f"Config: model={model}, max_turns={max_turns}, timeout={timeout_seconds}s")
 
@@ -132,9 +141,9 @@ async def execute_agent_task(
         additional_dirs=params.additional_dirs,
         allowed_tools=allowed_tools,
         permissions_config=None,  # Not used with permission profiles
-        max_buffer_size=config_data.get("max_buffer_size"),
-        output_format=config_data.get("output_format"),
-        include_partial_messages=config_data.get("include_partial_messages", False),
+        max_buffer_size=max_buffer_size,
+        output_format=output_format,
+        include_partial_messages=include_partial_messages,
     )
 
     # 7. Determine tracer
@@ -167,4 +176,3 @@ async def execute_agent_task(
     )
 
     return result
-

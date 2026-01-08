@@ -181,11 +181,12 @@ class TestAgentRunnerResults:
         """Cleanup removes session data."""
         runner = AgentRunner()
 
-        runner._event_queues["session"] = asyncio.Queue()
+        # Set up test data using the current API
         runner._results["session"] = {"status": "completed"}
 
         runner.cleanup_session("session")
 
+        # get_event_queue is deprecated and always returns None
         assert runner.get_event_queue("session") is None
         assert runner.get_result("session") is None
 

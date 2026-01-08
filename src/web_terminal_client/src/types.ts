@@ -13,7 +13,10 @@ export type SSEEventType =
   | 'conversation_turn'
   | 'session_connect'
   | 'session_disconnect'
-  | 'cancelled';
+  | 'cancelled'
+  | 'subagent_start'
+  | 'subagent_message'
+  | 'subagent_stop';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -40,6 +43,7 @@ export interface SessionResponse {
   duration_ms?: number | null;
   total_cost_usd?: number | null;
   cancel_requested: boolean;
+  resumable?: boolean;
 }
 
 export interface SessionListResponse {

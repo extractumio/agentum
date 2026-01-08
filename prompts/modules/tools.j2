@@ -1,8 +1,17 @@
 {# Module: Tools - Dynamic tool permissions display #}
+
+**Tool usage policy**
+- When doing file search, prefer to use the Agentum tool in order to reduce context usage.
+- You should proactively use the Agentum tool with specialized agents when the task at hand matches the agent's description.
+- When `WebFetch` returns a message about a redirect to a different host, you should immediately make a new `WebFetch` request with the redirect URL provided in the response.
+- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead. Never use placeholders or guess missing parameters in tool calls.
+- If the user specifies that they want you to run tools "in parallel", you MUST send a single message with multiple tool use content blocks. For example, if you need to launch multiple agents in parallel, send a single message with multiple Agent tool calls.
+
 {% if permissions %}
 **Permission Profile: {{ permissions.name }}**
 {{ permissions.description }}
 
+Agentum Tools:
 *Enabled Tools:* {{ permissions.enabled_tools | join(', ') }}
 {% if permissions.disabled_tools %}
 *Disabled Tools:* {{ permissions.disabled_tools | join(', ') }}
@@ -20,7 +29,13 @@
 {% if bash_allow %}
 ALLOWED: {% for p in bash_allow %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %}
 
+**Bash Execution Rules**
+- **Always save the output of the command to a file** in the workspace directory under ./tasks/<task_id>/<command_output>.txt. 
+  E.g. create ./tasks/12356/001-ls_command_output.txt.
+- Fail fast on errors - do not proceed after major or critical failures.
+
 {% endif %}
+
 {% if bash_deny | contains("Bash(*)") %}
 BLOCKED: All Bash except explicitly allowed patterns above.
 {% endif %}
@@ -36,3 +51,9 @@ BLOCKED: All Bash except explicitly allowed patterns above.
 
 **Enforcement**: Permission denials use pattern matching. After 3 failed attempts, agent stops.
 {% endif %}
+
+Tool usage rules:
+- Only use tools to complete tasks. 
+- Do not use a colon before tool calls. 
+
+You must NEVER use absolute paths in tool calls, use relative paths instead.

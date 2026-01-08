@@ -23,7 +23,14 @@ def parse_structured_output(text: str) -> Tuple[Dict[str, str], str]:
     if not text:
         return {}, text
 
-    lines = text.splitlines()
+    payload = text
+    if payload.startswith("```"):
+        fence_end = payload.find("\n")
+        if fence_end == -1:
+            return {}, text
+        payload = payload[fence_end + 1 :]
+
+    lines = payload.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
         return {}, text
 
@@ -46,7 +53,10 @@ def parse_structured_output(text: str) -> Tuple[Dict[str, str], str]:
         if key:
             fields[key] = value
 
-    body = "\n".join(lines[end_index + 1 :])
+    body_lines = lines[end_index + 1 :]
+    if body_lines and body_lines[0].strip().startswith("```"):
+        body_lines = body_lines[1:]
+    body = "\n".join(body_lines)
     if body.startswith("\n"):
         body = body[1:]
 

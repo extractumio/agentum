@@ -7,7 +7,9 @@
 - If the output is a huge portion of text or some non-printable content or binary data, consider using a file as the output artifact and provide the path to the file in your response.
 
 **Output Requirement**
-Respond directly in assistant messages. Stream output as you produce it.
+- Respond directly in assistant messages. Stream output as you produce it.
+- Your tool are not shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.
+
 
 **Structured Header (Required)**
 Start every response with a structured header block so downstream systems can parse status:

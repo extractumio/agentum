@@ -4,10 +4,19 @@ Session management for Agentum.
 Handles session creation, persistence, and resumption.
 Each session has an isolated workspace with:
 - skills/ - On-demand copied skills from global skills library
+
+Implements robustness features:
+- Thread-safe skill copying with file locking
+- Atomic file writes for session info
+- Proper error handling and logging
 """
+import fcntl
 import json
 import logging
+import os
 import shutil
+import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +42,10 @@ class SessionManager:
     - Session metadata (session_info.json)
     - Agent logs (agent.jsonl)
     - Output files created by the agent in workspace
+
+    Thread-safety:
+    - Uses file locking for concurrent skill copying
+    - Uses atomic writes for session info updates
     """
 
     def __init__(self, sessions_dir: Path) -> None:
@@ -44,6 +57,8 @@ class SessionManager:
         """
         self._sessions_dir = sessions_dir
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        # Lock for skill copying operations
+        self._skill_copy_lock = threading.Lock()
 
     def create_session(
         self,
@@ -149,6 +164,8 @@ class SessionManager:
         This enables skills to read/write files in their own folder
         with full isolation between sessions.
 
+        Thread-safe: Uses locking to prevent concurrent copy race conditions.
+
         Args:
             session_id: The session ID.
             skill_name: Name of the skill (folder name).
@@ -158,7 +175,7 @@ class SessionManager:
             Path to the copied skill folder in the workspace.
 
         Raises:
-            SessionError: If the skill source doesn't exist.
+            SessionError: If the skill source doesn't exist or copy fails.
         """
         if not skill_source_dir.exists():
             raise SessionError(
@@ -168,20 +185,64 @@ class SessionManager:
         workspace_skills = self.get_workspace_skills_dir(session_id)
         target_skill_dir = workspace_skills / skill_name
 
-        # Skip if already copied
-        if target_skill_dir.exists():
-            logger.debug(
-                f"Skill '{skill_name}' already in workspace for session {session_id}"
-            )
-            return target_skill_dir
+        # Use lock to prevent race condition when multiple threads try to copy
+        with self._skill_copy_lock:
+            # Check again inside lock (double-checked locking pattern)
+            if target_skill_dir.exists():
+                logger.debug(
+                    f"Skill '{skill_name}' already in workspace for session {session_id}"
+                )
+                return target_skill_dir
 
-        # Copy the entire skill folder
-        shutil.copytree(skill_source_dir, target_skill_dir)
-        logger.info(
-            f"Copied skill '{skill_name}' to workspace for session {session_id}"
-        )
+            # Use a temporary directory for atomic copy
+            temp_dir = None
+            try:
+                # Create temp directory in same parent for atomic rename
+                temp_dir = tempfile.mkdtemp(
+                    dir=workspace_skills,
+                    prefix=f".{skill_name}_"
+                )
+                temp_skill_dir = Path(temp_dir)
 
-        return target_skill_dir
+                # Copy to temp location
+                # Remove temp dir first since copytree needs target to not exist
+                shutil.rmtree(temp_skill_dir)
+                shutil.copytree(skill_source_dir, temp_skill_dir)
+
+                # Atomic rename to final location
+                try:
+                    os.rename(temp_skill_dir, target_skill_dir)
+                except OSError as e:
+                    # Another thread may have created the directory
+                    if target_skill_dir.exists():
+                        logger.debug(
+                            f"Skill '{skill_name}' was copied by another thread"
+                        )
+                        # Clean up temp directory
+                        if temp_skill_dir.exists():
+                            shutil.rmtree(temp_skill_dir)
+                        return target_skill_dir
+                    raise SessionError(
+                        f"Failed to finalize skill copy for '{skill_name}': {e}"
+                    ) from e
+
+                logger.info(
+                    f"Copied skill '{skill_name}' to workspace for session {session_id}"
+                )
+                return target_skill_dir
+
+            except Exception as e:
+                # Clean up temp directory on failure
+                if temp_dir and Path(temp_dir).exists():
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except Exception:
+                        pass
+                if not isinstance(e, SessionError):
+                    raise SessionError(
+                        f"Failed to copy skill '{skill_name}': {e}"
+                    ) from e
+                raise
 
     def is_skill_in_workspace(self, session_id: str, skill_name: str) -> bool:
         """
@@ -235,10 +296,50 @@ class SessionManager:
                 )
 
     def _save_session_info(self, session_info: SessionInfo) -> None:
-        """Save session info to disk."""
+        """
+        Save session info to disk atomically.
+
+        Uses a temporary file and atomic rename to prevent corruption
+        if the process crashes mid-write.
+        """
         session_dir = self.get_session_dir(session_info.session_id)
         info_file = session_dir / "session_info.json"
-        info_file.write_text(session_info.model_dump_json(indent=2))
+
+        # Write to temporary file first
+        temp_fd = None
+        temp_path = None
+        try:
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=session_dir,
+                prefix=".session_info_",
+                suffix=".tmp"
+            )
+            # Write JSON content
+            content = session_info.model_dump_json(indent=2)
+            os.write(temp_fd, content.encode('utf-8'))
+            os.fsync(temp_fd)  # Ensure data is flushed to disk
+            os.close(temp_fd)
+            temp_fd = None
+
+            # Atomic rename
+            os.rename(temp_path, info_file)
+            temp_path = None  # Mark as successfully moved
+
+        except Exception as e:
+            logger.error(f"Failed to save session info: {e}")
+            raise
+        finally:
+            # Clean up on failure
+            if temp_fd is not None:
+                try:
+                    os.close(temp_fd)
+                except Exception:
+                    pass
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
 
     def load_session(self, session_id: str) -> SessionInfo:
         """

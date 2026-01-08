@@ -31,7 +31,7 @@ agent:
   max_buffer_size: null
 
   # Output format: null (default), text, json, stream-json
-  output_format: null
+  output_format: stream-json
 
   # Include partial/incomplete messages in output
-  include_partial_messages: false
+  include_partial_messages: true

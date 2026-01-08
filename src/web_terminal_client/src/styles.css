@@ -151,7 +151,7 @@ body,
   color: var(--color-text-bright);
   font-size: 12px;
   display: inline-block;
-  min-width: 12ch;
+  min-width: 190px;
   text-align: left;
 }
 
@@ -369,6 +369,10 @@ body,
 
 .user-message {
   border-left-color: var(--color-cyan);
+}
+
+.user-message .message-content {
+  color: var(--color-cyan);
 }
 
 .agent-message {
@@ -771,6 +775,10 @@ body,
 
 .output-status-running {
   border-left-color: var(--color-cyan);
+}
+
+.output-status-cancelled {
+  border-left-color: var(--color-orange);
 }
 
 .output-comments {
@@ -1525,4 +1533,64 @@ body,
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Subagent styles */
+.subagent-section {
+  margin-top: 8px;
+  padding-bottom: 10px;
+}
+
+.subagent-title {
+  color: var(--color-dim);
+  font-size: 11px;
+  margin: 8px 0 6px;
+}
+
+.subagent-call {
+  margin-bottom: 4px;
+}
+
+.subagent-call-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.subagent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 183, 235, 0.15);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.subagent-icon {
+  color: var(--color-cyan);
+}
+
+.subagent-name {
+  color: var(--color-cyan);
+  font-weight: 500;
+}
+
+.subagent-spinner {
+  color: var(--color-cyan);
+  margin-left: 4px;
+}
+
+.subagent-duration {
+  color: var(--color-dim);
+  font-size: 11px;
+}
+
+.subagent-call-body {
+  padding-left: 44px;
+  padding-bottom: 6px;
+  border-left: 1px dashed var(--color-border);
+  margin-left: 6px;
 }

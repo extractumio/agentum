@@ -486,7 +486,7 @@ class TestSessionGet:
         client: TestClient,
         auth_headers: dict
     ) -> None:
-        """Returns 404 for non-existent session."""
+        """Returns 404 for non-existent session (invalid format)."""
         response = client.get(
             "/api/v1/sessions/nonexistent-session-id",
             headers=auth_headers
@@ -495,7 +495,24 @@ class TestSessionGet:
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data
+        # Error message mentions the invalid session ID
         assert "nonexistent-session-id" in data["detail"]
+
+    @pytest.mark.unit
+    def test_get_session_not_found_valid_format(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Returns 404 for non-existent session with valid ID format."""
+        response = client.get(
+            "/api/v1/sessions/20250101_000000_deadbeef",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
 
     @pytest.mark.unit
     def test_get_session_wrong_user(self, client: TestClient) -> None:
@@ -606,9 +623,26 @@ class TestSessionTask:
         client: TestClient,
         auth_headers: dict
     ) -> None:
-        """Returns 404 for non-existent session."""
+        """Returns 404 for non-existent session (invalid format)."""
         response = client.post(
             "/api/v1/sessions/nonexistent/task",
+            headers=auth_headers,
+            json={"task": "Test"}
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_start_task_not_found_valid_format(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Returns 404 for non-existent session with valid ID format."""
+        response = client.post(
+            "/api/v1/sessions/20250101_000000_deadbeef/task",
             headers=auth_headers,
             json={"task": "Test"}
         )
@@ -703,9 +737,25 @@ class TestSessionCancel:
         client: TestClient,
         auth_headers: dict
     ) -> None:
-        """Returns 404 for non-existent session."""
+        """Returns 404 for non-existent session (invalid format)."""
         response = client.post(
             "/api/v1/sessions/nonexistent/cancel",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_cancel_not_found_valid_format(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Returns 404 for non-existent session with valid ID format."""
+        response = client.post(
+            "/api/v1/sessions/20250101_000000_deadbeef/cancel",
             headers=auth_headers
         )
 
@@ -782,9 +832,25 @@ class TestSessionResult:
         client: TestClient,
         auth_headers: dict
     ) -> None:
-        """Returns 404 for non-existent session."""
+        """Returns 404 for non-existent session (invalid format)."""
         response = client.get(
             "/api/v1/sessions/nonexistent/result",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
+    @pytest.mark.unit
+    def test_get_result_not_found_valid_format(
+        self,
+        client: TestClient,
+        auth_headers: dict
+    ) -> None:
+        """Returns 404 for non-existent session with valid ID format."""
+        response = client.get(
+            "/api/v1/sessions/20250101_000000_deadbeef/result",
             headers=auth_headers
         )
 

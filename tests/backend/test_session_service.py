@@ -155,9 +155,10 @@ class TestSessionServiceQuery:
         """Returns None for non-existent session."""
         service, user_id = session_service_with_user
 
+        # Use a valid format session ID that doesn't exist
         session = await service.get_session(
             db=test_session,
-            session_id="nonexistent",
+            session_id="20250101_000000_deadbeef",
             user_id=user_id
         )
 

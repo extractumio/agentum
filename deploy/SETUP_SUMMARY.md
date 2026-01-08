@@ -137,4 +137,3 @@ docker-compose build --no-cache
 # Check Redis connection (from host)
 redis-cli -p 46379 ping
 ```
-

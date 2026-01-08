@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from ..config import CONFIG_DIR, ConfigNotFoundError, ConfigValidationError
+from ..services.session_service import InvalidSessionIdError, SessionNotFoundError
 from ..core.logging_config import setup_backend_logging
 from ..db.database import init_db, DATABASE_PATH
 from .routes import auth_router, health_router, sessions_router
@@ -237,6 +239,28 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
+
+    # Exception handlers for session-related errors
+    @app.exception_handler(InvalidSessionIdError)
+    async def invalid_session_id_handler(
+        request: Request, exc: InvalidSessionIdError
+    ) -> JSONResponse:
+        """Convert InvalidSessionIdError to 404 response."""
+        # Extract session ID from the error message for the response
+        return JSONResponse(
+            status_code=404,
+            content={"detail": str(exc)},
+        )
+
+    @app.exception_handler(SessionNotFoundError)
+    async def session_not_found_handler(
+        request: Request, exc: SessionNotFoundError
+    ) -> JSONResponse:
+        """Convert SessionNotFoundError to 404 response."""
+        return JSONResponse(
+            status_code=404,
+            content={"detail": str(exc)},
+        )
 
     return app
 

@@ -105,6 +105,9 @@ const source = new EventSource(url);
 | `tool_start`, `tool_complete` | ✅ Yes | ✅ Yes |
 | `agent_start`, `agent_complete` | ✅ Yes | ✅ Yes |
 | `error`, `cancelled` | ✅ Yes | ✅ Yes |
+| `subagent_start`, `subagent_stop` | ✅ Yes | ✅ Yes |
+| Partial `subagent_message` (`is_partial: true`) | ✅ Yes | ❌ No |
+| Final `subagent_message` (`is_partial: false`) | ✅ Yes | ✅ Yes |
 
 **Algorithm Notes:**
 - Streaming events are emitted as partial chunks to the UI for real-time feedback
@@ -154,6 +157,14 @@ A task terminates when:
 | `agent_complete` | Task finished | `status`, `num_turns`, `duration_ms`, `total_cost_usd`, `usage`, `model` |
 | `error` | Error occurred | `message`, `error_type` |
 | `cancelled` | Task was cancelled | `message`, `resumable` |
+
+### Subagent Event Types
+
+| Event Type | When Emitted | Key Data Fields |
+|------------|--------------|-----------------|
+| `subagent_start` | Task tool invokes a subagent | `task_id`, `subagent_name`, `prompt_preview` |
+| `subagent_message` | Message from subagent context | `task_id`, `text`, `is_partial` |
+| `subagent_stop` | Subagent completes | `task_id`, `result_preview`, `duration_ms`, `is_error` |
 
 ### Additional Event Types
 

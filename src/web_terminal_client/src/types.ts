@@ -13,7 +13,10 @@ export type SSEEventType =
   | 'conversation_turn'
   | 'session_connect'
   | 'session_disconnect'
-  | 'cancelled';
+  | 'cancelled'
+  | 'subagent_start'
+  | 'subagent_message'
+  | 'subagent_stop';
 
 export interface SSEEvent {
   type: SSEEventType;

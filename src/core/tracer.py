@@ -337,6 +337,63 @@ class TracerBase(ABC):
         """Called when a conversation session disconnects."""
         pass
 
+    # ═══════════════════════════════════════════════════════════════
+    # Subagent tracing methods (for Task tool)
+    # ═══════════════════════════════════════════════════════════════
+
+    @abstractmethod
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """
+        Called when a Task tool invocation starts a subagent.
+
+        Args:
+            task_id: The tool_use_id of the Task tool call.
+            subagent_name: The subagent type (from Task tool input).
+            prompt: The task prompt given to the subagent.
+        """
+        pass
+
+    @abstractmethod
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """
+        Called for messages from within a subagent context.
+
+        Args:
+            task_id: The tool_use_id of the parent Task tool call.
+            text: The message text from the subagent.
+            is_partial: Whether this is a partial streaming message.
+        """
+        pass
+
+    @abstractmethod
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """
+        Called when a subagent completes.
+
+        Args:
+            task_id: The tool_use_id of the Task tool call.
+            result: The result returned by the subagent.
+            duration_ms: Duration of subagent execution.
+            is_error: Whether the subagent completed with an error.
+        """
+        pass
+
 
 class ExecutionTracer(TracerBase):
     """
@@ -2038,6 +2095,61 @@ class QuietTracer(TracerBase):
         """Report session disconnect."""
         print(f"[SESSION] Ended: {total_turns} turns, {total_duration_ms}ms")
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """Display subagent start with spinner."""
+        self._stop_spinner()
+        prompt_preview = truncate_text(prompt, 80) if prompt else ""
+        color = Color.CYAN if self.use_colors else ""
+        reset = Color.RESET if self.use_colors else ""
+        icon = Symbol.GEAR if self.use_unicode else ">"
+        print(f"  {color}{icon} Subagent: {subagent_name}{reset}")
+        if prompt_preview:
+            dim = Color.DIM if self.use_colors else ""
+            print(f"    {dim}{prompt_preview}{reset}")
+        self._start_spinner(f"Running subagent: {subagent_name}")
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """Display subagent messages (streaming or final)."""
+        if is_partial:
+            # For partial messages, just update spinner
+            return
+        # For final messages, show brief output
+        if text and text.strip():
+            self._stop_spinner()
+            preview = truncate_text(text.strip(), 60)
+            dim = Color.DIM if self.use_colors else ""
+            reset = Color.RESET if self.use_colors else ""
+            print(f"    {dim}[subagent] {preview}{reset}")
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """Display subagent completion."""
+        self._stop_spinner()
+        duration_str = format_duration(duration_ms)
+        if is_error:
+            color = Color.RED if self.use_colors else ""
+            icon = Symbol.CROSS if self.use_unicode else "X"
+        else:
+            color = Color.GREEN if self.use_colors else ""
+            icon = Symbol.CHECK if self.use_unicode else "+"
+        reset = Color.RESET if self.use_colors else ""
+        print(f"    {color}{icon} Subagent completed ({duration_str}){reset}")
+
 
 class BackendConsoleTracer(TracerBase):
     """
@@ -2272,6 +2384,37 @@ class BackendConsoleTracer(TracerBase):
         """Log session disconnect."""
         duration_str = self._format_duration(total_duration_ms)
         self._log(f"Session ended: {total_turns} turns, {duration_str}")
+
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """Log subagent start."""
+        self._log(f"Subagent: {subagent_name} started")
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """Silent - subagent messages not logged in backend mode."""
+        pass
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """Log subagent completion."""
+        duration_str = self._format_duration(duration_ms)
+        status = "FAIL" if is_error else "OK"
+        level = logging.ERROR if is_error else logging.INFO
+        self._log(f"Subagent: completed -> {status} ({duration_str})", level=level)
 
 
 class EventingTracer(TracerBase):
@@ -2796,6 +2939,57 @@ class EventingTracer(TracerBase):
             },
         )
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        self._tracer.on_subagent_start(task_id, subagent_name, prompt)
+        self.emit_event(
+            "subagent_start",
+            {
+                "task_id": task_id,
+                "subagent_name": subagent_name,
+                "prompt_preview": prompt[:200] if prompt else "",
+            },
+        )
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        self._tracer.on_subagent_message(task_id, text, is_partial)
+        self.emit_event(
+            "subagent_message",
+            {
+                "task_id": task_id,
+                "text": text,
+                "is_partial": is_partial,
+            },
+            persist_event=not is_partial,
+        )
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        self._tracer.on_subagent_stop(task_id, result, duration_ms, is_error)
+        self.emit_event(
+            "subagent_stop",
+            {
+                "task_id": task_id,
+                "result_preview": str(result)[:500] if result else "",
+                "duration_ms": duration_ms,
+                "is_error": is_error,
+            },
+        )
+
 
 class NullTracer(TracerBase):
     """
@@ -2906,5 +3100,30 @@ class NullTracer(TracerBase):
         session_id: Optional[str] = None,
         total_turns: int = 0,
         total_duration_ms: int = 0
+    ) -> None:
+        pass
+
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        pass
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        pass
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
     ) -> None:
         pass

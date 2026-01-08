@@ -16,6 +16,7 @@ Usage:
         async for message in client.receive_response():
             processor.process_message(message)
 """
+import time
 from typing import Any, Optional, Union
 from claude_agent_sdk import (
     AssistantMessage,
@@ -86,6 +87,10 @@ class TraceProcessor:
         self._cumulative_turns: Optional[int] = None
         self._cumulative_tokens: Optional[int] = None
         self._stream_has_text = False
+        # Subagent tracking: task_id -> {name, start_time, prompt}
+        self._active_subagents: dict[str, dict[str, Any]] = {}
+        # Current parent_tool_use_id for routing subagent messages
+        self._current_parent_tool_use_id: Optional[str] = None
 
     def set_task(self, task: str) -> None:
         """
@@ -224,6 +229,22 @@ class TraceProcessor:
             self._metrics_turns += 1
             self._emit_metrics_update()
 
+            # Track Task tool invocations for subagent tracing
+            if block.name == "Task":
+                tool_input = block.input if isinstance(block.input, dict) else {}
+                subagent_name = tool_input.get("subagent_type", "unknown")
+                prompt = tool_input.get("prompt", "")
+                self._active_subagents[block.id] = {
+                    "name": subagent_name,
+                    "start_time": time.time(),
+                    "prompt": prompt,
+                }
+                self.tracer.on_subagent_start(
+                    task_id=block.id,
+                    subagent_name=subagent_name,
+                    prompt=prompt
+                )
+
         elif isinstance(block, ToolResultBlock):
             tool_id = block.tool_use_id
             tool_info = self._pending_tool_calls.pop(tool_id, {})
@@ -236,6 +257,17 @@ class TraceProcessor:
                 duration_ms=0,  # Will be calculated by tracer
                 is_error=block.is_error or False
             )
+
+            # Handle Task tool completion for subagent tracing
+            if tool_id in self._active_subagents:
+                subagent_info = self._active_subagents.pop(tool_id)
+                duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
+                self.tracer.on_subagent_stop(
+                    task_id=tool_id,
+                    result=block.content,
+                    duration_ms=duration_ms,
+                    is_error=block.is_error or False
+                )
 
         elif isinstance(block, dict):
             # Handle dict-style blocks (from JSON parsing)
@@ -250,15 +282,33 @@ class TraceProcessor:
         elif "name" in block and "input" in block:
             # Tool use
             tool_id = block.get("id", "unknown")
+            tool_name = block["name"]
+            tool_input = block["input"]
             self._pending_tool_calls[tool_id] = {
-                "name": block["name"],
-                "input": block["input"],
+                "name": tool_name,
+                "input": tool_input,
             }
             self.tracer.on_tool_start(
-                tool_name=block["name"],
-                tool_input=block["input"],
+                tool_name=tool_name,
+                tool_input=tool_input,
                 tool_id=tool_id
             )
+
+            # Track Task tool invocations for subagent tracing
+            if tool_name == "Task":
+                input_dict = tool_input if isinstance(tool_input, dict) else {}
+                subagent_name = input_dict.get("subagent_type", "unknown")
+                prompt = input_dict.get("prompt", "")
+                self._active_subagents[tool_id] = {
+                    "name": subagent_name,
+                    "start_time": time.time(),
+                    "prompt": prompt,
+                }
+                self.tracer.on_subagent_start(
+                    task_id=tool_id,
+                    subagent_name=subagent_name,
+                    prompt=prompt
+                )
         elif "tool_use_id" in block:
             # Tool result
             tool_id = block["tool_use_id"]
@@ -270,6 +320,17 @@ class TraceProcessor:
                 duration_ms=0,
                 is_error=block.get("is_error", False)
             )
+
+            # Handle Task tool completion for subagent tracing
+            if tool_id in self._active_subagents:
+                subagent_info = self._active_subagents.pop(tool_id)
+                duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
+                self.tracer.on_subagent_stop(
+                    task_id=tool_id,
+                    result=block.get("content", ""),
+                    duration_ms=duration_ms,
+                    is_error=block.get("is_error", False)
+                )
 
     def _handle_user_message(self, msg: UserMessage) -> None:
         """Handle user input messages."""
@@ -297,18 +358,38 @@ class TraceProcessor:
         event_type = raw_event.get("type")
         usage = None
 
+        # Check for parent_tool_use_id to identify subagent context
+        parent_tool_use_id = raw_event.get("parent_tool_use_id")
+        if parent_tool_use_id:
+            self._current_parent_tool_use_id = parent_tool_use_id
+
         if event_type == "message_start":
             self._stream_has_text = False
             message = raw_event.get("message", {})
             if isinstance(message, dict):
                 usage = message.get("usage")
+                # Check for parent_tool_use_id in message as well
+                msg_parent_id = message.get("parent_tool_use_id")
+                if msg_parent_id:
+                    self._current_parent_tool_use_id = msg_parent_id
         elif event_type == "message_delta":
             usage = raw_event.get("usage")
         elif event_type == "message_stop":
             usage = raw_event.get("usage")
             if self._stream_has_text:
-                self.tracer.on_message("", is_partial=False)
+                # Route final message to appropriate handler
+                if self._current_parent_tool_use_id and \
+                   self._current_parent_tool_use_id in self._active_subagents:
+                    self.tracer.on_subagent_message(
+                        task_id=self._current_parent_tool_use_id,
+                        text="",
+                        is_partial=False
+                    )
+                else:
+                    self.tracer.on_message("", is_partial=False)
                 self._stream_has_text = False
+            # Clear parent context on message stop
+            self._current_parent_tool_use_id = None
         else:
             usage = raw_event.get("usage")
 
@@ -318,14 +399,32 @@ class TraceProcessor:
                 text = content_block.get("text")
                 if isinstance(text, str) and text:
                     self._stream_has_text = True
-                    self.tracer.on_message(text, is_partial=True)
+                    # Route to subagent handler if in subagent context
+                    if self._current_parent_tool_use_id and \
+                       self._current_parent_tool_use_id in self._active_subagents:
+                        self.tracer.on_subagent_message(
+                            task_id=self._current_parent_tool_use_id,
+                            text=text,
+                            is_partial=True
+                        )
+                    else:
+                        self.tracer.on_message(text, is_partial=True)
         elif event_type == "content_block_delta":
             delta = raw_event.get("delta", {})
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 text = delta.get("text")
                 if isinstance(text, str) and text:
                     self._stream_has_text = True
-                    self.tracer.on_message(text, is_partial=True)
+                    # Route to subagent handler if in subagent context
+                    if self._current_parent_tool_use_id and \
+                       self._current_parent_tool_use_id in self._active_subagents:
+                        self.tracer.on_subagent_message(
+                            task_id=self._current_parent_tool_use_id,
+                            text=text,
+                            is_partial=True
+                        )
+                    else:
+                        self.tracer.on_message(text, is_partial=True)
 
         if isinstance(usage, dict):
             self._apply_usage_update(usage)

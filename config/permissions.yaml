@@ -111,9 +111,6 @@ session_workspace:
 
   allowed_dirs:
     - "{workspace}"
-    # We include /skills here so the permissions manager knows this is a valid target 
-    # for reading, even if the agent accesses it via ./skills (which resolves to /skills)
-    - "/skills"
 
 # Sandbox configuration (bubblewrap). Toggle for non-docker runs as needed.
 sandbox:

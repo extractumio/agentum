@@ -28,6 +28,7 @@ type ConversationItem =
       time: string;
       content: string;
       toolCalls: ToolCallView[];
+      subagents: SubagentView[];
       status?: ResultStatus;
       comments?: string;
       files?: string[];
@@ -57,6 +58,18 @@ type ToolCallView = {
   thinking?: string;
   error?: string;
   suggestion?: string;
+};
+
+type SubagentView = {
+  id: string;
+  taskId: string;
+  name: string;
+  time: string;
+  status: 'running' | 'complete' | 'failed';
+  durationMs?: number;
+  promptPreview?: string;
+  resultPreview?: string;
+  messageBuffer?: string;
 };
 
 type TodoItem = {
@@ -757,6 +770,75 @@ function ToolCallBlock({
   );
 }
 
+function SubagentBlock({
+  subagent,
+  expanded,
+  onToggle,
+  isLast,
+}: {
+  subagent: SubagentView;
+  expanded: boolean;
+  onToggle: () => void;
+  isLast: boolean;
+}): JSX.Element {
+  const hasContent = Boolean(subagent.promptPreview || subagent.resultPreview || subagent.messageBuffer);
+  const treeChar = isLast ? '└──' : '├──';
+  const isRunning = subagent.status === 'running';
+  const frame = useSpinnerFrame();
+  const previewText = subagent.resultPreview || subagent.messageBuffer || subagent.promptPreview || '';
+
+  return (
+    <div className="subagent-call">
+      <div className="subagent-call-header" onClick={hasContent ? onToggle : undefined} role="button">
+        <span className="tool-tree">{treeChar}</span>
+        {hasContent && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
+        <span className="subagent-tag">
+          <span className="subagent-icon">◈</span>
+          <span className="subagent-name">{subagent.name}</span>
+        </span>
+        <span className="tool-time">@ {subagent.time}</span>
+        {isRunning && (
+          <span className="subagent-spinner">{SPINNER_FRAMES[frame]}</span>
+        )}
+        {!isRunning && subagent.durationMs !== undefined && (
+          <span className="subagent-duration">({formatDuration(subagent.durationMs)})</span>
+        )}
+        {!expanded && previewText && (
+          <span className="tool-preview">
+            — {previewText.slice(0, 60)}
+            {previewText.length > 60 ? '...' : ''}
+          </span>
+        )}
+      </div>
+      {expanded && hasContent && (
+        <div className="subagent-call-body">
+          {subagent.promptPreview && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ prompt ───────────</div>
+              <pre className="tool-section-body">{subagent.promptPreview}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {subagent.messageBuffer && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ messages ─────────</div>
+              <pre className="tool-section-body">{subagent.messageBuffer}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+          {subagent.resultPreview && (
+            <div className="tool-section">
+              <div className="tool-section-title">┌─ result ───────────</div>
+              <pre className="tool-section-body tool-output">{subagent.resultPreview}</pre>
+              <div className="tool-section-title">└────────────────────</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultSection({
   comments,
   commentsExpanded,
@@ -845,9 +927,12 @@ function AgentMessageBlock({
   time,
   content,
   toolCalls,
+  subagents,
   todos,
   toolExpanded,
   onToggleTool,
+  subagentExpanded,
+  onToggleSubagent,
   status,
   structuredStatus,
   structuredError,
@@ -861,9 +946,12 @@ function AgentMessageBlock({
   time: string;
   content: string;
   toolCalls: ToolCallView[];
+  subagents: SubagentView[];
   todos?: TodoItem[];
   toolExpanded: Set<string>;
   onToggleTool: (id: string) => void;
+  subagentExpanded: Set<string>;
+  onToggleSubagent: (id: string) => void;
   status?: string;
   structuredStatus?: ResultStatus;
   structuredError?: string;
@@ -922,6 +1010,20 @@ function AgentMessageBlock({
                   expanded={toolExpanded.has(tool.id)}
                   onToggle={() => onToggleTool(tool.id)}
                   isLast={index === toolCalls.length - 1}
+                />
+              ))}
+            </div>
+          )}
+          {subagents.length > 0 && (
+            <div className="subagent-section">
+              <div className="subagent-title">SubAgents ({subagents.length})</div>
+              {subagents.map((subagent, index) => (
+                <SubagentBlock
+                  key={subagent.id}
+                  subagent={subagent}
+                  expanded={subagentExpanded.has(subagent.id)}
+                  onToggle={() => onToggleSubagent(subagent.id)}
+                  isLast={index === subagents.length - 1}
                 />
               ))}
             </div>
@@ -1323,6 +1425,7 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [expandedSubagents, setExpandedSubagents] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
@@ -1668,6 +1771,7 @@ export default function App(): JSX.Element {
     } else {
       setEvents([userEvent]);
       setExpandedTools(new Set());
+      setExpandedSubagents(new Set());
       setExpandedComments(new Set());
       setExpandedFiles(new Set());
       setStats({
@@ -1799,6 +1903,7 @@ export default function App(): JSX.Element {
     setEvents([]);
     setStatus('idle');
     setExpandedTools(new Set());
+    setExpandedSubagents(new Set());
     setExpandedComments(new Set());
     setExpandedFiles(new Set());
     setAttachedFiles([]);
@@ -1826,6 +1931,8 @@ export default function App(): JSX.Element {
 
     const items: ConversationItem[] = [];
     let pendingTools: ToolCallView[] = [];
+    let pendingSubagents: SubagentView[] = [];
+    const activeSubagentMap = new Map<string, SubagentView>();
     let pendingFiles = new Set<string>();
     let currentStreamMessage: ConversationItem | null = null;
     let streamBuffer = '';
@@ -1866,6 +1973,7 @@ export default function App(): JSX.Element {
           time: formatTimestamp(timestamp),
           content: '',
           toolCalls: pendingTools,
+          subagents: pendingSubagents,
         };
         if (!existing) {
           items.push(toolMessage);
@@ -1898,15 +2006,19 @@ export default function App(): JSX.Element {
               time: formatTimestamp(event.timestamp),
               content: '',
               toolCalls: pendingTools,
+              subagents: pendingSubagents,
             };
             items.push(currentStreamMessage);
             pendingTools = [];
+            pendingSubagents = [];
             streamMessageSeeded = true;
           }
           break;
         }
         case 'user_message': {
           pendingTools = [];
+          pendingSubagents = [];
+          activeSubagentMap.clear();
           pendingFiles = new Set();
           currentStreamMessage = null;
           streamBuffer = '';
@@ -1981,6 +2093,7 @@ export default function App(): JSX.Element {
                 time: formatTimestamp(event.timestamp),
                 content: streamBuffer,
                 toolCalls: pendingTools,
+                subagents: pendingSubagents,
               };
               if (!existing) {
                 items.push(currentStreamMessage);
@@ -1988,6 +2101,7 @@ export default function App(): JSX.Element {
                 currentStreamMessage.toolCalls = pendingTools;
               }
               pendingTools = [];
+              pendingSubagents = [];
             } else {
               currentStreamMessage.content = streamBuffer;
             }
@@ -2001,9 +2115,11 @@ export default function App(): JSX.Element {
           let finalText = '';
           if (fullText) {
             finalText = fullText;
-          } else if (currentStreamMessage || streamBuffer) {
+          } else if (streamBuffer) {
+            // Use accumulated stream buffer from partial messages
             finalText = streamBuffer;
           } else {
+            // Fallback to text field (used in history events)
             finalText = text;
           }
           finalText = finalText.trim();
@@ -2043,6 +2159,7 @@ export default function App(): JSX.Element {
               time: existing?.time ?? formatTimestamp(event.timestamp),
               content: bodyText,
               toolCalls: existing?.toolCalls ?? pendingTools,
+              subagents: existing?.subagents ?? pendingSubagents,
               structuredStatus: structuredInfo.status,
               structuredError: structuredInfo.error,
               structuredFields: structuredInfo.fields,
@@ -2057,6 +2174,7 @@ export default function App(): JSX.Element {
           }
 
           pendingTools = [];
+          pendingSubagents = [];
           attachFilesToMessage(lastAgentMessage);
           break;
         }
@@ -2070,16 +2188,18 @@ export default function App(): JSX.Element {
             streamBuffer = '';
           }
 
-          if (!lastAgentMessage && pendingTools.length > 0) {
+          if (!lastAgentMessage && (pendingTools.length > 0 || pendingSubagents.length > 0)) {
             const toolMessage: ConversationItem = {
               type: 'agent_message',
               id: `agent-${items.length}`,
               time: formatTimestamp(event.timestamp),
               content: '',
               toolCalls: pendingTools,
+              subagents: pendingSubagents,
             };
             items.push(toolMessage);
             pendingTools = [];
+            pendingSubagents = [];
             lastAgentMessage = toolMessage;
           }
 
@@ -2116,6 +2236,49 @@ export default function App(): JSX.Element {
             status: 'cancelled',
             error: 'Task was cancelled.',
           });
+          break;
+        }
+        case 'subagent_start': {
+          const taskId = String(event.data.task_id ?? '');
+          const subagentName = String(event.data.subagent_name ?? 'unknown');
+          const promptPreview = String(event.data.prompt_preview ?? '');
+          const subagent: SubagentView = {
+            id: `subagent-${taskId}`,
+            taskId,
+            name: subagentName,
+            time: formatTimestamp(event.timestamp),
+            status: 'running',
+            promptPreview,
+          };
+          pendingSubagents.push(subagent);
+          activeSubagentMap.set(taskId, subagent);
+          break;
+        }
+        case 'subagent_message': {
+          const taskId = String(event.data.task_id ?? '');
+          const text = String(event.data.text ?? '');
+          const isPartial = Boolean(event.data.is_partial);
+          const subagent = activeSubagentMap.get(taskId);
+          if (subagent) {
+            if (isPartial) {
+              subagent.messageBuffer = (subagent.messageBuffer ?? '') + text;
+            } else if (text) {
+              subagent.messageBuffer = (subagent.messageBuffer ?? '') + text;
+            }
+          }
+          break;
+        }
+        case 'subagent_stop': {
+          const taskId = String(event.data.task_id ?? '');
+          const resultPreview = String(event.data.result_preview ?? '');
+          const durationMs = Number(event.data.duration_ms ?? 0);
+          const isError = Boolean(event.data.is_error);
+          const subagent = activeSubagentMap.get(taskId);
+          if (subagent) {
+            subagent.status = isError ? 'failed' : 'complete';
+            subagent.durationMs = durationMs;
+            subagent.resultPreview = resultPreview;
+          }
           break;
         }
         default:
@@ -2337,6 +2500,18 @@ export default function App(): JSX.Element {
     });
   };
 
+  const toggleSubagent = (id: string) => {
+    setExpandedSubagents((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   const toggleComments = (id: string) => {
     setExpandedComments((prev) => {
       const next = new Set(prev);
@@ -2365,23 +2540,28 @@ export default function App(): JSX.Element {
     const allToolIds = conversation.flatMap((item) =>
       item.type === 'agent_message' ? item.toolCalls.map((tool) => tool.id) : []
     );
+    const allSubagentIds = conversation.flatMap((item) =>
+      item.type === 'agent_message' ? item.subagents.map((s) => s.id) : []
+    );
     const allOutputIds = outputItems.map((item) => item.id);
     const allAgentMessageIds = conversation
       .filter((item) => item.type === 'agent_message')
       .map((item) => item.id);
     setExpandedTools(new Set(allToolIds));
+    setExpandedSubagents(new Set(allSubagentIds));
     setExpandedComments(new Set([...allOutputIds, ...allAgentMessageIds]));
     setExpandedFiles(new Set([...allAgentMessageIds, ...allOutputIds]));
   };
 
   const collapseAllSections = () => {
     setExpandedTools(new Set());
+    setExpandedSubagents(new Set());
     setExpandedComments(new Set());
     setExpandedFiles(new Set());
   };
 
   const toggleAllSections = () => {
-    if (expandedTools.size > 0 || expandedComments.size > 0 || expandedFiles.size > 0) {
+    if (expandedTools.size > 0 || expandedSubagents.size > 0 || expandedComments.size > 0 || expandedFiles.size > 0) {
       collapseAllSections();
     } else {
       expandAllSections();
@@ -2479,9 +2659,12 @@ export default function App(): JSX.Element {
                       time={item.time}
                       content={item.content}
                       toolCalls={item.toolCalls}
+                      subagents={item.subagents}
                       todos={todos ?? undefined}
                       toolExpanded={expandedTools}
                       onToggleTool={toggleTool}
+                      subagentExpanded={expandedSubagents}
+                      onToggleSubagent={toggleSubagent}
                       status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
                       structuredStatus={item.structuredStatus}
                       structuredError={item.structuredError}

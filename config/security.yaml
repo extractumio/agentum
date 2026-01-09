@@ -1,0 +1,94 @@
+# Agentum Security Configuration
+# 
+# This configures the agent-level bubblewrap sandbox that wraps the entire
+# Claude Code agent process. All subprocess inherit these restrictions.
+#
+# Key principle: The agent runs inside an isolated namespace with only
+# the session directory and required system paths accessible.
+
+sandbox:
+  # Master switch for sandbox
+  # NOTE: Set to false by default until sandbox-SSE integration is complete
+  # When enabled, agent runs in bwrap but events aren't streamed to UI
+  enabled: false
+  
+  # Path to bubblewrap binary
+  bwrap_path: "bwrap"
+  
+  # Namespace isolation (all recommended for security)
+  unshare_pid: true   # Isolate PID namespace (ps only sees sandbox processes)
+  unshare_ipc: true   # Isolate IPC namespace
+  unshare_uts: true   # Isolate UTS namespace (hostname)
+  
+  # Temp filesystem size for /tmp
+  tmpfs_size: "100M"
+  
+  # System mounts (read-only, required for agent to run)
+  # These are the minimum paths needed for Python and shell to work
+  system_mounts:
+    - source: "/usr"
+      target: "/usr"
+      mode: "ro"
+    - source: "/lib"
+      target: "/lib"
+      mode: "ro"
+    - source: "/bin"
+      target: "/bin"
+      mode: "ro"
+  
+  # Additional read-only mounts
+  readonly_mounts:
+    # Skills library - read-only access for agent
+    - source: "/skills"
+      target: "/skills"
+      mode: "ro"
+  
+  # Environment configuration inside sandbox
+  environment:
+    home: "/session/workspace"
+    path: "/usr/bin:/bin"
+    claude_config_dir: "/session"
+    clear_env: true
+    # Additional environment variables
+    additional_vars:
+      PYTHONUNBUFFERED: "1"
+      LC_ALL: "C.UTF-8"
+      LANG: "C.UTF-8"
+
+# Network filtering configuration
+# Applied at container level (not inside bwrap)
+network:
+  # Filtering mode: "whitelist" (allow only listed) or "blacklist" (block listed)
+  mode: "whitelist"
+  
+  # Domains to allow (when mode is "whitelist")
+  # These are resolved to IPs and added to /etc/hosts or iptables
+  allowed_domains:
+    # Anthropic API (required for Claude)
+    - "api.anthropic.com"
+    - "anthropic.com"
+    
+    # Python packages (if pip install is needed)
+    - "pypi.org"
+    - "files.pythonhosted.org"
+    - "pythonhosted.org"
+    
+  # Domains to block (when mode is "blacklist")
+  blocked_domains: []
+  
+  # Allow localhost connections
+  allow_localhost: true
+
+# Paths that are explicitly blocked (not mounted)
+# These are documented for clarity but don't need explicit blocking
+# since they're simply not mounted in the sandbox
+blocked_paths:
+  - /etc           # System config (passwords, shadow, etc.)
+  - /home          # User home directories
+  - /root          # Root home
+  - /var           # Variable data
+  - /config        # Agentum config (contains secrets.yaml!)
+  - /data          # Database
+  - /sessions      # Other sessions (only current session mounted)
+  - /src           # Source code (mounted read-only for imports)
+  - /logs          # Application logs

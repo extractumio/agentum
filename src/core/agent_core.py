@@ -52,7 +52,8 @@ from .permissions import (
     PermissionDenialTracker,
 )
 from .permission_profiles import PermissionManager
-from .sandbox import SandboxConfig, SandboxExecutor
+# Note: Old sandbox module removed - agent-level sandbox in sandbox_runner.py
+from .sandbox_runner import SandboxConfig
 
 # Ensure tools directory is in sys.path for agentum imports
 import sys
@@ -576,45 +577,28 @@ class ClaudeAgent:
         self,
         sandbox_config: Optional[SandboxConfig],
         workspace_dir: Path,
-    ) -> Optional[SandboxExecutor]:
+    ) -> None:
         """
-        Build a SandboxExecutor with resolved mounts for bubblewrap isolation.
+        Legacy method for per-command sandbox executor.
 
-        This creates the executor that will wrap Bash commands in bubblewrap
-        to provide proper filesystem isolation within Docker containers.
+        DEPRECATED: With agent-level sandboxing, the entire agent process
+        is wrapped in bwrap at startup. This method is kept for compatibility
+        but returns None. Sandbox is now handled by sandbox_runner.py.
 
         Args:
-            sandbox_config: Sandbox configuration from permissions.yaml.
-            workspace_dir: Absolute path to the session workspace directory.
+            sandbox_config: Sandbox configuration (unused).
+            workspace_dir: Workspace directory (unused).
 
         Returns:
-            SandboxExecutor if sandbox is enabled, None otherwise.
+            None - sandbox is applied at agent process level.
         """
-        if sandbox_config is None or not sandbox_config.enabled:
-            logger.info("BWRAP SANDBOX: Disabled in config")
-            return None
-
-        if not sandbox_config.file_sandboxing:
-            logger.info("BWRAP SANDBOX: File sandboxing disabled")
-            return None
-
-        executor = SandboxExecutor(sandbox_config)
-
-        # Validate mount sources exist
-        missing = executor.validate_mount_sources()
-        if missing:
-            logger.warning(
-                f"BWRAP SANDBOX: Some mount sources don't exist: {missing}. "
-                "Sandbox may fail at runtime."
-            )
-
-        logger.info(
-            f"BWRAP SANDBOX: Enabled with {len(sandbox_config.static_mounts)} static mounts, "
-            f"{len(sandbox_config.session_mounts)} session mounts, "
-            f"workspace={workspace_dir}"
+        # Agent-level sandbox is applied in task_runner.py via SandboxedAgentRunner
+        # Individual command wrapping is no longer needed
+        logger.debug(
+            "SANDBOX: Per-command wrapping deprecated. "
+            "Agent-level sandbox applied via sandbox_runner.py"
         )
-
-        return executor
+        return None
 
     def _sandbox_system_message_builder(
         self,

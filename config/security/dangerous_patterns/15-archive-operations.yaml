@@ -1,6 +1,0 @@
-patterns:
-  - pattern: '\btar\s+.*-C\s*/'
-    test-exploit-string: 'tar -xzf archive.tar.gz -C /'
-    
-  - pattern: '\bunzip\s+.*-d\s*/'
-    test-exploit-string: 'unzip malware.zip -d /'

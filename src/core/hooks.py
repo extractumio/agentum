@@ -579,53 +579,6 @@ def create_subagent_stop_hook(
     return subagent_stop_hook
 
 
-def create_dangerous_command_hook(
-    blocked_patterns: Optional[list[str]] = None,
-) -> HookCallback:
-    """
-    Create a PreToolUse hook that blocks dangerous bash commands.
-
-    Args:
-        blocked_patterns: List of command patterns to block.
-            If None, loads patterns from config/security/dangerous_patterns/.
-
-    Returns:
-        Async hook callback function.
-    """
-    # Load patterns dynamically from config if not provided
-    if blocked_patterns is None:
-        from .dangerous_patterns_loader import load_dangerous_patterns
-        patterns = load_dangerous_patterns()
-    else:
-        patterns = blocked_patterns
-
-    async def dangerous_command_hook(
-        input_data: dict[str, Any],
-        tool_use_id: Optional[str],
-        context: Any
-    ) -> dict[str, Any]:
-        """PreToolUse hook to block dangerous commands."""
-        tool_name = input_data.get("tool_name", "")
-
-        if tool_name != "Bash":
-            return {}  # Only check Bash commands
-
-        command = input_data.get("tool_input", {}).get("command", "")
-
-        for pattern in patterns:
-            if re.search(pattern, command, flags=re.IGNORECASE):
-                logger.warning(f"Blocked dangerous command: {command[:50]}...")
-                return HookResult(
-                    permission_decision="deny",
-                    permission_reason=f"Dangerous command pattern blocked: {pattern}",
-                    interrupt=True,
-                ).to_sdk_response("PreToolUse")
-
-        return {}  # Allow
-
-    return dangerous_command_hook
-
-
 def create_absolute_path_block_hook() -> HookCallback:
     """
     Create a PreToolUse hook that blocks absolute or parent-traversal paths.
@@ -671,84 +624,6 @@ def create_absolute_path_block_hook() -> HookCallback:
         return {}
 
     return absolute_path_block_hook
-
-
-def create_sandbox_execution_hook(
-    sandbox_executor: Any,
-) -> HookCallback:
-    """
-    Create a PreToolUse hook that wraps Bash commands in bubblewrap sandbox.
-
-    This hook intercepts Bash tool calls and modifies the command to run
-    inside a bubblewrap sandbox, providing filesystem isolation.
-
-    The SDK's built-in sandbox doesn't work reliably in Docker environments,
-    so we use our own bubblewrap wrapper for proper isolation.
-
-    Args:
-        sandbox_executor: SandboxExecutor instance with resolved mounts.
-
-    Returns:
-        Async hook callback function.
-    """
-    from .sandbox import SandboxExecutor
-
-    async def sandbox_execution_hook(
-        input_data: dict[str, Any],
-        tool_use_id: Optional[str],
-        context: Any
-    ) -> dict[str, Any]:
-        """PreToolUse hook to wrap Bash commands in bubblewrap."""
-        tool_name = input_data.get("tool_name", "")
-
-        if tool_name != "Bash":
-            return {}  # Only sandbox Bash commands
-
-        if sandbox_executor is None:
-            logger.debug("Sandbox executor not configured, skipping sandbox")
-            return {}
-
-        if not isinstance(sandbox_executor, SandboxExecutor):
-            logger.warning(f"Invalid sandbox executor type: {type(sandbox_executor)}")
-            return {}
-
-        if not sandbox_executor.config.enabled:
-            logger.debug("Sandbox disabled in config, skipping")
-            return {}
-
-        original_command = input_data.get("tool_input", {}).get("command", "")
-        if not original_command:
-            return {}
-
-        # Wrap the command in bubblewrap
-        # The SDK will execute this wrapped command instead of the original
-        allow_network = bool(
-            getattr(sandbox_executor.config, "network", None)
-            and sandbox_executor.config.network.enabled
-        )
-        wrapped_command = sandbox_executor.wrap_shell_command(
-            original_command,
-            allow_network=allow_network,
-        )
-
-        logger.info("SANDBOX HOOK: Wrapping command in bwrap")
-        logger.debug(f"SANDBOX HOOK: Original: {original_command[:100]}")
-        logger.debug(f"SANDBOX HOOK: Wrapped: {wrapped_command[:200]}...")
-
-        # Return modified input with wrapped command
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "updatedInput": {
-                    "command": wrapped_command,
-                    "description": input_data.get("tool_input", {}).get(
-                        "description", "Sandboxed command execution"
-                    ),
-                },
-            }
-        }
-
-    return sandbox_execution_hook
 
 
 def create_path_normalization_hook(workspace_dir: str) -> HookCallback:

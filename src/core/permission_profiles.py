@@ -42,7 +42,7 @@ from .permission_config import (
     PermissionRules,
     ToolsConfig,
 )
-from .sandbox import SandboxConfig
+from .sandbox_runner import SandboxConfig
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:

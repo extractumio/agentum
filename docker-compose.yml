@@ -24,11 +24,15 @@ services:
       - ./tests:/tests:ro  # Tests mounted read-only for ./deploy.sh test
     ports:
       - "${AGENTUM_API_PORT:-40080}:40080"
+    # Security configuration for bwrap sandbox
+    # SYS_ADMIN is required for namespace operations (--unshare-pid, etc.)
     cap_add:
       - SYS_ADMIN
     security_opt:
-      - apparmor:unconfined
-      - seccomp:unconfined
+      # Prevent privilege escalation inside container
+      - no-new-privileges:true
+    # Note: apparmor:unconfined and seccomp:unconfined removed
+    # The agent-level bwrap sandbox provides isolation instead
 
   agentum-web:
     image: agentum:${AGENTUM_IMAGE_TAG:-latest}

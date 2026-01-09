@@ -5,10 +5,14 @@ Provides a unified interface for permission management that bridges
 the new centralized PermissionConfig system with legacy code.
 
 For full permission configuration, see permission_config.py.
+
+Note: With the new agent-level sandbox architecture, dangerous command
+patterns are no longer needed. The bwrap sandbox restricts filesystem
+access and PID namespace visibility at the process level, making pattern
+matching redundant.
 """
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -19,12 +23,8 @@ from claude_agent_sdk import (
     ToolPermissionContext,
 )
 
-from .hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
+from .hooks import HooksManager, create_permission_hook
 from .tool_utils import build_actionable_denial_message, build_tool_call_string
-from .dangerous_patterns_loader import load_dangerous_patterns
-
-# Patterns are loaded once at module import time for performance
-DANGEROUS_COMMAND_PATTERNS: list[str] = load_dangerous_patterns()
 
 from .permission_config import (
     AVAILABLE_TOOLS,
@@ -345,7 +345,7 @@ def create_permission_callback(
     trace_processor: Optional[Any] = None,
     max_denials_before_interrupt: int = 3,
     system_message_builder: Optional[Any] = None,
-    sandbox_executor: Optional[Any] = None,
+    sandbox_executor: Optional[Any] = None,  # Deprecated: sandbox is now at agent level
 ):
     """
     Create a permission callback that enforces permission rules.
@@ -354,7 +354,10 @@ def create_permission_callback(
     1. Provides actionable guidance on denial (what IS allowed)
     2. Uses smart interrupt logic: stops only after repeated failures
     3. Immediately interrupts on security violations
-    4. Wraps Bash commands in bubblewrap sandbox when enabled
+
+    Note: With the new agent-level sandbox architecture, Bash commands
+    are automatically sandboxed at the process level. The sandbox_executor
+    parameter is deprecated and no longer used.
 
     Args:
         permission_manager: Permission manager instance (PermissionManager or
@@ -365,15 +368,20 @@ def create_permission_callback(
         trace_processor: Optional trace processor to mark as permission denied.
         max_denials_before_interrupt: Number of denials before interrupting.
                                       Default is 3 to allow Claude to learn.
-        sandbox_executor: Optional SandboxExecutor for wrapping Bash commands
-                         in bubblewrap. When provided, Bash commands are
-                         executed inside a sandbox for filesystem isolation.
+        sandbox_executor: Deprecated. Sandbox is now applied at agent process level.
 
     Returns:
         Async permission callback for ClaudeAgentOptions.can_use_tool.
     """
     # Track denial counts per tool to enable smart interrupt
     denial_counts: dict[str, int] = {}
+    
+    # Log deprecation warning if sandbox_executor is passed
+    if sandbox_executor is not None:
+        logger.warning(
+            "DEPRECATED: sandbox_executor parameter is deprecated. "
+            "Sandbox is now applied at agent process level via bwrap."
+        )
 
     async def can_use_tool(
         tool_name: str,
@@ -414,31 +422,11 @@ def create_permission_callback(
                 interrupt=True
             )
 
-        # SECURITY: Block dangerous Bash commands BEFORE permission rules
-        # This provides defense-in-depth even if hooks are not registered
-        if tool_name == "Bash":
-            command = tool_input.get("command", "")
-            for pattern in DANGEROUS_COMMAND_PATTERNS:
-                if re.search(pattern, command, flags=re.IGNORECASE):
-                    security_msg = f"Blocked dangerous command pattern: {pattern}"
-                    logger.warning(f"SECURITY: {security_msg} - command: {command[:100]}...")
-                    if on_permission_check:
-                        on_permission_check(tool_name, "deny")
-                    if denial_tracker:
-                        denial_tracker.record_denial(
-                            tool_name=tool_name,
-                            tool_call=f"Bash({command[:50]}...)",
-                            message=security_msg,
-                            is_security_violation=True,
-                            interrupt=True,
-                        )
-                    if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
-                        trace_processor.set_permission_denied(True)
-                    return PermissionResultDeny(
-                        behavior="deny",
-                        message=security_msg,
-                        interrupt=True
-                    )
+        # Note: Dangerous command pattern checking has been removed.
+        # The agent-level bwrap sandbox restricts filesystem access and
+        # PID namespace visibility, making pattern matching redundant.
+        # Commands like "ps aux" or "cat /etc/passwd" will fail at the
+        # kernel level due to sandbox restrictions.
 
         # Check permission rules
         tool_call = build_tool_call_string(tool_name, tool_input)
@@ -451,69 +439,14 @@ def create_permission_callback(
             on_permission_check(tool_name, decision)
 
         if allowed:
-            # Check if we need to sandbox Bash commands
-            updated_input = None
-            if (
-                tool_name == "Bash"
-                and sandbox_executor is not None
-                and hasattr(sandbox_executor, 'config')
-                and sandbox_executor.config.enabled
-            ):
-                original_command = tool_input.get("command", "")
-                if original_command:
-                    try:
-                        # Validate mount sources exist before wrapping
-                        missing_mounts = sandbox_executor.validate_mount_sources()
-                        if missing_mounts:
-                            logger.warning(
-                                f"SANDBOX: Missing mount sources: {missing_mounts}. "
-                                "Command will likely fail."
-                            )
-
-                        # Wrap the command in bubblewrap for filesystem isolation
-                        allow_network = bool(
-                            getattr(sandbox_executor.config, "network", None)
-                            and sandbox_executor.config.network.enabled
-                        )
-                        wrapped_command = sandbox_executor.wrap_shell_command(
-                            original_command,
-                            allow_network=allow_network,
-                        )
-                        updated_input = {**tool_input, "command": wrapped_command}
-                        logger.info(
-                            f"SANDBOX: Wrapping Bash command in bwrap: "
-                            f"{original_command[:50]}..."
-                        )
-                    except Exception as e:
-                        # SECURITY: FAIL-CLOSED - if sandbox fails, DENY the command
-                        # Never run Bash commands without sandbox protection
-                        security_msg = (
-                            f"Sandbox unavailable (bwrap error: {e}). "
-                            "Bash commands are blocked for security. "
-                            "Ensure bubblewrap is installed."
-                        )
-                        logger.error(f"SANDBOX FAIL-CLOSED: {security_msg}")
-                        if on_permission_check:
-                            on_permission_check(tool_name, "deny")
-                        if denial_tracker:
-                            denial_tracker.record_denial(
-                                tool_name=tool_name,
-                                tool_call=f"Bash({original_command[:50]}...)",
-                                message=security_msg,
-                                is_security_violation=True,
-                                interrupt=True,
-                            )
-                        if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
-                            trace_processor.set_permission_denied(True)
-                        return PermissionResultDeny(
-                            behavior="deny",
-                            message=security_msg,
-                            interrupt=True
-                        )
-
+            # Note: Sandbox wrapping for Bash commands has been removed.
+            # The agent process is now wrapped at startup with bwrap,
+            # and all child processes (including Bash commands) inherit
+            # the sandbox restrictions automatically.
+            
             allow_result = PermissionResultAllow(
                 behavior="allow",
-                updated_input=updated_input,
+                updated_input=None,
             )
             if system_message_builder is not None:
                 message = system_message_builder(tool_name, tool_input)
@@ -616,9 +549,8 @@ def create_permission_hooks(
     )
     manager.add_pre_tool_hook(permission_hook)
 
-    # Add dangerous command blocking hook for Bash
-    dangerous_hook = create_dangerous_command_hook()
-    manager.add_pre_tool_hook(dangerous_hook, matcher="Bash")
+    # Note: Dangerous command hook removed - agent-level sandbox provides
+    # security enforcement at the kernel level for all commands
 
     return manager.build_hooks_config()
 

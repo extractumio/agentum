@@ -8,33 +8,77 @@ cd "${ROOT_DIR}"
 MOUNTS_RW=()
 MOUNTS_RO=()
 
+# Configuration
+PROJECT_NAME="project"  # docker-compose project name
+IMAGE_PREFIX="agentum"  # Image name prefix
+
 function show_usage() {
   cat <<EOF
-Usage: ./deploy.sh <build|cleanup> [OPTIONS]
+Usage: ./deploy.sh <command> [OPTIONS]
 
 Commands:
-  build     Build and deploy the containers
-  cleanup   Stop containers and remove images
+  build       Build and deploy the containers
+  cleanup     Stop containers and remove images (full cleanup)
+  restart     Restart containers to reload code (preserves data)
+  rebuild     Full cleanup + build (equivalent to: cleanup && build)
+  test        Run tests inside the Docker container
+  shell       Open a shell inside the API container
 
 Options:
   --mount-rw=PATH    Mount host PATH as read-write in container (can be repeated)
   --mount-ro=PATH    Mount host PATH as read-only in container (can be repeated)
+  --no-cache         Force rebuild without Docker cache (for build/rebuild)
   --help             Show this help message
+
+Test Options (for 'test' command):
+  <pattern>          File pattern to match (e.g., "session*", "auth", "session*|streaming")
+  --all              Run all tests in tests/ directory
+  --backend          Run all backend tests (default if no pattern)
+  --sandboxing       Run sandboxing tests only
+  -k <pattern>       Pytest -k pattern for test name filtering
+  -v                 Verbose output (default)
+  -x                 Stop on first failure
+  
+Pattern Matching:
+  Patterns match test file names. Use | for OR matching.
+  Examples: "session*" matches test_sessions.py, test_session_service.py
+            "auth|health" matches test_auth.py and test_health.py
 
 Examples:
   ./deploy.sh build
+  ./deploy.sh build --no-cache
   ./deploy.sh build --mount-rw=/home/user/projects --mount-ro=/data/reference
   ./deploy.sh cleanup
+  ./deploy.sh restart
+  ./deploy.sh rebuild --no-cache
+  ./deploy.sh test                          # Run all backend tests
+  ./deploy.sh test --all                    # Run ALL tests (backend + core-tests)
+  ./deploy.sh test --sandboxing             # Run sandboxing tests only
+  ./deploy.sh test "session*"               # Run session-related tests
+  ./deploy.sh test "session*|streaming"     # Run session and streaming tests
+  ./deploy.sh test auth                     # Run auth tests
+  ./deploy.sh test -k "ps_command"          # Filter by test name pattern
+  ./deploy.sh test --sandboxing -x          # Stop on first failure
+  ./deploy.sh shell                         # Open shell in container
 EOF
 }
 
 # Parse arguments
 ACTION=""
+NO_CACHE=""
+TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup)
+    build|cleanup|restart|rebuild|test|shell)
       ACTION="$1"
       shift
+      # For test command, collect remaining args
+      if [[ "${ACTION}" == "test" ]]; then
+        while [[ $# -gt 0 ]]; do
+          TEST_ARGS+=("$1")
+          shift
+        done
+      fi
       ;;
     --mount-rw=*)
       MOUNTS_RW+=("${1#--mount-rw=}")
@@ -42,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mount-ro=*)
       MOUNTS_RO+=("${1#--mount-ro=}")
+      shift
+      ;;
+    --no-cache)
+      NO_CACHE="--no-cache"
       shift
       ;;
     --help|-h)
@@ -152,16 +200,280 @@ function check_services() {
   return "${missing}"
 }
 
-if [[ "${ACTION}" == "cleanup" ]]; then
-  docker compose down --remove-orphans
-  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^agentum:'; then
-    docker images --format '{{.Repository}}:{{.Tag}}' \
-      | grep '^agentum:' \
-      | xargs -r docker image rm
+function do_cleanup() {
+  echo "=== Starting comprehensive cleanup ==="
+  
+  # Step 1: Stop and remove all project containers (including stuck ones)
+  echo "Stopping containers..."
+  docker compose down --remove-orphans --timeout 10 2>/dev/null || true
+  
+  # Step 2: Force kill any stuck containers by name pattern
+  echo "Force removing any stuck containers..."
+  local stuck_containers
+  stuck_containers=$(docker ps -aq --filter "name=${PROJECT_NAME}" 2>/dev/null || true)
+  if [[ -n "${stuck_containers}" ]]; then
+    echo "  Found stuck containers: ${stuck_containers}"
+    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
   fi
+  
+  # Also check for containers using agentum images
+  stuck_containers=$(docker ps -aq --filter "ancestor=${IMAGE_PREFIX}" 2>/dev/null || true)
+  if [[ -n "${stuck_containers}" ]]; then
+    echo "  Found containers using ${IMAGE_PREFIX} images: ${stuck_containers}"
+    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
+  fi
+  
+  # Step 3: Remove all agentum images (all tags)
+  echo "Removing ${IMAGE_PREFIX} images..."
+  local images
+  images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" || true)
+  if [[ -n "${images}" ]]; then
+    echo "  Removing: ${images}"
+    echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
+  fi
+  
+  # Also remove any dangling images that might be leftovers from builds
+  local dangling
+  dangling=$(docker images -q --filter "dangling=true" 2>/dev/null || true)
+  if [[ -n "${dangling}" ]]; then
+    echo "  Removing dangling images..."
+    echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
+  fi
+  
+  # Step 4: Clear Docker build cache for this project
+  echo "Clearing Docker build cache..."
+  docker builder prune -f --filter "until=24h" 2>/dev/null || true
+  
+  # Step 5: Remove project-specific volumes (but NOT data volumes)
+  # Only remove the web_node_modules volume, preserve data
+  echo "Cleaning build volumes..."
+  docker volume rm -f "${PROJECT_NAME}_web_node_modules" 2>/dev/null || true
+  
+  # Step 6: Clean up any orphaned networks
+  echo "Cleaning orphaned networks..."
+  docker network prune -f 2>/dev/null || true
+  
+  # Step 7: Remove generated files
+  echo "Removing generated files..."
   rm -f docker-compose.override.yml
-  echo "Cleanup complete."
+  rm -f .env.bak
+  
+  # Step 8: Kill any orphaned processes that might be using ports
+  echo "Checking for orphaned processes on configured ports..."
+  local api_port="${1:-40080}"
+  local web_port="${2:-50080}"
+  
+  # Check if ports are in use by non-docker processes
+  for port in "${api_port}" "${web_port}"; do
+    local pid
+    pid=$(lsof -ti ":${port}" 2>/dev/null || true)
+    if [[ -n "${pid}" ]]; then
+      # Check if it's a docker process - if not, warn (don't kill)
+      local proc_name
+      proc_name=$(ps -p "${pid}" -o comm= 2>/dev/null || true)
+      if [[ "${proc_name}" != *"docker"* && "${proc_name}" != *"com.docker"* ]]; then
+        echo "  WARNING: Port ${port} is in use by non-Docker process: ${proc_name} (PID ${pid})"
+        echo "           You may need to kill it manually: kill ${pid}"
+      fi
+    fi
+  done
+  
+  echo "=== Cleanup complete ==="
+}
+
+function do_restart() {
+  echo "=== Restarting containers to reload code ==="
+  
+  # Restart API container (where Python code runs)
+  echo "Restarting agentum-api..."
+  docker compose restart agentum-api
+  
+  # Optionally restart web if needed
+  echo "Restarting agentum-web..."
+  docker compose restart agentum-web
+  
+  # Wait for services to be healthy
+  sleep 2
+  
+  if check_services; then
+    echo "=== Restart complete - services running ==="
+  else
+    echo "=== WARNING: Some services may not be running ==="
+    docker compose ps
+  fi
+}
+
+# Handle cleanup action
+if [[ "${ACTION}" == "cleanup" ]]; then
+  do_cleanup
   exit 0
+fi
+
+# Handle restart action
+if [[ "${ACTION}" == "restart" ]]; then
+  do_restart
+  exit 0
+fi
+
+# Handle test action
+if [[ "${ACTION}" == "test" ]]; then
+  echo "=== Running tests inside Docker container ==="
+  
+  # Check if container is running
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "agentum-api"; then
+    echo "Error: agentum-api container is not running."
+    echo "Start it first with: ./deploy.sh build"
+    exit 1
+  fi
+  
+  # Build pytest command
+  PYTEST_CMD="python -m pytest"
+  
+  # Parse test arguments and build final command
+  TEST_PATH=""
+  PYTEST_EXTRA_ARGS=()
+  FILE_PATTERNS=()
+  
+  # Use index-based loop to handle args that need next value (like -k PATTERN)
+  ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
+  i=0
+  while [[ $i -lt ${#ARGS_ARRAY[@]} ]]; do
+    arg="${ARGS_ARRAY[$i]}"
+    case "${arg}" in
+      --all)
+        TEST_PATH="tests/"
+        ;;
+      --backend)
+        TEST_PATH="tests/backend/"
+        ;;
+      --sandboxing)
+        TEST_PATH="tests/backend/test_sandboxing.py"
+        ;;
+      -k)
+        # -k requires a following pattern argument
+        PYTEST_EXTRA_ARGS+=("${arg}")
+        ((i++))
+        if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
+          PYTEST_EXTRA_ARGS+=("${ARGS_ARRAY[$i]}")
+        fi
+        ;;
+      -k=*)
+        # -k=pattern format
+        PYTEST_EXTRA_ARGS+=("${arg}")
+        ;;
+      -x|-v|-q|--verbose|--tb=*)
+        PYTEST_EXTRA_ARGS+=("${arg}")
+        ;;
+      -*)
+        # Other pytest flags, pass through
+        PYTEST_EXTRA_ARGS+=("${arg}")
+        ;;
+      *)
+        # File pattern (e.g., "session*", "auth", "session*|streaming")
+        if [[ -n "${arg}" ]]; then
+          FILE_PATTERNS+=("${arg}")
+        fi
+        ;;
+    esac
+    ((i++))
+  done
+  
+  # Build test file list from patterns
+  if [[ ${#FILE_PATTERNS[@]} -gt 0 ]]; then
+    # Convert patterns to pytest file args
+    # Handle patterns like "session*|streaming" or just "session*"
+    TEST_FILES=()
+    for pattern in "${FILE_PATTERNS[@]}"; do
+      # Split by | for OR patterns
+      IFS='|' read -ra PARTS <<< "${pattern}"
+      for part in "${PARTS[@]}"; do
+        # Find matching test files in container
+        # Strip * if present for matching
+        part_clean="${part%\*}"
+        # Look for test files matching the pattern
+        MATCHES=$(docker exec "${PROJECT_NAME}-agentum-api-1" find /tests -name "test_${part_clean}*.py" -o -name "test_*${part_clean}*.py" 2>/dev/null | sort -u)
+        if [[ -n "${MATCHES}" ]]; then
+          while IFS= read -r file; do
+            TEST_FILES+=("${file}")
+          done <<< "${MATCHES}"
+        fi
+      done
+    done
+    
+    if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
+      # Remove duplicates and set as test path
+      TEST_PATH=$(printf '%s\n' "${TEST_FILES[@]}" | sort -u | tr '\n' ' ')
+    else
+      echo "No test files found matching patterns: ${FILE_PATTERNS[*]}"
+      echo "Available test files:"
+      docker exec "${PROJECT_NAME}-agentum-api-1" find /tests -name "test_*.py" | sort
+      exit 1
+    fi
+  fi
+  
+  # Default to backend tests if no path specified
+  if [[ -z "${TEST_PATH}" ]]; then
+    TEST_PATH="tests/backend/"
+  fi
+  
+  # Build final TEST_ARGS
+  TEST_ARGS=()
+  for path in ${TEST_PATH}; do
+    TEST_ARGS+=("${path}")
+  done
+  
+  # Add extra args
+  for arg in "${PYTEST_EXTRA_ARGS[@]+"${PYTEST_EXTRA_ARGS[@]}"}"; do
+    TEST_ARGS+=("${arg}")
+  done
+  
+  # Add default flags if not specified
+  TEST_ARGS_STR=" ${TEST_ARGS[*]+"${TEST_ARGS[*]}"} "
+  if [[ ! "${TEST_ARGS_STR}" =~ " -v " && ! "${TEST_ARGS_STR}" =~ " --verbose " && ! "${TEST_ARGS_STR}" =~ " -q " ]]; then
+    TEST_ARGS+=("-v")
+  fi
+  if [[ ! "${TEST_ARGS_STR}" =~ " --tb=" ]]; then
+    TEST_ARGS+=("--tb=short")
+  fi
+  
+  echo "Running: ${PYTEST_CMD} ${TEST_ARGS[*]}"
+  echo ""
+  
+  # Run tests in container (use -t only if TTY available)
+  if [ -t 0 ]; then
+    docker exec -it "${PROJECT_NAME}-agentum-api-1" ${PYTEST_CMD} "${TEST_ARGS[@]}"
+  else
+    docker exec "${PROJECT_NAME}-agentum-api-1" ${PYTEST_CMD} "${TEST_ARGS[@]}"
+  fi
+  exit $?
+fi
+
+# Handle shell action
+if [[ "${ACTION}" == "shell" ]]; then
+  echo "=== Opening shell in Docker container ==="
+  
+  # Check if container is running
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "agentum-api"; then
+    echo "Error: agentum-api container is not running."
+    echo "Start it first with: ./deploy.sh build"
+    exit 1
+  fi
+  
+  # Shell requires TTY
+  if [ -t 0 ]; then
+    docker exec -it "${PROJECT_NAME}-agentum-api-1" /bin/bash
+  else
+    echo "Error: Shell requires an interactive terminal."
+    exit 1
+  fi
+  exit 0
+fi
+
+# Handle rebuild action (cleanup + build)
+if [[ "${ACTION}" == "rebuild" ]]; then
+  do_cleanup
+  ACTION="build"
+  # Fall through to build
 fi
 
 API_PORT="$(read_config_value 'api.external_port')"
@@ -189,7 +501,10 @@ if [[ -f .env ]]; then
 fi
 
 echo "Building image agentum:${IMAGE_TAG}..."
-docker build -t "agentum:${IMAGE_TAG}" .
+if [[ -n "${NO_CACHE}" ]]; then
+  echo "  (Using --no-cache for fresh build)"
+fi
+docker build ${NO_CACHE} -t "agentum:${IMAGE_TAG}" .
 
 ROLLBACK_ENV=1
 cat > .env <<EOF
@@ -199,7 +514,8 @@ AGENTUM_WEB_PORT=${WEB_PORT}
 EOF
 
 echo "Starting containers with tag ${IMAGE_TAG}..."
-docker compose up -d --remove-orphans
+# Use --force-recreate to ensure fresh containers with new code
+docker compose up -d --remove-orphans --force-recreate
 
 if ! check_services; then
   echo "Deployment failed, rolling back."
@@ -207,4 +523,21 @@ if ! check_services; then
 fi
 
 ROLLBACK_ENV=0
-echo "Deployment complete."
+
+# Verify fresh containers
+echo ""
+echo "=== Deployment Verification ==="
+echo "Image tag: ${IMAGE_TAG}"
+echo "API Port: ${API_PORT}"
+echo "Web Port: ${WEB_PORT}"
+echo ""
+echo "Container status:"
+docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Image}}"
+echo ""
+echo "Container start times:"
+for container in "${PROJECT_NAME}-agentum-api-1" "${PROJECT_NAME}-agentum-web-1"; do
+  started=$(docker inspect "${container}" --format '{{.State.StartedAt}}' 2>/dev/null || echo "N/A")
+  echo "  ${container}: ${started}"
+done
+echo ""
+echo "=== Deployment complete at $(date) ==="

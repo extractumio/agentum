@@ -87,13 +87,13 @@ class AgentConfigLoader:
 
     # Required fields in agent.yaml
     # Note: allowed_tools and auto_checkpoint_tools come from permission profiles
+    # Note: permission_mode removed - managed via permissions.yaml (defaultMode)
     REQUIRED_FIELDS = [
         "model",
         "max_turns",
         "timeout_seconds",
         "enable_skills",
         "enable_file_checkpointing",
-        "permission_mode",
         "role",
     ]
 

@@ -66,8 +66,9 @@ session_workspace:
     - Write(./skills/**)
     - Edit(./skills/**)
     - MultiEdit(./skills/**)
-    # Block all other bash commands
-    - Bash(*)
+    # Note: We don't use Bash(*) here because it would block allowed patterns
+    # The default deny behavior handles unlisted patterns
+    # Block exploration tools that could leak info
     - Glob(*)
     - Grep(*)
     - LS(*)

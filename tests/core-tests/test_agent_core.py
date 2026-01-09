@@ -24,6 +24,42 @@ AGENT_PY: Path = AGENT_DIR / "agent.py"
 SESSIONS_DIR: Path = AGENT_DIR / "sessions"
 
 
+def _check_api_key_available() -> bool:
+    """
+    Check if ANTHROPIC_API_KEY is available from any source.
+    
+    Checks in order:
+    1. Environment variable ANTHROPIC_API_KEY
+    2. Environment variable CLOUDLINUX_ANTHROPIC_API_KEY
+    3. config/secrets.yaml file
+    """
+    # Check environment variables first
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLOUDLINUX_ANTHROPIC_API_KEY"):
+        return True
+    
+    # Check secrets.yaml (both in Docker /config and local config/)
+    secrets_paths = [
+        Path("/config/secrets.yaml"),  # Docker mount
+        AGENT_DIR / "config" / "secrets.yaml",  # Local development
+    ]
+    
+    for secrets_path in secrets_paths:
+        if secrets_path.exists():
+            try:
+                with open(secrets_path) as f:
+                    secrets = yaml.safe_load(f) or {}
+                if secrets.get("anthropic_api_key"):
+                    return True
+            except (yaml.YAMLError, OSError):
+                pass
+    
+    return False
+
+
+# Check if API key is available for E2E tests
+HAS_API_KEY = _check_api_key_available()
+
+
 @pytest.fixture
 def task_file() -> Path:
     """Path to the test task file."""
@@ -63,6 +99,7 @@ class TestAgentCore:
     """Core agent integration tests."""
 
     @pytest.mark.integration
+    @pytest.mark.skipif(not HAS_API_KEY, reason="ANTHROPIC_API_KEY not set - skipping E2E test")
     def test_agent_executes_task_successfully(
         self,
         task_file: Path,
@@ -97,11 +134,6 @@ class TestAgentCore:
             alt_key = env.get("CLOUDLINUX_ANTHROPIC_API_KEY")
             if alt_key:
                 env["ANTHROPIC_API_KEY"] = alt_key
-        
-        assert "ANTHROPIC_API_KEY" in env, (
-            "ANTHROPIC_API_KEY or CLOUDLINUX_ANTHROPIC_API_KEY "
-            "environment variable must be set"
-        )
 
         result = subprocess.run(
             cmd,

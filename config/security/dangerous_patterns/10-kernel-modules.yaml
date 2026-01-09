@@ -1,0 +1,18 @@
+patterns:
+  - pattern: '\bmodprobe\b'
+    test-exploit-string: 'modprobe malicious_module'
+    
+  - pattern: '\binsmod\b'
+    test-exploit-string: 'insmod rootkit.ko'
+    
+  - pattern: '\brmmod\b'
+    test-exploit-string: 'rmmod module'
+    
+  - pattern: '\blsmod\b'
+    test-exploit-string: 'lsmod'
+    
+  - pattern: '\bkexec\b'
+    test-exploit-string: 'kexec -l /boot/vmlinuz'
+    
+  - pattern: '\bsysctl\b'
+    test-exploit-string: 'sysctl -w net.ipv4.ip_forward=1'

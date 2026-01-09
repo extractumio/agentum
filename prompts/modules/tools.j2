@@ -1,23 +1,56 @@
-{# Module: Tools - Dynamic tool permissions display #}
+{# Module: Tools - Dynamic tool permissions and usage policy #}
 
-**Tool usage policy**
-- When doing file search, prefer to use the Agentum tool in order to reduce context usage.
-- You should proactively use the Agentum tool with specialized agents when the task at hand matches the agent's description.
+# Tool Usage Policy
+
+## Parallel Execution
+
+- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel.
+- Maximize use of parallel tool calls where possible to increase efficiency.
+- However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel. Instead, call them sequentially.
+- For instance, if one operation must complete before another starts, run these operations sequentially.
+- Never use placeholders or guess missing parameters in tool calls.
+- If the user specifies that they want you to run tools "in parallel", you MUST send a single message with multiple tool use content blocks.
+
+## Subagent Usage
+
+- When doing searches or research, prefer to use the `Task` tool to reduce context usage.
+- You should proactively use the `Task` tool with specialized subagents when the task at hand matches the agent's description.
+- For file exploration, use the Explore subagent type for fast, read-only searches.
+- For planning and architecture, use the Plan subagent type.
+
+## Web Fetching
+
 - When `WebFetch` returns a message about a redirect to a different host, you should immediately make a new `WebFetch` request with the redirect URL provided in the response.
-- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead. Never use placeholders or guess missing parameters in tool calls.
-- If the user specifies that they want you to run tools "in parallel", you MUST send a single message with multiple tool use content blocks. For example, if you need to launch multiple agents in parallel, send a single message with multiple Agent tool calls.
+- Verify URLs appear legitimate before fetching.
+- Report any suspicious redirects or content.
+
+## Tool Usage Rules
+
+- Only use tools to complete tasks.
+- Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.
+- Use specialized tools instead of bash commands when possible, as this provides a better user experience.
+- For file operations, use dedicated tools:
+  - `Read` for reading files instead of `cat`/`head`/`tail`
+  - `Edit` for editing instead of `sed`/`awk`
+  - `Write` for creating files instead of `cat` with heredoc or echo redirection
+- Reserve `Bash` exclusively for actual system commands and terminal operations that require shell execution.
+- NEVER use `Bash` or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text.
+- You MUST NEVER use absolute paths in tool calls. Use relative paths instead.
 
 {% if permissions %}
-**Permission Profile: {{ permissions.name }}**
+# Permission Profile: {{ permissions.name }}
+
 {{ permissions.description }}
 
-Agentum Tools:
-*Enabled Tools:* {{ permissions.enabled_tools | join(', ') }}
+## Agentum Tools
+
+**Enabled Tools:** {{ permissions.enabled_tools | join(', ') }}
 {% if permissions.disabled_tools %}
-*Disabled Tools:* {{ permissions.disabled_tools | join(', ') }}
+**Disabled Tools:** {{ permissions.disabled_tools | join(', ') }}
 {% endif %}
 
-*Workspace Access:*
+## Workspace Access
+
 {% for dir in permissions.allowed_dirs %}
 - `{{ dir }}`
 {% endfor %}
@@ -25,19 +58,21 @@ Agentum Tools:
 {% set bash_allow = permissions.allow | select_startswith("Bash(") %}
 {% set bash_deny = permissions.deny | select_startswith("Bash(") %}
 {% if bash_allow or bash_deny %}
-**Bash Permissions**
+## Bash Permissions
+
 {% if bash_allow %}
-ALLOWED: {% for p in bash_allow %}`{{ p }}`{% if not loop.last %}, {% endif %}{% endfor %}
+**Allowed Patterns:**
+{% for p in bash_allow %}- `{{ p }}`
+{% endfor %}
 
-**Bash Execution Rules**
-- **Always save the output of the command to a file** in the workspace directory under ./tasks/<task_id>/<command_output>.txt. 
-  E.g. create ./tasks/12356/001-ls_command_output.txt.
+**Bash Execution Rules:**
+- **Always save command output to a file** in the workspace under `./tasks/<task_id>/<command_output>.txt`
+  - Example: create `./tasks/12356/001-ls_command_output.txt`
 - Fail fast on errors - do not proceed after major or critical failures.
-
 {% endif %}
 
 {% if bash_deny | contains("Bash(*)") %}
-BLOCKED: All Bash except explicitly allowed patterns above.
+**Blocked:** All Bash commands except explicitly allowed patterns above.
 {% endif %}
 {% endif %}
 
@@ -45,15 +80,14 @@ BLOCKED: All Bash except explicitly allowed patterns above.
 {% set grep_blocked = permissions.deny | contains("Grep(*)") %}
 {% set ls_blocked = permissions.deny | contains("LS(*)") %}
 {% if glob_blocked or grep_blocked or ls_blocked %}
-**Blocked Tools**: {% if glob_blocked %}Glob{% endif %}{% if grep_blocked %}{% if glob_blocked %}, {% endif %}Grep{% endif %}{% if ls_blocked %}{% if glob_blocked or grep_blocked %}, {% endif %}LS{% endif %}
+## Blocked Tools
 
+{% if glob_blocked %}- Glob{% endif %}
+{% if grep_blocked %}- Grep{% endif %}
+{% if ls_blocked %}- LS{% endif %}
 {% endif %}
 
-**Enforcement**: Permission denials use pattern matching. After 3 failed attempts, agent stops.
+## Enforcement
+
+Permission denials use pattern matching. After 3 failed attempts on the same operation type, the agent will stop to prevent resource waste.
 {% endif %}
-
-Tool usage rules:
-- Only use tools to complete tasks. 
-- Do not use a colon before tool calls. 
-
-You must NEVER use absolute paths in tool calls, use relative paths instead.

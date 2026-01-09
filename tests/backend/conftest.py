@@ -41,6 +41,73 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: marks tests as integration tests (may use real database)"
     )
+    config.addinivalue_line(
+        "markers",
+        "e2e: marks tests as end-to-end tests requiring real API calls (skipped by default)"
+    )
+    config.addinivalue_line(
+        "markers",
+        "slow: marks tests as slow (skipped by default)"
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
+    """
+    Skip e2e and slow tests by default unless explicitly requested.
+    
+    Run e2e tests with: pytest -m e2e
+    Run all tests including e2e: pytest --run-e2e
+    """
+    run_e2e = config.getoption("--run-e2e", default=False)
+    
+    if run_e2e:
+        # Don't skip anything if --run-e2e is passed
+        return
+    
+    skip_e2e = pytest.mark.skip(reason="E2E test skipped by default. Use --run-e2e to run.")
+    
+    for item in items:
+        if "e2e" in item.keywords:
+            item.add_marker(skip_e2e)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add custom command line options."""
+    parser.addoption(
+        "--run-e2e",
+        action="store_true",
+        default=False,
+        help="Run end-to-end tests that require real API calls",
+    )
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Clean up after all tests complete to prevent hanging."""
+    import os
+    import threading
+    import gc
+    
+    # Force garbage collection to clean up any pending resources
+    gc.collect()
+    
+    # Give a small window for cleanup
+    import time
+    time.sleep(0.1)
+    
+    # Check for non-daemon threads that might be blocking (e.g., aiosqlite worker)
+    main_thread = threading.main_thread()
+    hanging_threads = []
+    for thread in threading.enumerate():
+        if thread is not main_thread and thread.is_alive() and not thread.daemon:
+            # Try to join with a short timeout
+            thread.join(timeout=0.5)
+            if thread.is_alive():
+                hanging_threads.append(thread.name)
+    
+    # If there are still hanging threads, force exit to prevent indefinite hang
+    if hanging_threads:
+        print(f"\nWARNING: Threads did not exit: {hanging_threads}. Forcing exit.")
+        os._exit(exitstatus)
 
 
 # In-memory SQLite for testing
@@ -52,6 +119,13 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create event loop for async tests."""
     loop = asyncio.new_event_loop()
     yield loop
+    # Cancel all pending tasks before closing
+    pending = asyncio.all_tasks(loop)
+    for task in pending:
+        task.cancel()
+    # Give tasks a chance to handle cancellation
+    if pending:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
     loop.close()
 
 

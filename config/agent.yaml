@@ -18,9 +18,8 @@ agent:
   # Enable file change tracking for checkpoint/rewind functionality
   enable_file_checkpointing: true
 
-  # Permission mode for tool usage
-  # Options: default, acceptEdits, plan, bypassPermissions
-  permission_mode: default
+  # Note: permission_mode is configured in config/permissions.yaml (defaultMode field)
+  # Do not set it here to avoid SDK bypassing permission checks
 
   # Role template name (loads prompts/roles/<role>.md)
   # Create custom roles in prompts/roles/ directory

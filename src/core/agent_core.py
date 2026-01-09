@@ -246,6 +246,20 @@ class ClaudeAgent:
         self._logs_dir = logs_dir or LOGS_DIR
         self._permission_manager = permission_manager
 
+        # SECURITY: Validate that permission_mode is None or empty
+        # Setting permission_mode to any value causes SDK to use --permission-prompt-tool stdio
+        # which bypasses can_use_tool callback and all permission checks
+        if self._config.permission_mode not in (None, "", "null"):
+            logger.warning(
+                f"SECURITY WARNING: permission_mode='{self._config.permission_mode}' is set. "
+                f"This will bypass can_use_tool callback and disable permission checks! "
+                f"Set permission_mode to null in config/agent.yaml to enable security."
+            )
+            raise AgentError(
+                "permission_mode must be null (not 'default', 'acceptEdits', etc). "
+                "Set it to null in agent.yaml to enable proper permission checking via can_use_tool callback."
+            )
+
         # Determine skills directory from parameter, config, or default
         if skills_dir:
             self._skills_dir = skills_dir
@@ -490,6 +504,7 @@ class ClaudeAgent:
             system_prompt=system_prompt,
             model=self._config.model,
             max_turns=self._config.max_turns,
+            permission_mode=None,  # CRITICAL: Explicitly set to None to use can_use_tool callback
             tools=all_tools,  # Available tools (excluding disabled)
             allowed_tools=allowed_tools,  # Pre-approved (no permission check)
             disallowed_tools=disallowed_tools,  # Completely blocked tools

@@ -8,6 +8,7 @@ For full permission configuration, see permission_config.py.
 """
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,11 @@ from claude_agent_sdk import (
 
 from .hooks import HooksManager, create_permission_hook, create_dangerous_command_hook
 from .tool_utils import build_actionable_denial_message, build_tool_call_string
+from .dangerous_patterns_loader import load_dangerous_patterns
+
+# Patterns are loaded once at module import time for performance
+DANGEROUS_COMMAND_PATTERNS: list[str] = load_dangerous_patterns()
+
 from .permission_config import (
     AVAILABLE_TOOLS,
     DEFAULT_PERMISSION_CONFIG,
@@ -408,6 +414,32 @@ def create_permission_callback(
                 interrupt=True
             )
 
+        # SECURITY: Block dangerous Bash commands BEFORE permission rules
+        # This provides defense-in-depth even if hooks are not registered
+        if tool_name == "Bash":
+            command = tool_input.get("command", "")
+            for pattern in DANGEROUS_COMMAND_PATTERNS:
+                if re.search(pattern, command, flags=re.IGNORECASE):
+                    security_msg = f"Blocked dangerous command pattern: {pattern}"
+                    logger.warning(f"SECURITY: {security_msg} - command: {command[:100]}...")
+                    if on_permission_check:
+                        on_permission_check(tool_name, "deny")
+                    if denial_tracker:
+                        denial_tracker.record_denial(
+                            tool_name=tool_name,
+                            tool_call=f"Bash({command[:50]}...)",
+                            message=security_msg,
+                            is_security_violation=True,
+                            interrupt=True,
+                        )
+                    if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
+                        trace_processor.set_permission_denied(True)
+                    return PermissionResultDeny(
+                        behavior="deny",
+                        message=security_msg,
+                        interrupt=True
+                    )
+
         # Check permission rules
         tool_call = build_tool_call_string(tool_name, tool_input)
         logger.info(f"PERMISSION CHECK: tool_call={tool_call}")
@@ -453,12 +485,31 @@ def create_permission_callback(
                             f"{original_command[:50]}..."
                         )
                     except Exception as e:
-                        logger.error(
-                            f"SANDBOX: Failed to wrap command in bwrap: {e}. "
-                            "Running without sandbox."
+                        # SECURITY: FAIL-CLOSED - if sandbox fails, DENY the command
+                        # Never run Bash commands without sandbox protection
+                        security_msg = (
+                            f"Sandbox unavailable (bwrap error: {e}). "
+                            "Bash commands are blocked for security. "
+                            "Ensure bubblewrap is installed."
                         )
-                        # Allow command to run without sandbox wrapper
-                        # The agent will see the error if the command fails
+                        logger.error(f"SANDBOX FAIL-CLOSED: {security_msg}")
+                        if on_permission_check:
+                            on_permission_check(tool_name, "deny")
+                        if denial_tracker:
+                            denial_tracker.record_denial(
+                                tool_name=tool_name,
+                                tool_call=f"Bash({original_command[:50]}...)",
+                                message=security_msg,
+                                is_security_violation=True,
+                                interrupt=True,
+                            )
+                        if trace_processor and hasattr(trace_processor, 'set_permission_denied'):
+                            trace_processor.set_permission_denied(True)
+                        return PermissionResultDeny(
+                            behavior="deny",
+                            message=security_msg,
+                            interrupt=True
+                        )
 
             allow_result = PermissionResultAllow(
                 behavior="allow",

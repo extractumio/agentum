@@ -253,9 +253,9 @@ class AgentConfig(BaseModel):
         ...,
         description="Enable file change tracking for checkpoint/rewind"
     )
-    permission_mode: str = Field(
-        ...,
-        description="Permission mode: default, acceptEdits, plan, bypassPermissions"
+    permission_mode: Optional[str] = Field(
+        None,
+        description="Permission mode: null (use can_use_tool), default, acceptEdits, plan, bypassPermissions. MUST be null for security."
     )
     role: str = Field(
         ...,

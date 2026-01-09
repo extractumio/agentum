@@ -587,44 +587,17 @@ def create_dangerous_command_hook(
 
     Args:
         blocked_patterns: List of command patterns to block.
-            Defaults to ["rm -rf /", "mkfs", "> /dev/"].
+            If None, loads patterns from config/security/dangerous_patterns/.
 
     Returns:
         Async hook callback function.
     """
-    patterns = blocked_patterns or [
-        r"\brm\s+-rf\s+/(?:\s|$)",
-        r"\brm\s+-rf\s+/\*(?:\s|$)",
-        r"\bmkfs\b",
-        r">\s*/dev/",
-        r"\bdd\s+if=",
-        r":\(\)\s*\{\s*:\|\:&\s*\};:",  # Fork bomb
-        r"\bkill\b",
-        r"\bpkill\b",
-        r"\bkillall\b",
-        r"\bshutdown\b",
-        r"\breboot\b",
-        r"\bpoweroff\b",
-        r"\bhalt\b",
-        r"\binit\b",
-        r"\btelinit\b",
-        r"\bsystemctl\b",
-        r"\bservice\b",
-        r"\bmount\b",
-        r"\bumount\b",
-        r"\bchroot\b",
-        r"\biptables\b",
-        r"\bufw\b",
-        r"\bnft\b",
-        r"\bss\b",
-        r"\bnetstat\b",
-        r"\blsof\b",
-        r"\bps\b",
-        r"\btop\b",
-        r"\bhtop\b",
-        r"/proc/",
-        r"/sys/",
-    ]
+    # Load patterns dynamically from config if not provided
+    if blocked_patterns is None:
+        from .dangerous_patterns_loader import load_dangerous_patterns
+        patterns = load_dangerous_patterns()
+    else:
+        patterns = blocked_patterns
 
     async def dangerous_command_hook(
         input_data: dict[str, Any],

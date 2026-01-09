@@ -1,0 +1,33 @@
+patterns:
+  - pattern: '\bkill\b'
+    test-exploit-string: 'kill -9 1234'
+    
+  - pattern: '\bpkill\b'
+    test-exploit-string: 'pkill python'
+    
+  - pattern: '\bkillall\b'
+    test-exploit-string: 'killall nginx'
+    
+  - pattern: '\bshutdown\b'
+    test-exploit-string: 'shutdown now'
+    
+  - pattern: '\breboot\b'
+    test-exploit-string: 'reboot'
+    
+  - pattern: '\bpoweroff\b'
+    test-exploit-string: 'poweroff'
+    
+  - pattern: '\bhalt\b'
+    test-exploit-string: 'halt'
+    
+  - pattern: '\binit\b'
+    test-exploit-string: 'init 0'
+    
+  - pattern: '\btelinit\b'
+    test-exploit-string: 'telinit 6'
+    
+  - pattern: '\bsystemctl\b'
+    test-exploit-string: 'systemctl stop firewall'
+    
+  - pattern: '\bservice\b'
+    test-exploit-string: 'service nginx restart'

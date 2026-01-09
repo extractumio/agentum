@@ -21,6 +21,7 @@ services:
       - ./prompts:/prompts:ro
       - ./skills:/skills:ro
       - ./tools:/tools:ro
+      - ./tests:/tests:ro  # Tests mounted read-only for ./deploy.sh test
     ports:
       - "${AGENTUM_API_PORT:-40080}:40080"
     cap_add:

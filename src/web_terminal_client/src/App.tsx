@@ -35,6 +35,7 @@ type ConversationItem =
       structuredStatus?: ResultStatus;
       structuredError?: string;
       structuredFields?: Record<string, string>;
+      isStreaming?: boolean;
     }
   | {
       type: 'output';
@@ -115,6 +116,90 @@ const TOOL_SYMBOL: Record<string, string> = {
   Output: '◈',
   Think: '◇',
 };
+
+// Copy to clipboard utilities
+async function copyAsRichText(element: HTMLElement): Promise<boolean> {
+  try {
+    const html = element.innerHTML;
+    const text = element.innerText;
+    
+    const htmlBlob = new Blob([html], { type: 'text/html' });
+    const textBlob = new Blob([text], { type: 'text/plain' });
+    
+    const clipboardItem = new ClipboardItem({
+      'text/html': htmlBlob,
+      'text/plain': textBlob,
+    });
+    
+    await navigator.clipboard.write([clipboardItem]);
+    return true;
+  } catch (err) {
+    console.error('Failed to copy rich text:', err);
+    return false;
+  }
+}
+
+async function copyAsMarkdown(markdown: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(markdown);
+    return true;
+  } catch (err) {
+    console.error('Failed to copy markdown:', err);
+    return false;
+  }
+}
+
+function CopyButtons({
+  contentRef,
+  markdown,
+  className = '',
+}: {
+  contentRef: React.RefObject<HTMLElement | null>;
+  markdown: string;
+  className?: string;
+}): JSX.Element {
+  const [copiedRich, setCopiedRich] = useState(false);
+  const [copiedMd, setCopiedMd] = useState(false);
+
+  const handleCopyRich = async () => {
+    if (contentRef.current) {
+      const success = await copyAsRichText(contentRef.current);
+      if (success) {
+        setCopiedRich(true);
+        setTimeout(() => setCopiedRich(false), 1500);
+      }
+    }
+  };
+
+  const handleCopyMd = async () => {
+    const success = await copyAsMarkdown(markdown);
+    if (success) {
+      setCopiedMd(true);
+      setTimeout(() => setCopiedMd(false), 1500);
+    }
+  };
+
+  return (
+    <div className={`copy-buttons ${className}`}>
+      <button
+        type="button"
+        className={`copy-button ${copiedRich ? 'copied' : ''}`}
+        onClick={handleCopyRich}
+        title="Copy as rich text (with formatting)"
+      >
+        {copiedRich ? '✓' : '⎘'} rich
+      </button>
+      <button
+        type="button"
+        className={`copy-button ${copiedMd ? 'copied' : ''}`}
+        onClick={handleCopyMd}
+        title="Copy as markdown"
+      >
+        {copiedMd ? '✓' : '⎘'} md
+      </button>
+    </div>
+  );
+}
 
 const OUTPUT_STATUS_CLASS: Record<string, string> = {
   complete: 'output-status-complete',
@@ -627,6 +712,111 @@ function ToolTag({ type, count, showSymbol = true }: { type: string; count?: num
   );
 }
 
+function SubagentTag({ name, count }: { name: string; count?: number }): JSX.Element {
+  return (
+    <span className="subagent-tag-stat">
+      <span className="subagent-icon">◈</span>
+      <span className="subagent-name">{name}</span>
+      {count !== undefined && (
+        <span className="subagent-count">×{count}</span>
+      )}
+    </span>
+  );
+}
+
+function generateConversationMarkdown(conversation: ConversationItem[]): string {
+  const lines: string[] = [];
+  
+  conversation.forEach((item) => {
+    if (item.type === 'user') {
+      lines.push(`## User @ ${item.time}\n`);
+      lines.push(item.content);
+      lines.push('\n---\n');
+    } else if (item.type === 'agent_message') {
+      lines.push(`## Agent @ ${item.time}\n`);
+      if (item.content) {
+        lines.push(item.content);
+      }
+      if (item.toolCalls.length > 0) {
+        lines.push('\n### Tool Calls\n');
+        item.toolCalls.forEach((tool) => {
+          lines.push(`- **${tool.tool}** @ ${tool.time}`);
+          if (tool.input) {
+            lines.push(`  - Input: \`${JSON.stringify(tool.input).slice(0, 100)}...\``);
+          }
+        });
+      }
+      if (item.subagents.length > 0) {
+        lines.push('\n### SubAgents\n');
+        item.subagents.forEach((subagent) => {
+          lines.push(`- **${subagent.name}** @ ${subagent.time} (${subagent.status})`);
+        });
+      }
+      lines.push('\n---\n');
+    } else if (item.type === 'output') {
+      lines.push(`## Output @ ${item.time} [${item.status}]\n`);
+      lines.push(item.output);
+      if (item.error) {
+        lines.push(`\n**Error:** ${item.error}`);
+      }
+      lines.push('\n---\n');
+    }
+  });
+  
+  return lines.join('\n');
+}
+
+function FooterCopyButtons({
+  conversation,
+  outputRef,
+}: {
+  conversation: ConversationItem[];
+  outputRef: React.RefObject<HTMLDivElement | null>;
+}): JSX.Element {
+  const [copiedRich, setCopiedRich] = useState(false);
+  const [copiedMd, setCopiedMd] = useState(false);
+
+  const handleCopyRich = async () => {
+    if (outputRef.current) {
+      const success = await copyAsRichText(outputRef.current);
+      if (success) {
+        setCopiedRich(true);
+        setTimeout(() => setCopiedRich(false), 1500);
+      }
+    }
+  };
+
+  const handleCopyMd = async () => {
+    const markdown = generateConversationMarkdown(conversation);
+    const success = await copyAsMarkdown(markdown);
+    if (success) {
+      setCopiedMd(true);
+      setTimeout(() => setCopiedMd(false), 1500);
+    }
+  };
+
+  return (
+    <div className="footer-copy-buttons">
+      <button
+        type="button"
+        className={`footer-copy-button ${copiedRich ? 'copied' : ''}`}
+        onClick={handleCopyRich}
+        title="Copy entire conversation as rich text (with formatting)"
+      >
+        {copiedRich ? '✓' : '⎘'} rich
+      </button>
+      <button
+        type="button"
+        className={`footer-copy-button ${copiedMd ? 'copied' : ''}`}
+        onClick={handleCopyMd}
+        title="Copy entire conversation as markdown"
+      >
+        {copiedMd ? '✓' : '⎘'} md
+      </button>
+    </div>
+  );
+}
+
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 function AgentSpinner(): JSX.Element {
@@ -638,6 +828,11 @@ function AgentSpinner(): JSX.Element {
       <span className="agent-spinner-label">processing...</span>
     </span>
   );
+}
+
+function InlineStreamSpinner(): JSX.Element {
+  const frame = useSpinnerFrame();
+  return <span className="inline-stream-spinner">{SPINNER_FRAMES[frame]}</span>;
 }
 
 function StatusSpinner(): JSX.Element {
@@ -694,15 +889,42 @@ function TodoProgressList({
   );
 }
 
-function MessageBlock({ sender, time, content }: { sender: string; time: string; content: string }): JSX.Element {
+function MessageBlock({ 
+  sender, 
+  time, 
+  content,
+  rightPanelCollapsed,
+  isMobile,
+}: { 
+  sender: string; 
+  time: string; 
+  content: string;
+  rightPanelCollapsed: boolean;
+  isMobile: boolean;
+}): JSX.Element {
+  const contentRef = useRef<HTMLDivElement>(null);
+  
+  // Match the layout of agent messages
+  const showRightPanel = isMobile ? false : !rightPanelCollapsed;
+
   return (
-    <div className="message-block user-message">
+    <div className={`message-block user-message ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
         <span className="message-icon">⟩</span>
         <span className="message-sender">{sender}</span>
         <span className="message-time">@ {time}</span>
+        <CopyButtons contentRef={contentRef} markdown={content} className="message-header-copy-buttons" />
       </div>
-      <div className="message-content">{content}</div>
+      <div className="message-body">
+        <div className={`message-column-left ${!showRightPanel ? 'full-width' : ''}`}>
+          <div ref={contentRef} className="message-content">{content}</div>
+        </div>
+        {showRightPanel && (
+          <div className="message-column-right">
+            {/* Empty right panel for consistent layout */}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -924,6 +1146,7 @@ function ResultSection({
 }
 
 function AgentMessageBlock({
+  id,
   time,
   content,
   toolCalls,
@@ -942,7 +1165,13 @@ function AgentMessageBlock({
   files,
   filesExpanded,
   onToggleFiles,
+  isStreaming,
+  rightPanelCollapsed,
+  isMobile,
+  mobileExpanded,
+  onToggleMobileExpand,
 }: {
+  id: string;
   time: string;
   content: string;
   toolCalls: ToolCallView[];
@@ -961,26 +1190,62 @@ function AgentMessageBlock({
   files?: string[];
   filesExpanded?: boolean;
   onToggleFiles?: () => void;
+  isStreaming?: boolean;
+  rightPanelCollapsed: boolean;
+  isMobile: boolean;
+  mobileExpanded: boolean;
+  onToggleMobileExpand: () => void;
 }): JSX.Element {
+  const contentRef = useRef<HTMLDivElement>(null);
   const statusClass = status ? `agent-status-${status}` : '';
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
   const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
   const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
+  // Show inline spinner when streaming and no tool calls or subagents
+  const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
+
+  const hasRightContent = toolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
+  
+  // Determine if right panel should be shown
+  // Desktop: always show unless collapsed (even if empty)
+  // Mobile: only show when expanded AND has content (no point showing empty panel on mobile)
+  let showRightPanel = false;
+  if (isMobile) {
+    showRightPanel = hasRightContent && mobileExpanded;
+  } else {
+    showRightPanel = !rightPanelCollapsed;
+  }
 
   return (
-    <div className={`message-block agent-message ${statusClass}`}>
+    <div className={`message-block agent-message ${statusClass} ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
         <span className="message-icon">◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
+        {content && <CopyButtons contentRef={contentRef} markdown={content} className="message-header-copy-buttons" />}
+        {isMobile && hasRightContent && (
+          <button 
+            type="button" 
+            className={`mobile-expand-button ${mobileExpanded ? 'expanded' : ''}`}
+            onClick={onToggleMobileExpand}
+            title={mobileExpanded ? 'Hide details' : 'Show details'}
+          >
+            {mobileExpanded ? '▲ Hide' : '▼ Details'} ({toolCalls.length + subagents.length})
+          </button>
+        )}
       </div>
       <div className="message-body">
-        <div className="message-column-left">
-          <div className="message-content md-container">
-            {content ? renderMarkdown(content) : null}
-            {!content && !isTerminalStatus && <AgentSpinner />}
+        <div className={`message-column-left ${!showRightPanel ? 'full-width' : ''}`}>
+          <div ref={contentRef} className="message-content md-container">
+            {content ? (
+              <>
+                {renderMarkdown(content)}
+                {showInlineSpinner && <InlineStreamSpinner />}
+              </>
+            ) : null}
+            {!content && !isTerminalStatus && !showInlineSpinner && <AgentSpinner />}
             {!content && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
@@ -999,50 +1264,53 @@ function AgentMessageBlock({
             )}
           </div>
         </div>
-        <div className="message-column-right">
-          {toolCalls.length > 0 && (
-            <div className="tool-call-section">
-              <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
-              {toolCalls.map((tool, index) => (
-                <ToolCallBlock
-                  key={tool.id}
-                  tool={tool}
-                  expanded={toolExpanded.has(tool.id)}
-                  onToggle={() => onToggleTool(tool.id)}
-                  isLast={index === toolCalls.length - 1}
-                />
-              ))}
-            </div>
-          )}
-          {subagents.length > 0 && (
-            <div className="subagent-section">
-              <div className="subagent-title">SubAgents ({subagents.length})</div>
-              {subagents.map((subagent, index) => (
-                <SubagentBlock
-                  key={subagent.id}
-                  subagent={subagent}
-                  expanded={subagentExpanded.has(subagent.id)}
-                  onToggle={() => onToggleSubagent(subagent.id)}
-                  isLast={index === subagents.length - 1}
-                />
-              ))}
-            </div>
-          )}
-          <ResultSection
-            comments={comments}
-            commentsExpanded={commentsExpanded}
-            onToggleComments={onToggleComments}
-            files={files}
-            filesExpanded={filesExpanded}
-            onToggleFiles={onToggleFiles}
-          />
-        </div>
+        {showRightPanel && (
+          <div className={`message-column-right ${isMobile ? 'mobile-stacked' : ''}`}>
+            {toolCalls.length > 0 && (
+              <div className="tool-call-section">
+                <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
+                {toolCalls.map((tool, index) => (
+                  <ToolCallBlock
+                    key={tool.id}
+                    tool={tool}
+                    expanded={toolExpanded.has(tool.id)}
+                    onToggle={() => onToggleTool(tool.id)}
+                    isLast={index === toolCalls.length - 1}
+                  />
+                ))}
+              </div>
+            )}
+            {subagents.length > 0 && (
+              <div className="subagent-section">
+                <div className="subagent-title">SubAgents ({subagents.length})</div>
+                {subagents.map((subagent, index) => (
+                  <SubagentBlock
+                    key={subagent.id}
+                    subagent={subagent}
+                    expanded={subagentExpanded.has(subagent.id)}
+                    onToggle={() => onToggleSubagent(subagent.id)}
+                    isLast={index === subagents.length - 1}
+                  />
+                ))}
+              </div>
+            )}
+            <ResultSection
+              comments={comments}
+              commentsExpanded={commentsExpanded}
+              onToggleComments={onToggleComments}
+              files={files}
+              filesExpanded={filesExpanded}
+              onToggleFiles={onToggleFiles}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 function OutputBlock({
+  id,
   time,
   output,
   comments,
@@ -1054,7 +1322,12 @@ function OutputBlock({
   status,
   error,
   onFileAction,
+  rightPanelCollapsed,
+  isMobile,
+  mobileExpanded,
+  onToggleMobileExpand,
 }: {
+  id: string;
   time: string;
   output: string;
   comments?: string;
@@ -1066,18 +1339,43 @@ function OutputBlock({
   status: ResultStatus;
   error?: string;
   onFileAction: (filePath: string, mode: 'view' | 'download') => void;
+  rightPanelCollapsed: boolean;
+  isMobile: boolean;
+  mobileExpanded: boolean;
+  onToggleMobileExpand: () => void;
 }): JSX.Element {
   const statusClass = OUTPUT_STATUS_CLASS[status] ?? '';
+  const hasRightContent = Boolean(comments) || files.length > 0;
+  
+  // Determine if right panel should be shown
+  // Desktop: always show unless collapsed (even if empty)
+  // Mobile: only show when expanded AND has content
+  let showRightPanel = false;
+  if (isMobile) {
+    showRightPanel = hasRightContent && mobileExpanded;
+  } else {
+    showRightPanel = !rightPanelCollapsed;
+  }
 
   return (
-    <div className={`message-block output-block ${statusClass}`}>
+    <div className={`message-block output-block ${statusClass} ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
         <span className="message-icon">◆</span>
         <span className="message-sender">OUTPUT</span>
         <span className="message-time">@ {time}</span>
+        {isMobile && hasRightContent && (
+          <button 
+            type="button" 
+            className={`mobile-expand-button ${mobileExpanded ? 'expanded' : ''}`}
+            onClick={onToggleMobileExpand}
+            title={mobileExpanded ? 'Hide details' : 'Show details'}
+          >
+            {mobileExpanded ? '▲ Hide' : '▼ Details'}
+          </button>
+        )}
       </div>
       <div className="message-body">
-        <div className="message-column-left">
+        <div className={`message-column-left ${!showRightPanel ? 'full-width' : ''}`}>
           <div className="message-content md-container">
             {output
               ? (
@@ -1088,17 +1386,19 @@ function OutputBlock({
               : 'No output yet.'}
           </div>
         </div>
-        <div className="message-column-right">
-          <ResultSection
-            comments={comments}
-            commentsExpanded={commentsExpanded}
-            onToggleComments={onToggleComments}
-            files={files}
-            filesExpanded={filesExpanded}
-            onToggleFiles={onToggleFiles}
-            onFileAction={onFileAction}
-          />
-        </div>
+        {showRightPanel && (
+          <div className={`message-column-right ${isMobile ? 'mobile-stacked' : ''}`}>
+            <ResultSection
+              comments={comments}
+              commentsExpanded={commentsExpanded}
+              onToggleComments={onToggleComments}
+              files={files}
+              filesExpanded={filesExpanded}
+              onToggleFiles={onToggleFiles}
+              onFileAction={onFileAction}
+            />
+          </div>
+        )}
       </div>
       {error && <div className="output-error">{error}</div>}
     </div>
@@ -1413,6 +1713,41 @@ function StatusFooter({
   );
 }
 
+// Cookie/localStorage helpers for panel preference
+function getStoredPanelCollapsed(): boolean {
+  try {
+    const stored = localStorage.getItem('agentum_right_panel_collapsed');
+    return stored === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setStoredPanelCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem('agentum_right_panel_collapsed', collapsed ? 'true' : 'false');
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+// Detect mobile viewport
+function useIsMobile(breakpoint: number = 768): boolean {
+  const [isMobile, setIsMobile] = useState(() => 
+    typeof window !== 'undefined' && window.innerWidth < breakpoint
+  );
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < breakpoint);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [breakpoint]);
+
+  return isMobile;
+}
+
 export default function App(): JSX.Element {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('agentum_token'));
@@ -1430,6 +1765,8 @@ export default function App(): JSX.Element {
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>(AVAILABLE_MODELS[0]);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => getStoredPanelCollapsed());
+  const [mobileExpandedMessages, setMobileExpandedMessages] = useState<Set<string>>(new Set());
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -1438,6 +1775,8 @@ export default function App(): JSX.Element {
     tokensOut: 0,
     model: '',
   });
+  
+  const isMobile = useIsMobile();
 
   const outputRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -1660,6 +1999,23 @@ export default function App(): JSX.Element {
       if (event.type === 'error') {
         setStatus('failed');
         setError(String(event.data.message ?? 'Unknown error'));
+        // Update session status so next submit can continue rather than reset
+        setCurrentSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: 'failed',
+                completed_at: new Date().toISOString(),
+              }
+            : null
+        );
+        setSessions((prevSessions) =>
+          prevSessions.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: 'failed' }
+              : session
+          )
+        );
         if (currentSession) {
           void syncSessionEvents(currentSession.id, currentSession);
         }
@@ -1907,6 +2263,7 @@ export default function App(): JSX.Element {
     setExpandedComments(new Set());
     setExpandedFiles(new Set());
     setAttachedFiles([]);
+    setMobileExpandedMessages(new Set());
     setStats({
       turns: 0,
       cost: 0,
@@ -1916,6 +2273,26 @@ export default function App(): JSX.Element {
       model: '',
     });
   };
+
+  const toggleRightPanel = useCallback(() => {
+    setRightPanelCollapsed((prev) => {
+      const next = !prev;
+      setStoredPanelCollapsed(next);
+      return next;
+    });
+  }, []);
+
+  const toggleMobileMessageExpand = useCallback((id: string) => {
+    setMobileExpandedMessages((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
 
   const conversation = useMemo<ConversationItem[]>(() => {
     const sortedEvents = [...events].sort((a, b) => {
@@ -2054,6 +2431,14 @@ export default function App(): JSX.Element {
             input: toolInput ?? '',
           });
 
+          // Stop streaming indicator when tools start
+          if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
+            (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
+          }
+          if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+            (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
+          }
+
           if (toolInput && fileToolPattern.test(toolName)) {
             extractFilePaths(toolInput).forEach((path) => pendingFiles.add(path));
           }
@@ -2094,16 +2479,21 @@ export default function App(): JSX.Element {
                 content: streamBuffer,
                 toolCalls: pendingTools,
                 subagents: pendingSubagents,
+                isStreaming: true,
               };
               if (!existing) {
                 items.push(currentStreamMessage);
-              } else if (pendingTools.length > 0) {
+              } else if (pendingTools.length > 0 && currentStreamMessage.type === 'agent_message') {
                 currentStreamMessage.toolCalls = pendingTools;
+              }
+              if (currentStreamMessage.type === 'agent_message') {
+                (currentStreamMessage as { isStreaming?: boolean }).isStreaming = true;
               }
               pendingTools = [];
               pendingSubagents = [];
-            } else {
+            } else if (currentStreamMessage.type === 'agent_message') {
               currentStreamMessage.content = streamBuffer;
+              (currentStreamMessage as { isStreaming?: boolean }).isStreaming = true;
             }
             break;
           }
@@ -2144,11 +2534,13 @@ export default function App(): JSX.Element {
             : parseStructuredMessage(finalText);
           const bodyText = structuredInfo.body;
 
-          if (currentStreamMessage) {
+          if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
             currentStreamMessage.content = bodyText;
             currentStreamMessage.structuredStatus = structuredInfo.status;
             currentStreamMessage.structuredError = structuredInfo.error;
             currentStreamMessage.structuredFields = structuredInfo.fields;
+            // Keep streaming indicator if no tools/subagents and still running
+            (currentStreamMessage as { isStreaming?: boolean }).isStreaming = pendingTools.length === 0 && pendingSubagents.length === 0;
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
           } else if (bodyText || pendingTools.length > 0) {
@@ -2163,6 +2555,7 @@ export default function App(): JSX.Element {
               structuredStatus: structuredInfo.status,
               structuredError: structuredInfo.error,
               structuredFields: structuredInfo.fields,
+              isStreaming: pendingTools.length === 0 && pendingSubagents.length === 0,
             };
             if (existing) {
               Object.assign(existing, agentMessage);
@@ -2181,8 +2574,9 @@ export default function App(): JSX.Element {
         case 'agent_complete': {
           const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as ResultStatus;
 
-          if (currentStreamMessage) {
+          if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
             currentStreamMessage.content = streamBuffer.trim();
+            (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
             streamBuffer = '';
@@ -2196,6 +2590,7 @@ export default function App(): JSX.Element {
               content: '',
               toolCalls: pendingTools,
               subagents: pendingSubagents,
+              isStreaming: false,
             };
             items.push(toolMessage);
             pendingTools = [];
@@ -2205,8 +2600,9 @@ export default function App(): JSX.Element {
 
           attachFilesToMessage(lastAgentMessage);
 
-          if (lastAgentMessage) {
+          if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
             lastAgentMessage.status = lastAgentMessage.structuredStatus ?? statusValue;
+            (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
           }
           break;
         }
@@ -2252,6 +2648,14 @@ export default function App(): JSX.Element {
           };
           pendingSubagents.push(subagent);
           activeSubagentMap.set(taskId, subagent);
+
+          // Stop streaming indicator when subagents start
+          if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
+            (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
+          }
+          if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+            (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
+          }
           break;
         }
         case 'subagent_message': {
@@ -2307,6 +2711,21 @@ export default function App(): JSX.Element {
   }, [conversation]);
 
   const totalToolCalls = Object.values(toolStats).reduce((sum, count) => sum + count, 0);
+
+  const subagentStats = useMemo(() => {
+    const statsMap: Record<string, number> = {};
+    conversation.forEach((item) => {
+      if (item.type === 'agent_message') {
+        item.subagents.forEach((subagent) => {
+          const subagentName = subagent.name;
+          statsMap[subagentName] = (statsMap[subagentName] ?? 0) + 1;
+        });
+      }
+    });
+    return statsMap;
+  }, [conversation]);
+
+  const totalSubagentCalls = Object.values(subagentStats).reduce((sum, count) => sum + count, 0);
 
   const headerStats = useMemo(() => {
     const counts = { complete: 0, partial: 0, failed: 0 };
@@ -2629,7 +3048,22 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <main className="terminal-body">
+      <main className={`terminal-body ${rightPanelCollapsed ? 'panel-collapsed' : ''}`}>
+        {/* Panel toggle - vertical gutter or edge tab */}
+        {!isMobile && (
+          <div 
+            className={`panel-toggle-edge ${rightPanelCollapsed ? 'collapsed' : ''}`}
+            onClick={toggleRightPanel}
+            title={rightPanelCollapsed ? 'Show details panel' : 'Hide details panel'}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleRightPanel(); }}
+          >
+            <span className="panel-toggle-icon">
+              {rightPanelCollapsed ? '◂' : '▸'}
+            </span>
+          </div>
+        )}
         <div ref={outputRef} className="terminal-output">
           {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
@@ -2643,6 +3077,8 @@ export default function App(): JSX.Element {
                       sender="USER"
                       time={item.time}
                       content={item.content}
+                      rightPanelCollapsed={rightPanelCollapsed}
+                      isMobile={isMobile}
                     />
                   );
                 }
@@ -2653,9 +3089,12 @@ export default function App(): JSX.Element {
                   const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
                   const todoPayload = todosByAgentId.get(item.id);
                   const todos = todoPayload?.todos ?? null;
+                  // Only show streaming on the last agent message when overall status is running
+                  const showStreaming = item.isStreaming && isLastAgentMessage && status === 'running';
                   return (
                     <AgentMessageBlock
                       key={item.id}
+                      id={item.id}
                       time={item.time}
                       content={item.content}
                       toolCalls={item.toolCalls}
@@ -2674,6 +3113,11 @@ export default function App(): JSX.Element {
                       files={item.files}
                       filesExpanded={expandedFiles.has(item.id)}
                       onToggleFiles={() => toggleFiles(item.id)}
+                      isStreaming={showStreaming}
+                      rightPanelCollapsed={rightPanelCollapsed}
+                      isMobile={isMobile}
+                      mobileExpanded={mobileExpandedMessages.has(item.id)}
+                      onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
                     />
                   );
                 }
@@ -2681,6 +3125,7 @@ export default function App(): JSX.Element {
                   return (
                     <OutputBlock
                       key={item.id}
+                      id={item.id}
                       time={item.time}
                       output={item.output}
                       comments={item.comments}
@@ -2692,6 +3137,10 @@ export default function App(): JSX.Element {
                       status={item.status}
                       error={item.error}
                       onFileAction={handleFileAction}
+                      rightPanelCollapsed={rightPanelCollapsed}
+                      isMobile={isMobile}
+                      mobileExpanded={mobileExpandedMessages.has(item.id)}
+                      onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
                     />
                   );
                 }
@@ -2720,11 +3169,24 @@ export default function App(): JSX.Element {
       </main>
 
       <div className="terminal-footer">
-        <div className="tool-usage-bar">
-          <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
-          {Object.keys(toolStats).map((tool) => (
-            <ToolTag key={tool} type={tool} count={toolStats[tool]} />
-          ))}
+        <div className="usage-bar-row">
+          <FooterCopyButtons conversation={conversation} outputRef={outputRef} />
+        </div>
+        <div className="usage-bar-row">
+          <div className="tool-usage-bar">
+            <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
+            {Object.keys(toolStats).map((tool) => (
+              <ToolTag key={tool} type={tool} count={toolStats[tool]} />
+            ))}
+          </div>
+          {totalSubagentCalls > 0 && (
+            <div className="subagent-usage-bar">
+              <span className="subagent-usage-label">SubAgents ({totalSubagentCalls} calls):</span>
+              {Object.keys(subagentStats).map((name) => (
+                <SubagentTag key={name} name={name} count={subagentStats[name]} />
+              ))}
+            </div>
+          )}
         </div>
         <div className="input-wrapper">
           <InputField

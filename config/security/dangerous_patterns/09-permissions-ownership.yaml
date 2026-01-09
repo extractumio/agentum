@@ -1,0 +1,18 @@
+patterns:
+  - pattern: '\bchmod\b'
+    test-exploit-string: 'chmod 777 /etc/passwd'
+    
+  - pattern: '\bchown\b'
+    test-exploit-string: 'chown root:root /tmp/malware'
+    
+  - pattern: '\bchgrp\b'
+    test-exploit-string: 'chgrp wheel file'
+    
+  - pattern: '\bchattr\b'
+    test-exploit-string: 'chattr +i /etc/passwd'
+    
+  - pattern: '\bsetfacl\b'
+    test-exploit-string: 'setfacl -m u:user:rwx file'
+    
+  - pattern: '\bgetfacl\b'
+    test-exploit-string: 'getfacl /etc/shadow'

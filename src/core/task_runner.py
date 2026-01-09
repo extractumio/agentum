@@ -83,7 +83,8 @@ async def execute_agent_task(
         params.timeout_seconds if params.timeout_seconds is not None
         else config_data["timeout_seconds"]
     )
-    permission_mode = params.permission_mode or config_data["permission_mode"]
+    # permission_mode is optional and managed via permissions.yaml
+    permission_mode = params.permission_mode or config_data.get("permission_mode")
     role = params.role or config_data["role"]
 
     # Skills and checkpointing (with override support)

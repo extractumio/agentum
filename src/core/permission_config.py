@@ -706,10 +706,13 @@ class PermissionConfigManager:
         """
         Check if a tool call is allowed based on permissions.
 
-        Logic:
-        1. Check allow rules first - specific allows override generic denies
-        2. Check deny rules - if no allow matched, check if denied
+        Logic (SECURITY-FIRST ORDER):
+        1. Check deny rules FIRST - explicit denies always block
+        2. Check allow rules - if not denied, check if explicitly allowed
         3. Default to denied for security
+
+        This order ensures that deny rules like Bash(ps *) take precedence
+        over broad allow rules like Bash(*), preventing security bypasses.
 
         Args:
             tool_call: Tool call string, e.g., "Bash(git commit -m 'test')"
@@ -719,19 +722,19 @@ class PermissionConfigManager:
         """
         config = self.load()
 
-        # Check allow rules first - specific allows take precedence
-        # This allows patterns like Write(./sessions/**) to work
-        # even when Write(**) is in deny list
-        for pattern in config.permissions.allow:
-            if self._matches_pattern(tool_call, pattern):
-                logger.debug(f"Tool {tool_call} allowed by pattern {pattern}")
-                return True
-
-        # Check deny rules - if not explicitly allowed, check if denied
+        # SECURITY: Check deny rules FIRST - explicit denies always win
+        # This prevents broad allow patterns like Bash(*) from defeating
+        # specific deny patterns like Bash(ps *) or Bash(kill *)
         for pattern in config.permissions.deny:
             if self._matches_pattern(tool_call, pattern):
                 logger.debug(f"Tool {tool_call} denied by pattern {pattern}")
                 return False
+
+        # Check allow rules - if not denied, check if explicitly allowed
+        for pattern in config.permissions.allow:
+            if self._matches_pattern(tool_call, pattern):
+                logger.debug(f"Tool {tool_call} allowed by pattern {pattern}")
+                return True
 
         # Default behavior based on mode
         if config.defaultMode == PermissionMode.BYPASS:

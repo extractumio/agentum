@@ -1,0 +1,18 @@
+patterns:
+  - pattern: '\bdocker\b'
+    test-exploit-string: 'docker run --privileged -it ubuntu'
+    
+  - pattern: '\bpodman\b'
+    test-exploit-string: 'podman exec container bash'
+    
+  - pattern: '\brunc\b'
+    test-exploit-string: 'runc run container'
+    
+  - pattern: '\bctr\b'
+    test-exploit-string: 'ctr containers list'
+    
+  - pattern: '\bnerdctl\b'
+    test-exploit-string: 'nerdctl run container'
+    
+  - pattern: '\bkubectl\b'
+    test-exploit-string: 'kubectl delete pod mypod'

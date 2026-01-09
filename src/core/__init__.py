@@ -84,6 +84,12 @@ from .permissions import (
     create_permission_callback,
     create_permission_hooks,
 )
+from .dangerous_patterns_loader import (
+    DangerousPatternsLoader,
+    PatternsLoadError,
+    load_dangerous_patterns,
+    get_patterns_loader,
+)
 from .schemas import (
     AgentConfig,
     AgentResult,
@@ -188,6 +194,11 @@ __all__ = [
     "load_permissions_from_config",
     "create_permission_callback",
     "create_permission_hooks",
+    # Dangerous Patterns
+    "DangerousPatternsLoader",
+    "PatternsLoadError",
+    "load_dangerous_patterns",
+    "get_patterns_loader",
     # Schemas
     "AgentConfig",
     "AgentResult",

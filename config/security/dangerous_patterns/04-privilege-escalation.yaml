@@ -1,0 +1,12 @@
+patterns:
+  - pattern: '\bsudo\b'
+    test-exploit-string: 'sudo rm -rf /'
+    
+  - pattern: '\bsu\b'
+    test-exploit-string: 'su - root'
+    
+  - pattern: '\bsudoedit\b'
+    test-exploit-string: 'sudoedit /etc/passwd'
+    
+  - pattern: '\bvisudo\b'
+    test-exploit-string: 'visudo'

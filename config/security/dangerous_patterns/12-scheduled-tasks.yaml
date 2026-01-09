@@ -1,0 +1,9 @@
+patterns:
+  - pattern: '\bcrontab\b'
+    test-exploit-string: 'crontab -e'
+    
+  - pattern: '\bat\b'
+    test-exploit-string: 'at now + 1 hour'
+    
+  - pattern: '\bbatch\b'
+    test-exploit-string: 'batch'

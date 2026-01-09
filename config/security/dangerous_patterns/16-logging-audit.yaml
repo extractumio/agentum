@@ -1,0 +1,9 @@
+patterns:
+  - pattern: '\bjournalctl\b'
+    test-exploit-string: 'journalctl -xe'
+    
+  - pattern: '\bauditctl\b'
+    test-exploit-string: 'auditctl -D'
+    
+  - pattern: '\bauditd\b'
+    test-exploit-string: 'auditd restart'

@@ -615,6 +615,16 @@ body,
   font-style: italic;
 }
 
+/* Inline stream spinner - appears at end of streaming text */
+.inline-stream-spinner {
+  display: inline;
+  margin-left: 0.25em;
+  color: var(--color-cyan);
+  font-family: monospace;
+  font-size: inherit;
+  vertical-align: baseline;
+}
+
 .tool-call-section {
   margin-top: 8px;
   padding-bottom: 10px;
@@ -1593,4 +1603,407 @@ body,
   padding-bottom: 6px;
   border-left: 1px dashed var(--color-border);
   margin-left: 6px;
+}
+
+/* Message copy buttons in header */
+.copy-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.message-header-copy-buttons {
+  margin-left: auto;
+}
+
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  color: var(--color-dim);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.copy-button:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+}
+
+.copy-button.copied {
+  border-color: var(--color-green);
+  color: var(--color-green);
+  background: rgba(125, 211, 163, 0.1);
+}
+
+/* Footer copy buttons */
+.usage-bar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 8px 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.usage-bar-row:first-child {
+  padding-top: 12px;
+}
+
+.footer-copy-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: var(--color-dim);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.footer-copy-button:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+}
+
+.footer-copy-button.copied {
+  border-color: var(--color-green);
+  color: var(--color-green);
+  background: rgba(125, 211, 163, 0.1);
+}
+
+/* SubAgent usage bar */
+.subagent-usage-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  margin-left: 24px;
+  padding-left: 24px;
+  border-left: 1px solid var(--color-border);
+}
+
+.subagent-usage-label {
+  color: var(--color-dim);
+}
+
+.subagent-tag-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-cyan);
+}
+
+.subagent-tag-stat .subagent-icon {
+  color: var(--color-cyan);
+}
+
+.subagent-tag-stat .subagent-name {
+  color: var(--color-cyan);
+  font-weight: 500;
+}
+
+.subagent-count {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(126, 200, 212, 0.15);
+}
+
+/* Update tool-usage-bar to not have border when in usage-bar-row */
+.usage-bar-row .tool-usage-bar {
+  border-top: none;
+  padding: 0;
+}
+
+/* ==============================
+   Right Panel Collapse/Expand
+   ============================== */
+
+/* Panel toggle edge - vertical gutter/tab */
+.panel-toggle-edge {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 60px;
+  background: var(--color-bg-light);
+  border: 1px solid var(--color-border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  opacity: 0.6;
+}
+
+.panel-toggle-edge:hover {
+  opacity: 1;
+  background: var(--color-bg-lighter);
+  border-color: var(--color-cyan);
+  width: 24px;
+}
+
+.panel-toggle-edge:hover .panel-toggle-icon {
+  color: var(--color-cyan);
+}
+
+.panel-toggle-edge.collapsed {
+  background: var(--color-bg-lighter);
+  border-color: var(--color-cyan);
+  opacity: 0.8;
+}
+
+.panel-toggle-edge.collapsed:hover {
+  opacity: 1;
+  width: 28px;
+}
+
+.panel-toggle-icon {
+  color: var(--color-dim);
+  font-size: 14px;
+  transition: color 0.15s ease;
+}
+
+.panel-toggle-edge.collapsed .panel-toggle-icon {
+  color: var(--color-cyan);
+}
+
+/* Message body with collapsible right panel */
+.message-body {
+  display: flex;
+  gap: 12px;
+  transition: all 0.25s ease;
+}
+
+/* Left column when right is collapsed - takes full width */
+.message-column-left.full-width {
+  flex: 1;
+  max-width: 100%;
+}
+
+/* Right column collapse animation for desktop */
+.message-column-right {
+  flex: 0 0 40%;
+  max-width: 40%;
+  border-left: 1px solid var(--color-border);
+  padding-left: 12px;
+  transition: all 0.25s ease;
+  overflow: hidden;
+}
+
+/* When right panel is collapsed on desktop */
+.message-block.right-collapsed .message-column-left {
+  flex: 1;
+  max-width: 100%;
+}
+
+.message-block.right-collapsed .message-column-right {
+  display: none;
+}
+
+/* ==============================
+   Mobile Layout
+   ============================== */
+
+/* Mobile expand button in message header */
+.mobile-expand-button {
+  display: none;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  color: var(--color-dim);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  margin-left: auto;
+  transition: all 0.15s ease;
+}
+
+.mobile-expand-button:hover {
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+}
+
+.mobile-expand-button.expanded {
+  background: rgba(126, 200, 212, 0.1);
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+}
+
+/* Mobile responsive breakpoint */
+@media (max-width: 768px) {
+  /* Show mobile expand button */
+  .mobile-expand-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Header adjustments for mobile */
+  .terminal-header {
+    padding: 10px 16px;
+  }
+
+  .header-top {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .header-stats {
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 11px;
+  }
+
+  .header-filters {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .session-selector {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .session-current-id {
+    min-width: auto;
+    font-size: 11px;
+  }
+
+  .filter-actions {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  /* Hide desktop panel toggle on mobile */
+  .panel-toggle-edge {
+    display: none;
+  }
+
+  /* Terminal output padding for mobile */
+  .terminal-output {
+    padding: 10px 16px;
+    font-size: 14px;
+  }
+
+  /* Mobile layout for message blocks */
+  .message-block.mobile-layout .message-body {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .message-block.mobile-layout .message-column-left {
+    flex: 1;
+    max-width: 100%;
+  }
+
+  .message-block.mobile-layout .message-column-right.mobile-stacked {
+    flex: 1;
+    max-width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+    padding-left: 0;
+    padding-top: 12px;
+    margin-top: 8px;
+    animation: slideDown 0.2s ease;
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Footer adjustments for mobile */
+  .terminal-footer {
+    padding: 0 16px 10px;
+  }
+
+  .tool-usage-bar,
+  .subagent-usage-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .subagent-usage-bar {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* Input area adjustments for mobile */
+  .input-area {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .input-actions {
+    align-self: flex-end;
+  }
+
+  .input-footer {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* Status footer adjustments */
+  .terminal-status {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .status-right {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  /* Session files for mobile */
+  .session-files {
+    align-items: flex-start;
+  }
+
+  .session-files-list {
+    align-items: flex-start;
+  }
+
+  .session-file-button {
+    width: 100%;
+    max-width: none;
+    text-align: left;
+  }
 }

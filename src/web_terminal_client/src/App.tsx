@@ -1999,6 +1999,23 @@ export default function App(): JSX.Element {
       if (event.type === 'error') {
         setStatus('failed');
         setError(String(event.data.message ?? 'Unknown error'));
+        // Update session status so next submit can continue rather than reset
+        setCurrentSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: 'failed',
+                completed_at: new Date().toISOString(),
+              }
+            : null
+        );
+        setSessions((prevSessions) =>
+          prevSessions.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: 'failed' }
+              : session
+          )
+        );
         if (currentSession) {
           void syncSessionEvents(currentSession.id, currentSession);
         }
